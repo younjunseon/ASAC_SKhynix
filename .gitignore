@@ -1,0 +1,23 @@
+# 데이터 (1.2GB+)
+0_data/*.csv
+0_data/*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# 출력물 (필요시 주석 해제)
+# 4_output/
