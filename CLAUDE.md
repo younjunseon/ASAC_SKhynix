@@ -230,12 +230,18 @@ EDA 결과를 바탕으로 도출한 end-to-end 전략. 핵심은 **(1) die→un
 - 결측률 0.23% 수준(1,054개): **train set 기준 median으로 imputation** (fit on train, transform all)
 - 결측률 1~50% (약 11개): median imputation + 결측 여부 indicator 컬럼 추가 고려
 - 데이터 누수 방지: split별로 분리한 후 처리
+- **k-NN Imputation 비교 실험** (논문 1-3 근거): `sklearn.impute.KNNImputer`로 median 대비 성능 비교. k-NN이 클래스 분리에 더 효과적일 수 있음
+- **XGBoost/LightGBM 네이티브 결측 처리 실험** (XGBoost 원논문 근거): Sparsity-Aware Algorithm으로 imputation 없이 결측 처리 가능. manual imputation과 성능 비교하여 더 나은 쪽 채택
 
 ### Stage 3: 이상치 처리
 
 - **Winsorization** (상하위 1% or 5% clip): 극단값을 분위수 경계로 대체
+- **DBSCAN 기반 다변량 이상치 탐지** (논문 1-2 근거): R² 0.742→0.950 극적 개선 사례. health의 극단값이나 다변량 공간에서의 이상 패턴 탐지에 활용
+- **강건 통계 기반 이상치 처리** (논문 5-3, 5-4 근거): 단순 mean±kσ보다 **중앙값/백분위수 기반(AEC DPAT)** 또는 **Grubbs 검정 + Johnson 변환**이 우수. 로트/위치별 국소 기준이 전역 기준보다 효과적
 - 트리 기반 모델은 이상치에 비교적 강건하므로, 선형 모델용으로만 강하게 처리
 - health의 max=1.0 이상치: 제거보다는 유지 (실제 불량 제품일 가능성)
+
+> **Pre-optimization 원칙** (논문 3-3 근거, 7.9%p 향상): 이상치/노이즈 처리는 **반드시 die 레벨에서 먼저 수행**한 후 unit 레벨로 집계한다. 집계 후 처리하면 die 간 노이즈가 집계 통계에 오염됨.
 
 ### Stage 4: Die → Unit 집계 (Feature Engineering 핵심)
 
@@ -287,6 +293,11 @@ xs['die_y']    = split[3].astype(int)  # die Y 좌표
 - die→unit 집계 시: unit 내 4개 die의 `radial_dist`에 대해 mean, std, max, min 생성
 - die_x, die_y 자체도 mean, std, range로 집계 → unit의 공간 분포 특성 반영
 
+**공간 잔차 피처** (논문 5-3 NNR, 논문 5-4 GPR 근거):
+- die의 WT 측정값에서 **인접 die 가중 평균(가우시안 가중)**을 뺀 잔차(residual)를 별도 피처로 생성
+- 공간 트렌드에서 크게 벗어난 die = 불량 위험 높음 → 잠재 이상치 15.6% 추가 검출 사례
+- 구현: 같은 웨이퍼 내 die 좌표 기반 거리 가중 평균 → 잔차 계산 → die→unit 집계
+
 #### 4.5.3 로트/작업 피처 (run_id, wafer_no → 집계 통계 & 인코딩)
 
 문자열 ID는 직접 모델에 넣을 수 없으므로 수치화가 필요하다.
@@ -301,7 +312,7 @@ lot_stats = xs.groupby('run_id')[feat_cols].agg(['mean', 'std'])
 
 - run_id별: WT feature 평균, std → 로트 품질 지표
 - wafer_no별: 같은 로트 내 웨이퍼 간 차이 포착
-- **로트 내 상대 편차**: 해당 die 값 - 로트 평균 → 로트 내에서 얼마나 이탈했는지
+- **로트별 정규화 (공식 피처)** (논문 5-3 근거, Multi-Site 분리로 양품 폐기율 40%→8.9%): `(die_value - lot_mean) / lot_std` — 로트 간 공정 편차를 제거하여 die의 상대적 이탈 정도를 수치화. 단순 편차보다 정규화된 z-score가 로트 간 비교 가능
 
 **방법 B: Target Encoding (성능 향상 기대, 누수 주의)**
 
@@ -348,15 +359,20 @@ from category_encoders import TargetEncoder
 
 1,087개에서 집계로 ~6,720개로 확장되므로 선별이 필수.
 
-1. **분산 기반 제거** → 2. **높은 상관 쌍 제거** (|r|>0.95) → 3. **Boruta** → 4. **LightGBM importance + Null Importance** → 5. **Permutation Importance 검증**
+1. **분산 기반 제거** → 2. **높은 상관 쌍 제거** (|r|>0.95) → 3. **Boruta** → 4. **LightGBM importance + Null Importance** → 5. **Permutation Importance 검증** → 6. **투표 기반 최종 선정**
+
+**투표 기반 피처 선택** (논문 1-3 근거, 12가지 알고리즘 투표로 robust 선정):
+- 3~5번 단계(Boruta, LightGBM importance, Null Importance, Permutation Importance) 결과를 교차 검증
+- **최종 피처 = 3가지 이상 방법에서 동시에 선택된 피처**만 채택
+- 단일 방법의 편향을 줄이고, 다수 알고리즘이 합의한 피처만 남겨 노이즈 피처 혼입을 방지
 
 ### Stage 7: 모델링
 
 #### 7-A: Baseline 비교 (Cross Validation + cuML GPU 가속)
 
-전처리 완료된 데이터에 **기본 파라미터**로 9개 모델을 돌려 RMSE를 한눈에 비교한다. 스케일링은 선형/딥러닝 모델에 필요하지만, 트리 모델은 스케일링해도 결과가 동일하므로 **RobustScaler 적용한 데이터 1벌**로 전체 모델을 통일한다.
+전처리 완료된 데이터에 **기본 파라미터**로 10개 모델을 돌려 RMSE를 한눈에 비교한다. 스케일링은 선형/딥러닝 모델에 필요하지만, 트리 모델은 스케일링해도 결과가 동일하므로 **RobustScaler 적용한 데이터 1벌**로 전체 모델을 통일한다.
 
-**CV 방식**: sklearn `cross_val_score` (5-Fold, postprocess 포함 RMSE scorer) — sklearn 호환 7개 모델에 적용. TabNet/FT-Transformer는 수동 CV.
+**CV 방식**: sklearn `cross_val_score` (5-Fold, postprocess 포함 RMSE scorer) — sklearn 호환 8개 모델에 적용. TabNet/FT-Transformer는 수동 CV.
 
 **GPU 가속 (cuML)**: Colab GPU 환경에서 RF, Ridge, Lasso, ElasticNet을 cuML로 가속. 로컬은 sklearn CPU.
 - 설치: `rapidsai-csp-utils` 스크립트 (Colab 권장) 또는 `pip install cuml-cu12 --extra-index-url=https://pypi.nvidia.com`
@@ -370,19 +386,20 @@ from category_encoders import TargetEncoder
 | 트리 | **LightGBM** | X | 자체 GPU | 빠르고 대규모 feature에 강함 |
 | 트리 | **XGBoost** | X | 자체 GPU | 정규화 옵션 풍부 |
 | 트리 | **RandomForest** | X | cuML | 안정적, 분산 낮음 |
+| 트리 | **CatBoost** | X | 자체 GPU | 범주형 네이티브, 벤치마크 111개 중 트리 최다 1위 (논문 Shmuel 2024) |
 | 트리 | **ExtraTrees** | X | CPU only | RF보다 빠르고 분산 더 낮음 (cuML 미지원) |
 | 선형 | **Ridge** | O | cuML | L2 정규화 |
 | 선형 | **Lasso** | O | cuML | L1 정규화, 자동 feature selection 효과 |
 | 선형 | **ElasticNet** | O | cuML | L1+L2 혼합 |
-| 딥러닝 | **TabNet** | O | PyTorch GPU | Attention 기반 tabular 모델, feature selection 내장 |
+| 딥러닝 | **TabNet** | O | PyTorch GPU | Attention 기반, feature selection 내장, **val+test X로 self-supervised pretraining 가능** (TabNet 원논문 근거) |
 | 딥러닝 | **FT-Transformer** | O | PyTorch GPU | Transformer를 tabular에 적용, 벤치마크 상위권 |
 
-- `compare_models()`로 9개 모델의 val RMSE를 정렬하여 출력
+- `compare_models()`로 10개 모델의 val RMSE를 정렬하여 출력
 - 이 결과를 바탕으로 이후 단계(HPO, Two-Stage, 앙상블)에 투입할 모델을 선별
 
 #### 7-B: Two-Stage Model (zero-inflated 대응)
 
-Y의 70.8%가 0인 zero-inflated 특성에 맞는 구조.
+Y의 70.8%가 0인 zero-inflated 특성에 맞는 구조. 논문 1-4에서 R² 0.192→0.538, 논문 2-2에서 RMSE 18.3% 감소 실증.
 
 ```
 Stage 1: 분류 (Y=0 vs Y>0)
@@ -397,6 +414,16 @@ Stage 2: 회귀 (Y>0인 샘플만)
 - 분류기의 확률과 회귀 예측값을 곱하면 자연스럽게 zero-inflation 반영
 - 각 stage를 별도 최적화할 수 있어 튜닝 유연성 높음
 - 7-A에서 성능 좋았던 모델을 Stage 1/2에 각각 배치
+
+**Stage 1 클래스 불균형 대응** (논문 1-3, 2-2 근거):
+- **SMOTE + undersampling 결합** (논문 1-3: SMOTE 40% oversampling + 다수 80% undersampling이 최적)
+- 또는 **class_weight / scale_pos_weight** 조정 (더 간단)
+- **Custom Weighted Log-Loss** (논문 2-2 근거): `w_Cj = 1/n_Cj`(클래스 빈도 역수) 가중치로 Recall 0.26→0.77 달성. 분류 정확도가 회귀 성능에 직결되므로 Stage 1 최적화 필수
+
+**Stage 2 Loss Function** (논문 2-2 근거):
+- **Poisson/Tweedie Loss > MSE**: health 데이터는 비음수 + zero-inflated이므로 Poisson 계열 loss가 데이터 특성에 적합
+- LightGBM: `objective='poisson'` 또는 `objective='tweedie'` (tweedie_variance_power 1.0~1.5 실험)
+- XGBoost: `objective='count:poisson'`
 
 #### 7-C: Ensemble (최고 성능 추구)
 
@@ -427,16 +454,16 @@ Stage 2: 회귀 (Y>0인 샘플만)
 
 ### 우선순위 실행 계획
 
-| 순서 | 작업 | 기대 효과 |
-|------|------|----------|
-| 1 | Stage 1~3 (정리/결측/이상치) | 노이즈 제거 |
-| 2 | Stage 4 (die→unit 집계) + Stage 7-A (9개 모델 baseline 비교) | **모델별 RMSE 확보, 유망 모델 선별** |
-| 3 | Stage 4 확장 (mean+std+range+position) | feature 풍부화 → RMSE 개선 |
-| 3.5 | Stage 4.5 (공간 피처 + 로트 집계 통계) | 공정 맥락 정보 추가 → RMSE 개선 |
-| 4 | Stage 6 (Boruta + Null Importance) | 노이즈 feature 제거 → RMSE 개선 |
-| 5 | Stage 7-D (유망 모델 HPO) | 하이퍼파라미터 최적화 → RMSE 개선 |
-| 6 | Stage 7-B (Two-Stage) | zero-inflated 대응 → RMSE 개선 |
-| 7 | Stage 7-C (Stacking/Voting) + Stage 8 (후처리) | 최종 성능 극대화 |
+| 순서 | 작업 | 기대 효과 | 논문 근거 |
+|------|------|----------|----------|
+| 1 | Stage 1~3 (정리/결측/이상치, **Pre-optimization 원칙 적용**) | 노이즈 제거, die 레벨 선처리 | 3-3, 1-2, 5-3, 5-4 |
+| 2 | Stage 4 (die→unit 집계) + Stage 7-A (**10개** 모델 baseline 비교) | **모델별 RMSE 확보, 유망 모델 선별** | 4-1, 4-2, Shmuel 2024 |
+| 3 | Stage 4 확장 (mean+std+range+position) | feature 풍부화 → RMSE 개선 | 3-3 |
+| 3.5 | Stage 4.5 (공간 피처 + **공간 잔차** + **로트별 정규화**) | 공정 맥락 정보 추가 → RMSE 개선 | 2-3, 5-3, 5-4, Kang 2015 |
+| 4 | Stage 6 (Boruta + Null Importance + **투표 기반 선정**) | 노이즈 feature 제거 → RMSE 개선 | 1-3, 1-4, 5-1 |
+| 5 | Stage 7-D (유망 모델 HPO) | 하이퍼파라미터 최적화 → RMSE 개선 | 4-1 |
+| 6 | Stage 7-B (Two-Stage + **Custom Loss + SMOTE**) | zero-inflated 대응 → RMSE 개선 | 1-4, 2-1, 2-2 |
+| 7 | Stage 7-C (Stacking/Voting) + Stage 8 (후처리) | 최종 성능 극대화 | 4-1 |
 
 ---
 
@@ -446,6 +473,26 @@ Stage 2: 회귀 (Y>0인 샘플만)
 2. **Zero-inflated 분포**: Y의 70.8%가 0이므로 이를 고려한 모델링 전략 필요 (two-stage model, zero-inflated regression 등 고려)
 3. **비식별화 데이터**: 변수명이 X0~X1086으로 비식별화되어 있으므로 도메인 지식 기반 해석보다 데이터 기반 접근 필요
 4. **평가 지표는 RMSE**: 회귀 문제이며 분류가 아님
+
+## 논문 참조
+
+모델링/전처리 의사결정 시 아래 논문 요약을 근거 자료로 참조한다.
+
+- **`99_학습자료/스터디자료/paper/논문요약.md`** — 17편 (PDF 기반 상세 요약)
+- **`99_학습자료/스터디자료/paper/논문요약_미다운로드_13편.md`** — 13편 (웹 기반 요약)
+
+주요 논문 번호와 CLAUDE.md 전략의 매핑:
+
+| 논문 | 반영 위치 | 핵심 기여 |
+|------|----------|----------|
+| 1-3 (Rare Class, 2024) | Stage 6, 7-B | 투표 기반 피처 선택, SMOTE+XGBoost |
+| 1-4 (Two-Step, 2025) | Stage 7-B | Two-Stage R² 180% 향상, Boruta 효과 |
+| 2-2 (CatBoost Hurdle, 2024) | Stage 7-B | Custom Loss, Poisson Loss, RMSE 18.3% 감소 |
+| 3-3 (NAND Flash, 2021) | Stage 3→4 | Pre-optimization 원칙 (7.9%p 향상) |
+| 5-3 (Outlier Screening, 2013) | Stage 3, 4.5 | DBSCAN, NNR 잔차, 로트별 정규화 |
+| 5-4 (GPR Outlier, 2024) | Stage 4.5 | 공간 잔차 피처 |
+| Shmuel 2024 (벤치마크 111개) | Stage 7-A | CatBoost 추가 근거 |
+| Kang 2015 (SK Hynix 공저) | Stage 4.5 | 공간 피처의 직접적 근거 |
 
 ## 디렉토리 구조
 

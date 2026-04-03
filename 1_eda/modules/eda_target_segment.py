@@ -182,6 +182,11 @@ def segment_feature_comparison(merged, feat_cols, top_n_feats=12):
         if any(len(v) < 2 for v in seg_vals):
             continue
 
+        # 전체 값이 동일하면 검정 불가 (상수 feature)
+        all_vals = np.concatenate(seg_vals)
+        if np.ptp(all_vals) == 0:
+            continue
+
         # Kruskal-Wallis H-test (비모수 ANOVA)
         h_stat, p_val = stats.kruskal(*seg_vals)
         results.append({

@@ -93,6 +93,11 @@ def compute_nonlinear_corr(xs_dict, ys_train, feat_cols, n_neighbors=5):
         "mi": mi_series.values,
     })
 
+    # NaN 처리 (상수 feature 등에서 spearmanr/corrwith가 NaN 반환 가능)
+    result_df["pearson"] = result_df["pearson"].fillna(0.0)
+    result_df["spearman"] = result_df["spearman"].fillna(0.0)
+    result_df["mi"] = result_df["mi"].fillna(0.0)
+
     # 절대값 컬럼 추가
     result_df["abs_pearson"] = result_df["pearson"].abs()
     result_df["abs_spearman"] = result_df["spearman"].abs()

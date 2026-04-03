@@ -286,3 +286,112 @@ def spatial_autocorrelation(die_df, n_wafers=6):
         print("  → 불량이 공간적으로 클러스터링되는 경향 → 공간 피처 가치 높음")
     else:
         print("  → 불량이 거의 랜덤 분포 → 공간 피처 효과 제한적일 수 있음")
+
+
+def nnr_analysis(die_df, sigma=3.0, n_wafers=10):
+    """
+    NNR(Nearest Neighbor Residual) 분석: health 값의 공간 잔차
+
+    die의 health에서 인접 die의 가우시안 가중 평균 health를 뺀 잔차를 계산.
+    잔차가 크면 = 주변과 다른 불량 패턴 → 공간 피처의 추가 정보량 확인.
+    논문 5-3 (NNR), 5-4 (GPR) 근거.
+
+    Parameters
+    ----------
+    die_df : DataFrame  - radial_analysis() 반환값 (die_x, die_y, wafer_id, health 포함)
+    sigma : float  - 가우시안 가중치 bandwidth (기본 3.0)
+    n_wafers : int  - 분석할 wafer 수 (불량률 높은 순, 기본 10)
+    """
+    die_df = die_df.copy()
+    die_df["is_defect"] = (die_df[TARGET_COL] > 0).astype(int)
+
+    # 불량률 높은 wafer 선택
+    wafer_defect = die_df.groupby("wafer_id")["is_defect"].mean().sort_values(ascending=False)
+    top_wafers = wafer_defect.head(n_wafers).index
+
+    all_residuals = []
+
+    for wid in top_wafers:
+        wf = die_df[die_df["wafer_id"] == wid].copy()
+        coords = wf[["die_x", "die_y"]].values.astype(float)
+        health_vals = wf[TARGET_COL].values.astype(float)
+        n = len(coords)
+        residuals = np.full(n, np.nan)
+
+        for i in range(n):
+            dists = np.sqrt(np.sum((coords - coords[i]) ** 2, axis=1))
+            mask = (dists > 0) & (dists <= max(3, 3 * sigma)) & ~np.isnan(health_vals)
+
+            if mask.sum() == 0:
+                residuals[i] = np.nan
+                continue
+
+            weights = np.exp(-dists[mask] ** 2 / (2 * sigma ** 2))
+            weighted_avg = np.average(health_vals[mask], weights=weights)
+            residuals[i] = health_vals[i] - weighted_avg
+
+        wf["nnr_residual"] = residuals
+        all_residuals.append(wf)
+
+    nnr_df = pd.concat(all_residuals, ignore_index=True).dropna(subset=["nnr_residual"])
+
+    # 통계
+    abs_resid = nnr_df["nnr_residual"].abs()
+    r_val, p_val = sp_stats.pearsonr(abs_resid, nnr_df[TARGET_COL])
+    rho, _ = sp_stats.spearmanr(abs_resid, nnr_df[TARGET_COL])
+
+    print("=" * 60)
+    print(f"NNR(Nearest Neighbor Residual) 분석 (sigma={sigma})")
+    print("=" * 60)
+    print(f"분석 wafer: {n_wafers}개, die: {len(nnr_df):,}개")
+    print(f"잔차 mean: {nnr_df['nnr_residual'].mean():.6f}")
+    print(f"잔차 std : {nnr_df['nnr_residual'].std():.6f}")
+    print(f"|잔차| vs health: Pearson r={r_val:+.4f} (p={p_val:.2e}), Spearman ρ={rho:+.4f}")
+    if abs(r_val) > 0.05:
+        print("→ 공간 잔차가 불량과 관련 → NNR 기반 피처 가치 있음")
+    else:
+        print("→ 공간 잔차와 불량 관계 약함 (health 자체가 unit level이라 die level에서 약할 수 있음)")
+
+    # 시각화
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # 1) 잔차 vs health scatter
+    sample = nnr_df.sample(min(5000, len(nnr_df)), random_state=SEED)
+    axes[0].scatter(sample["nnr_residual"].abs(), sample[TARGET_COL],
+                    alpha=0.15, s=5, color="steelblue")
+    axes[0].set_xlabel("|NNR Residual|")
+    axes[0].set_ylabel("health")
+    axes[0].set_title(f"|NNR Residual| vs Health (r={r_val:+.4f})")
+
+    # 2) 잔차 분포 by Y=0 vs Y>0
+    zero_resid = nnr_df.loc[nnr_df[TARGET_COL] == 0, "nnr_residual"].abs()
+    pos_resid = nnr_df.loc[nnr_df[TARGET_COL] > 0, "nnr_residual"].abs()
+    axes[1].hist(zero_resid, bins=40, alpha=0.6, color="skyblue",
+                 label=f"Y=0 (n={len(zero_resid):,})", density=True)
+    axes[1].hist(pos_resid, bins=40, alpha=0.6, color="salmon",
+                 label=f"Y>0 (n={len(pos_resid):,})", density=True)
+    axes[1].set_xlabel("|NNR Residual|")
+    axes[1].set_ylabel("Density")
+    axes[1].set_title("Y=0 vs Y>0: NNR 잔차 크기 분포")
+    axes[1].legend(fontsize=9)
+
+    # 3) 잔차 구간별 불량률
+    nnr_df["resid_bin"] = pd.qcut(nnr_df["nnr_residual"].abs(), q=10,
+                                   labels=False, duplicates="drop")
+    bin_stats = nnr_df.groupby("resid_bin").agg(
+        mean_resid=("nnr_residual", lambda x: x.abs().mean()),
+        defect_rate=(TARGET_COL, lambda x: (x > 0).mean() * 100),
+    ).reset_index()
+    bar_width = bin_stats["mean_resid"].diff().median() * 0.8
+    if pd.isna(bar_width) or bar_width <= 0:
+        bar_width = 0.001
+    axes[2].bar(bin_stats["mean_resid"], bin_stats["defect_rate"],
+                width=bar_width,
+                color="coral", edgecolor="black", alpha=0.8)
+    axes[2].set_xlabel("|NNR Residual| 구간 평균")
+    axes[2].set_ylabel("불량률 (%)")
+    axes[2].set_title("|NNR Residual| 구간별 불량률")
+
+    plt.suptitle("NNR 공간 잔차 분석", fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.show()
