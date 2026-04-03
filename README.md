@@ -1,14 +1,51 @@
-# Wafer Test 결과를 통한 고객 Field Health Data 예측
+# Wafer Test 결과를 통한 고객 Field Health Data(RCC) 예측
 
-SK하이닉스 기업연계 프로젝트 — WT(Wafer Test) 데이터 기반 Field Health(RCC) 예측 모델
+## 프로젝트 개요
+본 프로젝트는 **Wafer Test(WT) 단계의 데이터를 활용하여 고객 Field Health Data(RCC)를 예측**하는 것을 목표로 합니다.  
+WT 단계에서 이미 나타나는 신호를 바탕으로, 향후 Field 불량 위험이 높은 unit을 사전에 식별하고, 불량에 영향을 주는 주요 인자를 찾아 공정 개선에 활용하고자 합니다.
+
+## 프로젝트 목표
+- WT 단계에서 **Field 불량 위험이 높은 unit을 사전에 식별**할 수 있는 예측 모델 구축
+- 불량에 영향을 미치는 **주요 WT 인자 파악** 및 공정 개선 인사이트 도출
+- **SK hynix 사내 최우수 성능 대비 10% 이상 향상** 달성
+
+## 수행 내용
+- 반도체 WT Data **EDA(탐색적 데이터 분석)**
+- **Outlier Detection 및 치환**
+- **Feature Engineering & Selection**
+- **Data Standardization & One-Hot Encoding**
+- **Machine Learning 회귀 모델링**
+- **Cross Validation & Hyper Parameter Optimization**
+- 예측 모델 결과 해석 및 최종 모델 구축
+- 예측 결과 모니터링 **대시보드 개발**
+- 자연어 질의 기반 대시보드 연동 **AI Agent 구현**
+
+## 데이터 개요
+
+### 설명변수
+- Row 수: **174,980** (die level)
+- 변수: `ufs_serial`, `run_wf_xy`, `position`, `split`, `X0 ~ X1086`
+
+### 종속변수
+- Row 수: **43,745** (unit level)
+- 분포: `Y = 0` **70.80%** / `Y > 0` **29.20%**
+
+### 변수 설명
+- `ufs_serial` : unit명, Y data의 mapping key
+- `run_wf_xy` : die 구분 key (Lot / Wafer / Die x, y position)
+- `position` : 해당 die의 unit 내 위치
+- `split` : Train / Validation / Test 자료 구분
+- `X0 ~ X1086` : Wafer Test Data (비식별화)
+
+> 설명변수는 배경지식으로 인한 편향을 최소화하기 위해 비식별화되어 제공됩니다.
 
 ## 빠른 시작
 
 ### 1. 클론
 
 ```bash
-git clone https://github.com/<REPO>.git
-cd 기업연계프로젝트
+git clone https://github.com/younjunseon/ASAC_SKhynix.git
+cd ASAC_SKhynix
 ```
 
 ### 2. 패키지 설치
@@ -31,8 +68,6 @@ CSV 파일(비공개)을 `0_data/` 폴더에 넣어주세요:
 └── compet_ys_test_data.csv
 ```
 
-`dataset.zip`이 있다면 `0_data/`에 넣고 압축 해제하면 됩니다.
-
 ### 4. 노트북 실행
 
 모든 노트북의 **첫 셀**에서:
@@ -47,7 +82,7 @@ CSV 파일(비공개)을 `0_data/` 폴더에 넣어주세요:
 
 ```python
 # 셀 1: 프로젝트 가져오기
-!git clone https://github.com/<REPO>.git /content/project
+!git clone https://github.com/younjunseon/ASAC_SKhynix.git /content/project
 
 # 셀 2: 셋업 (패키지 설치 + 데이터 자동 다운로드)
 import sys; sys.path.insert(0, "/content/project")
@@ -74,67 +109,30 @@ Colab에서는 Google Drive의 `dataset.zip`을 자동 다운로드합니다.
 └── 90_기획/               # 기획 문서
 ```
 
-## utils 모듈 사용법
+## 수행 계획
 
-`%run ../setup.py` 실행 후 바로 사용 가능합니다.
+| 주차 | 내용 |
+|---|---|
+| 1~2주차 | 반도체 도메인 지식 학습 및 탐색적 데이터 분석 |
+| 3~4주차 | Outlier Detection 및 치환 / Feature Engineering |
+| 5~6주차 | Data Standardization & Encoding / Feature Selection |
+| 7~8주차 | Cross Validation & Hyper Parameter Optimization |
+| 9~10주차 | 예측 결과 모니터링 인터랙티브 대시보드 개발 |
+| 11주차 | 자연어 질의 기반 AI Agent 설계 및 구현 / 최종 발표 준비 |
 
-### 데이터 로드
+## 기술 스택
+- Python, Pandas, NumPy
+- Scikit-learn, XGBoost, LightGBM, CatBoost
+- Matplotlib, Seaborn
+- Optuna, Boruta
+- Dashboard Framework (Streamlit / Dash)
+- LLM 기반 AI Agent 연동
 
-```python
-xs, ys = load_all()                    # Xs + Ys 한 번에 로드
-feat_cols = get_feat_cols(xs)          # ["X0", "X1", ..., "X1086"]
-xs_dict = split_xs(xs)                 # {"train": ..., "validation": ..., "test": ...}
-ys_train = ys["train"]                 # train Y만
-```
-
-### die → unit 집계
-
-```python
-# 기본 (mean, std, min, max)
-unit_df = aggregate_to_unit(xs_dict["train"])
-
-# 집계 함수 지정
-unit_df = aggregate_to_unit(xs_dict["train"], agg_funcs=["mean", "std", "range"])
-
-# position별 피벗 포함
-unit_df = build_unit_features(xs_dict["train"], agg_funcs=["mean", "std"], use_position_pivot=True)
-
-# target merge → 바로 모델에 넣을 수 있는 X, y
-X_train, y_train = merge_with_target(unit_df, split="train")
-```
-
-### 모델 평가
-
-```python
-evaluate(y_val, model.predict(X_val), label="LightGBM v1")
-# [LightGBM v1] RMSE = 0.007832  (n=8,749, zero=6,193(70.8%))
-
-compare_models({
-    "LightGBM": lgbm_pred,
-    "XGBoost": xgb_pred,
-    "Ridge": ridge_pred,
-}, y_val)
-```
-
-### 주요 상수
-
-| 상수 | 값 | 용도 |
-|------|-----|------|
-| `SEED` | `42` | 랜덤 시드 |
-| `TARGET_COL` | `"health"` | Y 컬럼명 |
-| `KEY_COL` | `"ufs_serial"` | unit 매핑 키 |
-| `META_COLS` | `["ufs_serial", "run_wf_xy", "position", "split"]` | 메타 컬럼 |
-| `DATA_DIR` | `{프로젝트루트}/0_data` | 데이터 경로 |
-
-## 의존 패키지
-
-`requirements.txt` 참조. 주요 패키지:
-
-- pandas, numpy, matplotlib, seaborn
-- scikit-learn, lightgbm, xgboost
-- optuna, boruta
-- gdown (Colab 데이터 다운로드용)
+## 기대 효과
+- 출하 전 리스크 사전 선별
+- 품질 비용 절감
+- 고객 신뢰도 향상
+- 주요 불량 인자 파악
 
 ## 팀원
-
 - SK하이닉스 기업연계 ASAC 팀
