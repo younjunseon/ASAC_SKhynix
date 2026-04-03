@@ -19,6 +19,9 @@ desktop.ini
 .vscode/
 .idea/
 
+# Claude Code
+.claude/
+
 # 출력물
 4_output/*.csv
 
