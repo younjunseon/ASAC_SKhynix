@@ -19,5 +19,12 @@ desktop.ini
 .vscode/
 .idea/
 
-# 출력물 (필요시 주석 해제)
-# 4_output/
+# 출력물
+4_output/*.csv
+
+# CatBoost 캐시
+catboost_info/
+3_modeling/catboost_info/
+
+# 빌드 아티팩트
+code.zip
