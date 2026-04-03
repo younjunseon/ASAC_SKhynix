@@ -352,21 +352,30 @@ from category_encoders import TargetEncoder
 
 ### Stage 7: 모델링
 
-#### 7-A: Baseline 비교 (다양한 모델, 기본 파라미터)
+#### 7-A: Baseline 비교 (Cross Validation + cuML GPU 가속)
 
 전처리 완료된 데이터에 **기본 파라미터**로 9개 모델을 돌려 RMSE를 한눈에 비교한다. 스케일링은 선형/딥러닝 모델에 필요하지만, 트리 모델은 스케일링해도 결과가 동일하므로 **RobustScaler 적용한 데이터 1벌**로 전체 모델을 통일한다.
 
-| 구분 | 모델 | 스케일링 필요 | 비고 |
-|------|------|:---:|------|
-| 트리 | **LightGBM** | X | 빠르고 대규모 feature에 강함 |
-| 트리 | **XGBoost** | X | 정규화 옵션 풍부 |
-| 트리 | **RandomForest** | X | 안정적, 분산 낮음 |
-| 트리 | **ExtraTrees** | X | RF보다 빠르고 분산 더 낮음 |
-| 선형 | **Ridge** | O | L2 정규화 |
-| 선형 | **Lasso** | O | L1 정규화, 자동 feature selection 효과 |
-| 선형 | **ElasticNet** | O | L1+L2 혼합 |
-| 딥러닝 | **TabNet** | O | Attention 기반 tabular 모델, feature selection 내장 |
-| 딥러닝 | **FT-Transformer** | O | Transformer를 tabular에 적용, 벤치마크 상위권 |
+**CV 방식**: sklearn `cross_val_score` (5-Fold, postprocess 포함 RMSE scorer) — sklearn 호환 7개 모델에 적용. TabNet/FT-Transformer는 수동 CV.
+
+**GPU 가속 (cuML)**: Colab GPU 환경에서 RF, Ridge, Lasso, ElasticNet을 cuML로 가속. 로컬은 sklearn CPU.
+- 설치: `rapidsai-csp-utils` 스크립트 (Colab 권장) 또는 `pip install cuml-cu12 --extra-index-url=https://pypi.nvidia.com`
+- cuML은 sklearn API 호환 → `cross_val_score` 사용 가능
+- cuML RF: `n_jobs` 없음(GPU 자동 병렬), `max_depth` 기본값 16
+- cuML 선형 모델: `random_state` 불필요 (closed-form solution)
+- ExtraTrees는 cuML 미지원 → 항상 sklearn
+
+| 구분 | 모델 | 스케일링 필요 | GPU 가속 | 비고 |
+|------|------|:---:|:---:|------|
+| 트리 | **LightGBM** | X | 자체 GPU | 빠르고 대규모 feature에 강함 |
+| 트리 | **XGBoost** | X | 자체 GPU | 정규화 옵션 풍부 |
+| 트리 | **RandomForest** | X | cuML | 안정적, 분산 낮음 |
+| 트리 | **ExtraTrees** | X | CPU only | RF보다 빠르고 분산 더 낮음 (cuML 미지원) |
+| 선형 | **Ridge** | O | cuML | L2 정규화 |
+| 선형 | **Lasso** | O | cuML | L1 정규화, 자동 feature selection 효과 |
+| 선형 | **ElasticNet** | O | cuML | L1+L2 혼합 |
+| 딥러닝 | **TabNet** | O | PyTorch GPU | Attention 기반 tabular 모델, feature selection 내장 |
+| 딥러닝 | **FT-Transformer** | O | PyTorch GPU | Transformer를 tabular에 적용, 벤치마크 상위권 |
 
 - `compare_models()`로 9개 모델의 val RMSE를 정렬하여 출력
 - 이 결과를 바탕으로 이후 단계(HPO, Two-Stage, 앙상블)에 투입할 모델을 선별

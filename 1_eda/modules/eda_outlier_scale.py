@@ -10,7 +10,16 @@ from utils.config import SEED
 
 
 def plot_outlier_ratio(xs, feat_cols):
-    """IQR 기반 이상치 비율 분포 + 상위 6개 boxplot"""
+    """
+    IQR 기반 feature별 이상치 비율 분포 히스토그램 + 상위 6개 feature boxplot
+
+    Parameters
+    ----------
+    xs : DataFrame
+        die-level 원본 데이터
+    feat_cols : list of str
+        feature 컬럼명 리스트
+    """
     Q1 = xs[feat_cols].quantile(0.25)
     Q3 = xs[feat_cols].quantile(0.75)
     IQR = Q3 - Q1
@@ -43,7 +52,16 @@ def plot_outlier_ratio(xs, feat_cols):
 
 
 def plot_scale_analysis(xs, feat_cols):
-    """Feature 스케일 비교 (mean/range/skewness 분포)"""
+    """
+    Feature 스케일 불균형 분석: mean, range(max-min), skewness 분포 시각화
+
+    Parameters
+    ----------
+    xs : DataFrame
+        die-level 원본 데이터
+    feat_cols : list of str
+        feature 컬럼명 리스트
+    """
     feat_stats = xs[feat_cols].describe().T[['mean', 'std', 'min', 'max']]
     feat_stats['range'] = feat_stats['max'] - feat_stats['min']
     feat_stats['skew'] = xs[feat_cols].skew()
@@ -72,11 +90,3 @@ def plot_scale_analysis(xs, feat_cols):
 
     plt.tight_layout()
     plt.show()
-
-
-def print_summary(const_feats, missing_df, discrete_feats, continuous_feats):
-    """EDA 요약 출력"""
-    print(f"상수 feature: {len(const_feats)}개")
-    print(f"결측 있는 feature: {len(missing_df)}개")
-    print(f"이산형 feature: {len(discrete_feats)}개")
-    print(f"연속형 feature: {len(continuous_feats)}개")

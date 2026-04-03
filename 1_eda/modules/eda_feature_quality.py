@@ -9,7 +9,21 @@ from utils.config import SEED
 
 
 def analyze_missing(xs, feat_cols):
-    """결측률 통계 출력 + 상위 30개 시각화. missing_df 반환."""
+    """
+    Feature별 결측률 통계 출력 + 상위 30개 시각화
+
+    Parameters
+    ----------
+    xs : DataFrame
+        die-level 원본 데이터
+    feat_cols : list of str
+        feature 컬럼명 리스트
+
+    Returns
+    -------
+    DataFrame
+        결측이 있는 feature만 포함. 컬럼: missing_count, missing_pct
+    """
     missing = xs[feat_cols].isnull().sum()
     missing_pct = (missing / len(xs) * 100).round(2)
     missing_df = pd.DataFrame({'missing_count': missing, 'missing_pct': missing_pct})
@@ -47,7 +61,21 @@ def analyze_missing(xs, feat_cols):
 
 
 def classify_features(xs, feat_cols, threshold=20):
-    """연속형/이산형 분류 + 고유값 분포 시각화. (continuous_feats, discrete_feats) 반환."""
+    """
+    Feature를 연속형/이산형으로 분류 + 고유값 수 분포 시각화
+
+    Parameters
+    ----------
+    xs : DataFrame
+    feat_cols : list of str
+    threshold : int
+        고유값 수가 이 값 이하면 이산형으로 분류. 기본 20
+
+    Returns
+    -------
+    continuous_feats : list of str
+    discrete_feats : list of str
+    """
     nunique = xs[feat_cols].nunique()
 
     discrete_feats = nunique[nunique <= threshold].index.tolist()
@@ -74,7 +102,15 @@ def classify_features(xs, feat_cols, threshold=20):
 
 
 def plot_continuous_dist(xs, continuous_feats):
-    """연속형 feature 랜덤 12개 히스토그램"""
+    """
+    연속형 feature 중 랜덤 12개를 골라 히스토그램 시각화
+
+    Parameters
+    ----------
+    xs : DataFrame
+    continuous_feats : list of str
+        연속형 feature 컬럼명 리스트
+    """
     np.random.seed(SEED)
     sample_cont = np.random.choice(continuous_feats, min(12, len(continuous_feats)), replace=False)
 
@@ -92,7 +128,15 @@ def plot_continuous_dist(xs, continuous_feats):
 
 
 def plot_discrete_dist(xs, discrete_feats):
-    """이산형 feature 최대 12개 bar chart"""
+    """
+    이산형 feature 최대 12개의 값 분포를 bar chart로 시각화
+
+    Parameters
+    ----------
+    xs : DataFrame
+    discrete_feats : list of str
+        이산형 feature 컬럼명 리스트
+    """
     if not discrete_feats:
         print("이산형 feature가 없습니다.")
         return
@@ -115,8 +159,21 @@ def plot_discrete_dist(xs, discrete_feats):
     plt.show()
 
 
-def detect_low_variance(xs, feat_cols):
-    """상수/극저분산/중복 컬럼 탐지 + 분산 분포 시각화. (const_feats, low_var_feats, dup_pairs) 반환."""
+def _find_low_var_features(xs, feat_cols):
+    """
+    상수/극저분산 feature 탐지 (std 기반)
+
+    Parameters
+    ----------
+    xs : DataFrame
+    feat_cols : list of str
+
+    Returns
+    -------
+    const_feats : list of str
+    low_var_feats : list of str
+    feat_std : Series (이후 시각화에서 재사용)
+    """
     feat_std = xs[feat_cols].std()
     const_feats = feat_std[feat_std == 0].index.tolist()
     low_var_feats = feat_std[feat_std < 1e-6].index.tolist()
@@ -127,7 +184,23 @@ def detect_low_variance(xs, feat_cols):
     if const_feats:
         print(f"\n상수 features: {const_feats[:20]}{'...' if len(const_feats) > 20 else ''}")
 
-    # 중복 컬럼 탐색 (샘플 기반)
+    return const_feats, low_var_feats, feat_std
+
+
+def _find_duplicate_columns(xs, feat_cols):
+    """
+    완전 중복 컬럼 쌍 탐색 (샘플 5,000행 기반)
+
+    Parameters
+    ----------
+    xs : DataFrame
+    feat_cols : list of str
+
+    Returns
+    -------
+    dup_pairs : list of tuple
+        (col_a, col_b) 중복 쌍
+    """
     print(f"\n중복 컬럼 탐색 (샘플 기반):")
     sample_xs = xs[feat_cols].sample(n=min(5000, len(xs)), random_state=SEED)
     dup_pairs = []
@@ -144,7 +217,18 @@ def detect_low_variance(xs, feat_cols):
         if len(dup_pairs) > 10:
             print(f"  ... 외 {len(dup_pairs) - 10}개")
 
-    # Feature 분산 분포
+    return dup_pairs
+
+
+def _plot_variance_dist(feat_std):
+    """
+    Feature 표준편차 분포 히스토그램 (log10 스케일)
+
+    Parameters
+    ----------
+    feat_std : Series
+        feature별 std 값
+    """
     fig, ax = plt.subplots(figsize=(12, 4))
     ax.hist(np.log10(feat_std[feat_std > 0].values + 1e-10), bins=100, edgecolor='black', color='steelblue')
     ax.set_title('Feature 표준편차 분포 (log10 스케일)')
@@ -153,4 +237,26 @@ def detect_low_variance(xs, feat_cols):
     plt.tight_layout()
     plt.show()
 
+
+def detect_low_variance(xs, feat_cols):
+    """
+    상수/극저분산/중복 컬럼 탐지 + Feature 분산 분포 시각화
+
+    Parameters
+    ----------
+    xs : DataFrame
+    feat_cols : list of str
+
+    Returns
+    -------
+    const_feats : list of str
+        std=0인 상수 feature
+    low_var_feats : list of str
+        std<1e-6인 극저분산 feature (상수 포함)
+    dup_pairs : list of tuple
+        완전 중복 컬럼 쌍 (col_a, col_b)
+    """
+    const_feats, low_var_feats, feat_std = _find_low_var_features(xs, feat_cols)
+    dup_pairs = _find_duplicate_columns(xs, feat_cols)
+    _plot_variance_dist(feat_std)
     return const_feats, low_var_feats, dup_pairs

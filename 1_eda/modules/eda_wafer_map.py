@@ -9,11 +9,25 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib as mpl
+mpl.rcParams['axes.unicode_minus'] = False
 from utils.config import KEY_COL, DIE_KEY_COL, TARGET_COL, SEED
 
 
 def parse_wafer_coords(xs):
-    """run_wf_xy 파싱 → lot, wafer_no, die_x, die_y 컬럼 추가. 새 DataFrame 반환."""
+    """
+    run_wf_xy를 파싱하여 lot, wafer_no, die_x, die_y, wafer_id 컬럼 추가
+
+    Parameters
+    ----------
+    xs : DataFrame
+        die-level 원본 데이터 (run_wf_xy 컬럼 필요, "작업번호_웨이퍼번호_X_Y" 형식)
+
+    Returns
+    -------
+    DataFrame
+        ufs_serial, run_wf_xy + lot, wafer_no, die_x, die_y, wafer_id 컬럼
+    """
     parts = xs[DIE_KEY_COL].str.split('_', expand=True)
     result = xs[[KEY_COL, DIE_KEY_COL]].copy()
     result['lot'] = parts[0]
@@ -32,7 +46,23 @@ def parse_wafer_coords(xs):
 
 
 def select_top_wafers(xs_parsed, ys_train, n=6):
-    """불량 unit 비율 높은 wafer 상위 N장 선택. wafer_id 리스트 반환."""
+    """
+    불량률(health>0 비율)이 높은 wafer 상위 N장 선택
+
+    Parameters
+    ----------
+    xs_parsed : DataFrame
+        parse_wafer_coords()에서 반환된 파싱 결과
+    ys_train : DataFrame
+        train Y 데이터 (ufs_serial, health 컬럼)
+    n : int
+        선택할 wafer 수. 기본 6
+
+    Returns
+    -------
+    list of str
+        상위 N개 wafer_id
+    """
     # die에 health merge (ufs_serial 기준)
     merged = xs_parsed.merge(ys_train[[KEY_COL, TARGET_COL]], on=KEY_COL, how='inner')
 
@@ -53,13 +83,93 @@ def select_top_wafers(xs_parsed, ys_train, n=6):
     return top_wafers
 
 
-def plot_wafer_map(xs_parsed, ys_train, wafers):
-    """선택된 wafer들을 원형 웨이퍼 형태로 시각화. 하늘색(정상) → 빨강(불량), 고정 크기."""
+def _draw_single_wafer(ax, wf, wafer_id):
+    """
+    웨이퍼 1장을 원형 형태로 시각화 (정상: 하늘색, 불량: 빨강 계열)
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+        그릴 subplot
+    wf : DataFrame
+        해당 웨이퍼의 die 데이터 (die_x, die_y, health 컬럼 필요)
+    wafer_id : str
+        "lot_waferNo" 형식의 웨이퍼 식별자
+    """
     from matplotlib.patches import Circle
 
+    # 웨이퍼 중심/반지름 계산
+    cx = (wf['die_x'].max() + wf['die_x'].min()) / 2
+    cy = (wf['die_y'].max() + wf['die_y'].min()) / 2
+    rx = (wf['die_x'].max() - wf['die_x'].min()) / 2
+    ry = (wf['die_y'].max() - wf['die_y'].min()) / 2
+    radius = max(rx, ry) * 1.08
+
+    # 웨이퍼 원형 배경
+    ax.set_facecolor('#f0f0f0')
+    inner_bg = Circle((cx, cy), radius, fill=True, facecolor='white', edgecolor='none', zorder=0)
+    ax.add_patch(inner_bg)
+    wafer_circle = Circle((cx, cy), radius, fill=False, edgecolor='#333333', linewidth=2)
+    ax.add_patch(wafer_circle)
+
+    # 정상/불량 분리
+    zero_mask = wf[TARGET_COL] == 0
+    wf_zero = wf[zero_mask]
+    wf_defect = wf[~zero_mask]
+
+    # 정상 die: 하늘색
+    ax.scatter(wf_zero['die_x'], wf_zero['die_y'],
+               c='#87CEEB', s=40, alpha=0.6, edgecolors='none',
+               label='정상 (Y=0)', zorder=2)
+
+    # 불량 die: 빨강 계열 (health 값에 따라 농도)
+    if len(wf_defect) > 0:
+        health_vals = wf_defect[TARGET_COL].values
+        vmin = max(health_vals.min(), 1e-6)
+        vmax = health_vals.max()
+        if vmin >= vmax:
+            norm = mcolors.Normalize(vmin=0, vmax=1)
+        else:
+            norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
+
+        sc = ax.scatter(wf_defect['die_x'], wf_defect['die_y'],
+                        c=health_vals, cmap='Reds', norm=norm,
+                        s=40, alpha=0.85, edgecolors='#333333', linewidths=0.4,
+                        label=f'불량 (Y>0, n={len(wf_defect)})', zorder=3)
+        plt.colorbar(sc, ax=ax, shrink=0.7, label='health', pad=0.02)
+
+    # 축 설정
+    margin = radius * 0.15
+    ax.set_xlim(cx - radius - margin, cx + radius + margin)
+    ax.set_ylim(cy - radius - margin, cy + radius + margin)
+    ax.set_aspect('equal')
+
+    lot, wf_no = wafer_id.rsplit('_', 1)
+    defect_rate = (1 - zero_mask.mean()) * 100
+    ax.set_title(f'Lot {lot} / Wafer {wf_no}\n불량률 {defect_rate:.1f}%', fontsize=11, pad=10)
+    ax.set_xlabel('die_x')
+    ax.set_ylabel('die_y')
+    ax.legend(fontsize=8, loc='upper right')
+
+
+def plot_wafer_map(xs_parsed, ys_train, wafers):
+    """
+    선택된 wafer들의 die 위치를 원형 웨이퍼 형태로 시각화.
+    정상(Y=0): 하늘색, 불량(Y>0): 빨강 계열 (값에 따라 농도 변화)
+
+    Parameters
+    ----------
+    xs_parsed : DataFrame
+        parse_wafer_coords()에서 반환된 파싱 결과
+    ys_train : DataFrame
+        train Y 데이터 (ufs_serial, health 컬럼)
+    wafers : list of str
+        시각화할 wafer_id 리스트 (select_top_wafers() 반환값)
+    """
     # die에 health merge
     merged = xs_parsed.merge(ys_train[[KEY_COL, TARGET_COL]], on=KEY_COL, how='inner')
 
+    # subplot 레이아웃
     n = len(wafers)
     n_cols = min(3, n)
     n_rows = (n + n_cols - 1) // n_cols
@@ -68,65 +178,10 @@ def plot_wafer_map(xs_parsed, ys_train, wafers):
         axes = np.array([axes])
     axes = np.array(axes).flatten()
 
+    # 웨이퍼별 시각화
     for idx, wafer_id in enumerate(wafers):
-        ax = axes[idx]
         wf = merged[merged['wafer_id'] == wafer_id].copy()
-
-        # die 좌표를 wafer 중심 기준으로 정규화 (원형 표현을 위해)
-        cx = (wf['die_x'].max() + wf['die_x'].min()) / 2
-        cy = (wf['die_y'].max() + wf['die_y'].min()) / 2
-        rx = (wf['die_x'].max() - wf['die_x'].min()) / 2
-        ry = (wf['die_y'].max() - wf['die_y'].min()) / 2
-        radius = max(rx, ry) * 1.08  # 여유 포함
-
-        # 웨이퍼 외곽 원 그리기
-        wafer_circle = Circle((cx, cy), radius,
-                               fill=False, edgecolor='#333333', linewidth=2, linestyle='-')
-        ax.add_patch(wafer_circle)
-
-        # 웨이퍼 외부 영역 회색 배경 (원 안만 흰색)
-        ax.set_facecolor('#f0f0f0')
-        inner_bg = Circle((cx, cy), radius, fill=True, facecolor='white', edgecolor='none', zorder=0)
-        ax.add_patch(inner_bg)
-
-        # zero / non-zero 분리
-        zero_mask = wf[TARGET_COL] == 0
-        wf_zero = wf[zero_mask]
-        wf_defect = wf[~zero_mask]
-
-        # 정상 die: 하늘색
-        ax.scatter(wf_zero['die_x'], wf_zero['die_y'],
-                   c='#87CEEB', s=40, alpha=0.6, edgecolors='none',
-                   label='정상 (Y=0)', zorder=2)
-
-        # 불량 die: 빨강 계열 (health 값에 따라 농도)
-        if len(wf_defect) > 0:
-            health_vals = wf_defect[TARGET_COL].values
-            vmin = max(health_vals.min(), 1e-6)
-            vmax = health_vals.max()
-            if vmin >= vmax:
-                norm = mcolors.Normalize(vmin=0, vmax=1)
-            else:
-                norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
-
-            sc = ax.scatter(wf_defect['die_x'], wf_defect['die_y'],
-                            c=health_vals, cmap='Reds', norm=norm,
-                            s=40, alpha=0.85, edgecolors='#333333', linewidths=0.4,
-                            label=f'불량 (Y>0, n={len(wf_defect)})', zorder=3)
-            plt.colorbar(sc, ax=ax, shrink=0.7, label='health', pad=0.02)
-
-        # 축 범위를 원에 맞춤
-        margin = radius * 0.15
-        ax.set_xlim(cx - radius - margin, cx + radius + margin)
-        ax.set_ylim(cy - radius - margin, cy + radius + margin)
-        ax.set_aspect('equal')
-
-        lot, wf_no = wafer_id.rsplit('_', 1)
-        defect_rate = (1 - zero_mask.mean()) * 100
-        ax.set_title(f'Lot {lot} / Wafer {wf_no}\n불량률 {defect_rate:.1f}%', fontsize=11, pad=10)
-        ax.set_xlabel('die_x')
-        ax.set_ylabel('die_y')
-        ax.legend(fontsize=8, loc='upper right')
+        _draw_single_wafer(axes[idx], wf, wafer_id)
 
     # 남는 subplot 숨김
     for j in range(idx + 1, len(axes)):

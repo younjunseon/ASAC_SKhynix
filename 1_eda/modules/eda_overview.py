@@ -12,7 +12,16 @@ from utils.config import (
 
 
 def describe_xs(xs, feat_cols):
-    """Xs 기본 정보 출력 (shape, dtypes, 메타 컬럼 샘플, feature 통계)"""
+    """
+    Xs 기본 정보 출력 (shape, dtypes, 메타 컬럼 샘플, feature 기초통계)
+
+    Parameters
+    ----------
+    xs : DataFrame
+        die-level 원본 데이터
+    feat_cols : list of str
+        feature 컬럼명 리스트 (X0~X1086)
+    """
     print(f"shape: {xs.shape}")
     print(f"\ndtypes:")
     print(xs.dtypes.value_counts())
@@ -23,7 +32,14 @@ def describe_xs(xs, feat_cols):
 
 
 def plot_dies_per_unit(xs):
-    """Unit당 die 수 분포 + position 값 분포 시각화"""
+    """
+    Unit당 die 수 분포 + position 값 분포 시각화
+
+    Parameters
+    ----------
+    xs : DataFrame
+        die-level 원본 데이터 (ufs_serial, position 컬럼 필요)
+    """
     dies_per_unit = xs.groupby(KEY_COL).size()
     print(dies_per_unit.describe())
     print(f"\n고유 unit 수: {xs[KEY_COL].nunique():,}")
@@ -46,7 +62,16 @@ def plot_dies_per_unit(xs):
 
 
 def print_split_ratio(xs, ys_all):
-    """Xs(die level) / Ys(unit level) split별 비율 출력"""
+    """
+    Xs(die level) / Ys(unit level) split별 비율 출력
+
+    Parameters
+    ----------
+    xs : DataFrame
+        die-level 데이터 (split 컬럼 필요)
+    ys_all : DataFrame
+        unit-level 전체 Y 데이터 (split 컬럼 필요)
+    """
     print("Xs (die level)")
     xs_split = xs[SPLIT_COL].value_counts()
     print(xs_split)
@@ -59,7 +84,14 @@ def print_split_ratio(xs, ys_all):
 
 
 def plot_target_distribution(ys_all):
-    """Target(health) 전체/비zero 분포 히스토그램 + split별 zero 비율"""
+    """
+    Target(health) 분포 시각화: 전체 히스토그램, Y>0 히스토그램, split별 zero 비율
+
+    Parameters
+    ----------
+    ys_all : DataFrame
+        전체 Y 데이터 (health, split 컬럼 필요)
+    """
     print(ys_all[TARGET_COL].describe())
 
     zero_ratio = (ys_all[TARGET_COL] == 0).mean() * 100

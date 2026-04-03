@@ -10,7 +10,26 @@ from utils.config import KEY_COL, TARGET_COL, SEED
 
 
 def compute_correlation(xs_dict, ys_train, feat_cols):
-    """die→unit 평균 집계 → target 상관계수 계산. (train_merged, corr_with_target, corr_abs) 반환."""
+    """
+    Train set의 die→unit 평균 집계 후, 각 feature와 target의 Pearson 상관계수 계산
+
+    Parameters
+    ----------
+    xs_dict : dict
+        {"train": DataFrame, ...} split별 die-level 데이터
+    ys_train : DataFrame
+        train Y 데이터 (ufs_serial, health 컬럼)
+    feat_cols : list of str
+
+    Returns
+    -------
+    train_merged : DataFrame
+        unit-level로 집계된 X + Y 합본
+    corr_with_target : Series
+        각 feature의 상관계수 (부호 포함)
+    corr_abs : Series
+        절대값 기준 내림차순 정렬
+    """
     xs_train = xs_dict["train"]
     xs_unit_mean = xs_train.groupby(KEY_COL)[feat_cols].mean()
 
@@ -29,7 +48,16 @@ def compute_correlation(xs_dict, ys_train, feat_cols):
 
 
 def plot_corr_with_target(corr_with_target, corr_abs):
-    """상관계수 분포 히스토그램 + 상위 20개 bar chart"""
+    """
+    Feature-Target 상관계수 분포 히스토그램 + 상위 20개 bar chart
+
+    Parameters
+    ----------
+    corr_with_target : Series
+        compute_correlation()에서 반환된 상관계수 (부호 포함)
+    corr_abs : Series
+        compute_correlation()에서 반환된 절대값 기준 정렬
+    """
     top20_corr = corr_abs.head(20)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
@@ -54,7 +82,20 @@ def plot_corr_with_target(corr_with_target, corr_abs):
 
 
 def plot_top_scatter(train_merged, corr_with_target, corr_abs, n=6):
-    """상위 N개 feature vs health scatter plot"""
+    """
+    상관계수 상위 N개 feature vs health scatter plot
+
+    Parameters
+    ----------
+    train_merged : DataFrame
+        compute_correlation()에서 반환된 unit-level X+Y 합본
+    corr_with_target : Series
+        상관계수 (부호 포함)
+    corr_abs : Series
+        절대값 기준 정렬
+    n : int
+        시각화할 feature 수. 기본 6
+    """
     top_feats = corr_abs.head(n).index.tolist()
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
@@ -76,7 +117,18 @@ def plot_top_scatter(train_merged, corr_with_target, corr_abs, n=6):
 
 
 def plot_feature_heatmap(train_merged, corr_abs, n=30):
-    """상위 N개 feature 간 상관 히트맵 + 고상관 쌍 출력"""
+    """
+    Target 상관 상위 N개 feature 간 상관관계 히트맵 + |r|>0.95인 고상관 쌍 출력
+
+    Parameters
+    ----------
+    train_merged : DataFrame
+        compute_correlation()에서 반환된 unit-level X+Y 합본
+    corr_abs : Series
+        절대값 기준 정렬
+    n : int
+        히트맵에 포함할 feature 수. 기본 30
+    """
     top_feats = corr_abs.head(n).index.tolist()
     corr_matrix = train_merged[top_feats].corr()
 
@@ -104,7 +156,18 @@ def plot_feature_heatmap(train_merged, corr_abs, n=30):
 
 
 def plot_discrete_vs_target(xs_dict, ys_train, discrete_feats):
-    """이산형 feature 값별 target 평균 bar chart"""
+    """
+    이산형 feature의 각 값(카테고리)별 target 평균을 bar chart로 비교
+
+    Parameters
+    ----------
+    xs_dict : dict
+        {"train": DataFrame, ...} split별 die-level 데이터
+    ys_train : DataFrame
+        train Y 데이터 (ufs_serial, health 컬럼)
+    discrete_feats : list of str
+        이산형 feature 컬럼명 리스트 (최대 8개 시각화)
+    """
     if not discrete_feats:
         print("이산형 feature가 없습니다.")
         return

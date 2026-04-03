@@ -19,7 +19,7 @@ import subprocess
 # ─── 필수 패키지 자동 설치 (requirements.txt 기반) ─────────
 def _ensure_packages():
     # requirements.txt 경로 찾기
-    _setup_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
+    _setup_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
     req_path = os.path.join(_setup_dir, "requirements.txt")
 
     if not os.path.exists(req_path):
@@ -65,7 +65,7 @@ try:
         )
 except ImportError:
     # Local: setup.py의 위치 = 프로젝트 루트
-    _this = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
+    _this = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 
 if _this not in sys.path:
     sys.path.insert(0, _this)
