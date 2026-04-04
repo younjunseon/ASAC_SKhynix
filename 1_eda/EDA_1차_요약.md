@@ -1,8 +1,8 @@
 # EDA 1차 분석 요약
 
-> **노트북**: `1_eda/eda.ipynb` (101셀, 7 Phase, 26개 섹션)
+> **노트북**: `1_eda/eda.ipynb` (103셀, 7 Phase, 26개 섹션)
 > **작성일**: 2026-04-04
-> **차트 수**: 58개 (인라인 PNG)
+> **차트 수**: 60개 (인라인 PNG)
 
 ---
 
@@ -308,11 +308,19 @@
   - F-ratio 히스토그램에서 거의 모든 feature가 F>10 (로트 효과 압도)
   - 정규화 전후 scatter에서 대다수 점이 대각선 아래 (악화)
   - 고F-ratio feature의 로트별 boxplot에서 중앙값이 계단식으로 이동
+- **F-ratio 구간별 정규화 효과 (추가 분석)**:
+  - F-ratio 0-10 (57개): 향상 52.6%, 평균Δ|r| -0.000 → 반반, 효과 거의 없음
+  - F-ratio 10-100 (245개): 향상 23.7%, 평균Δ|r| -0.003 → 76% 악화
+  - F-ratio 100-500 (423개): 향상 25.3%, 평균Δ|r| -0.005 → 75% 악화
+  - F-ratio 500-1000 (125개): 향상 18.4%, 평균Δ|r| -0.009 → 82% 악화
+  - F-ratio >1000 (132개): 향상 6.8%, 평균Δ|r| -0.015 → **93% 악화, 가장 심각**
+  - **결론: F-ratio가 높을수록 정규화가 더 큰 역효과** → 로트 간 차이 자체가 target 예측에 유용한 시그널
 - **액션**:
   - 전체 feature 일괄 정규화는 **오히려 역효과**
-  - **선택적 적용**: 정규화 후 상관 향상되는 227개 feature에만 적용하거나, 원본+정규화 버전 모두 포함
-  - 로트별 집계 통계 피처 (lot mean, lot std)를 별도 생성하는 것이 더 효과적일 수 있음
-  - **EDA 추가 가능**: feature별로 정규화 효과를 판별하는 기준 수립 필요
+  - **선택적 정규화도 불필요**: F-ratio 0-10 구간만 반반이고 효과 미미, 나머지 전 구간에서 악화
+  - ~~정규화 후 상관 향상되는 227개 feature에만 적용~~ → 구간 분석 결과 체계적 기준 없음
+  - **로트 간 차이는 노이즈가 아닌 시그널** → 로트별 WT 집계 통계 (lot mean, lot std)를 별도 피처로 생성하여 적극 활용
+  - 원본 feature 유지가 기본, 정규화 버전은 추가 피처로도 가치 낮음
 
 ### 22. Die Position 분석
 
@@ -378,21 +386,25 @@
 
 ### 26. 집계 방식별 Target 상관 비교
 
-- **목적**: mean/std/min/max/range/median/skew 7가지 집계 중 어떤 것이 target과 상관이 높은지 비교
+- **목적**: 11가지 집계 함수(mean/std/min/max/range/median/skew/Q25/Q75/kurtosis/CV) 중 어떤 것이 target과 상관이 높은지 비교
 - **결과**:
-  - **max|r| 기준**: median(0.0377) > mean(0.0372) > min(0.0372) > max(0.0362) > std(0.0317) > range(0.0299) > skew(0.0212)
-  - **mean|r| 기준**: median(0.0114) ≈ mean(0.0113) > max(0.0105) > min(0.0095) > std/range(0.0056) > skew(0.0050)
-  - Feature별 최적 집계: median 239개(22%), max 198개(18%), mean 184개(17%)
-  - **mean 외 집계가 더 좋은 상위**: X1079(std, +0.029), X255(max, +0.028), X712(median, +0.027)
-  - std가 mean보다 높은 feature: 229개(21.1%)
+  - **max|r| 기준**: **CV(0.1473)** ≫ Q25(0.0390) > Q75(0.0383) > median(0.0377) > mean(0.0372) > min(0.0372) > max(0.0362) > std(0.0317) > range(0.0299) > kurtosis(0.0276) > skew(0.0212)
+  - **mean|r| 기준**: median(0.0114) ≈ mean(0.0113) > Q75(0.0112) > Q25(0.0106) > max(0.0105) > min(0.0095) > CV(0.0064) > std/range(0.0056) > skew/kurtosis(0.0050)
+  - **|r|>0.05인 feature**: CV만 2개 (X375: 0.1473, X384: 0.1300). 나머지 집계는 전부 0개
+  - Feature별 최적 집계: **Q75 160개(14.7%)**, max 144개(13.2%), Q25 104개(9.6%), median 102개(9.4%), mean 90개(8.3%)
+  - **CV의 압도적 발견**: X375(CV)는 mean|r|=0.011에서 CV|r|=0.147로 **13.6배 상승**. die 간 상대적 변동률이 target과 강하게 연결
+  - Q75가 mean보다 |r|이 높은 feature: **501개(46.1%)** — 거의 절반
+  - Q25가 mean보다 높은 feature: 373개(34.3%)
+  - kurtosis: 257개(23.6%)로 skew와 유사, die=4 한계로 정보량 제한적
 - **차트 소견**:
-  - Boxplot에서 집계 방식별 |r| 분포 차이가 미미하나, 상위 feature에서는 std/range 우위
-  - mean vs 타 집계 scatter에서 고상관 영역에서 대각선 위 점 증가 (std, range)
+  - Boxplot에서 CV가 소수 feature에서 돌출적으로 높은 이상점 형태
+  - mean vs 타 집계 scatter에서 CV 관련 점들이 대각선 크게 상회
 - **액션**:
-  - **단일 집계 사용 X → mean + std + range를 기본으로 사용** (3가지 조합)
-  - Feature별 최적 집계가 다름 → 가능하면 7가지 모두 생성 후 feature selection으로 걸러내기
-  - skew는 die 4개로 계산 시 불안정 → 낮은 우선순위
-  - median이 max|r| 1위이므로 mean 대신 median도 기본 집계에 포함 고려
+  - **CV(변동계수)는 반드시 포함** — 유일하게 |r|>0.05를 달성한 집계. X375, X384 등 mean으로는 무상관이나 die 간 변동률이 핵심인 feature 존재
+  - **Q25, Q75 포함 권장** — mean과 비슷한 수준이면서 feature별 최다 best 선정(Q75: 14.7%). 정보 다양성 확보
+  - **kurtosis는 낮은 우선순위** — die=4에서 excess kurtosis 불안정, skew와 유사한 수준
+  - **최종 집계 전략**: mean + std + min + max + range + median + Q25 + Q75 + CV (9종) 기본 사용, skew/kurtosis는 선택적
+  - Feature별 최적 집계가 다름 → 전체 생성 후 feature selection으로 걸러내기
 
 ---
 
@@ -410,12 +422,12 @@
 1. **결측 처리**: 대다수 train median imputation, XGBoost/LightGBM 네이티브 비교
 2. **이상치 처리**: Winsorization 또는 AEC DPAT 적용 (투표 기반 권장). health 이상치는 유지
 3. **스케일링**: RobustScaler 필수 (스케일 차이 ~10,000배)
-4. **Die→Unit 집계**: mean + std + range + median 기본. Position별 분리 집계도 일부 feature에 적용
-5. **로트 메타 피처**: 로트별 WT 집계 통계 (lot mean, lot std) 별도 ��성. 일괄 정규화는 역효과
+4. **Die→Unit 집계**: mean + std + min + max + range + median + Q25 + Q75 + CV (9종) 기본. CV가 유일하게 |r|>0.05 달성 (X375: 0.147). Position별 분리 집계도 일부 feature에 적용
+5. **로트 메타 피처**: 로트별 WT 집계 통계 (lot mean, lot std) 별도 생성. 일괄·선택적 정규화 모두 역효과 확인 (F-ratio 전 구간에서 악화)
 6. **웨이퍼 패턴**: 패턴 유형(Random/Edge/Center 등)을 메타 feature로 추가
 
 ### 모델링에 반영할 발견
-1. **단일 feature 예측력 사실상 0** (max |r|=0.037) → 비선형 모델 + 상호작용 필수
+1. **단일 feature 예측력 극도로 낮음** (die-level max |r|=0.037, 단 CV 집계 시 X375: |r|=0.147) → 비선형 모델 + 상호작용 + CV 집계 필수
 2. **MI가 포착한 비선형 feature** (X1060~X1071 계열): Pearson에서는 무의미하나 실제 중요
 3. **트리 모델의 핵심 feature**: X251, X53 (Pearson 상위에 없음!)
 4. **Two-Stage 모델 필수**: zero-inflated 70.8%, 단일 회귀로는 한계
@@ -427,7 +439,7 @@
 |------|:---:|------|
 | 이상치 4방법 비교 | **불필요** | 충분히 비교됨 |
 | 비선형 상관 (Spearman+MI) | **불필요** | 3방법 비교 완료 |
-| 로트 정규화 효과 | **추가 가능** | feature별 정규화 판별 기준 수립 필요 |
+| 로트 정규화 효과 | **완료** | F-ratio 구간별 분석 결과 전 구간 악화 확인 → 정규화 불필요 결론 |
 | Y=0 내부 클러스터링 | **추가 가능** | t-SNE/UMAP으로 비선형 차원 축소 시도 |
 | NNR 잔차 피처 | **불필요** | 0/30 우위로 결론 명확 |
-| CLAUDE.md 수정 | **필요** | 상수 feature 98→97개 수정 |
+| CLAUDE.md 수정 | **완료** | 상수 feature 97개 수정 완료, 집계 9종·radial 제외·실행계획 반영 |

@@ -1,7 +1,7 @@
 """
 EDA 모듈: Die→Unit 집계 방식별 Target 상관 비교
-- 7종 집계 함수(mean, std, min, max, range, median, skew)로 die→unit 변환 후
-  각각 target과의 Pearson 상관을 계산하여 어떤 집계가 가장 유용한지 파악
+- 11종 집계 함수(mean, std, min, max, range, median, skew, Q25, Q75, kurtosis, CV)로
+  die→unit 변환 후 각각 target과의 Pearson 상관을 계산하여 어떤 집계가 가장 유용한지 파악
 - 전처리 Stage 4 (die→unit 집계) 전략 설계의 핵심 근거
 - 노트북에서 import eda_agg_compare as agg 로 사용
 """
@@ -21,12 +21,16 @@ AGG_FUNCS = {
     "range": lambda x: x.max() - x.min(),
     "median": "median",
     "skew": "skew",
+    "Q25": lambda x: x.quantile(0.25),
+    "Q75": lambda x: x.quantile(0.75),
+    "kurtosis": lambda x: x.kurtosis(),
+    "CV": lambda x: x.std() / x.mean() if abs(x.mean()) > 1e-10 else np.nan,
 }
 
 
 def compute_agg_correlations(xs_dict, ys_train, feat_cols):
     """
-    7종 집계 방식 각각에 대해 die→unit 변환 후 target과의 Pearson 상관 계산
+    11종 집계 방식 각각에 대해 die→unit 변환 후 target과의 Pearson 상관 계산
 
     반도체 맥락:
     - mean: die 4개의 중심 경향 → 기본 품질 수준
@@ -35,6 +39,9 @@ def compute_agg_correlations(xs_dict, ys_train, feat_cols):
     - range: max-min → die 간 산포 폭
     - median: 이상치에 강건한 중심 경향
     - skew: die 분포 비대칭 → 특정 die만 이탈했는지
+    - Q25/Q75: 이상치에 강건한 극단값 포착 (die 4개: Q25≈1~2번째, Q75≈3~4번째)
+    - kurtosis: die 분포 뾰족함 → 이상 die 존재 여부 (die 4개로 불안정할 수 있음)
+    - CV: 변동계수(std/|mean|) → 스케일 독립적 산포
 
     Parameters
     ----------
@@ -108,7 +115,35 @@ def compute_agg_correlations(xs_dict, ys_train, feat_cols):
     skew_valid = skew_vals[valid_mask.values]
     corr_by_agg["skew"] = _fast_corrwith(skew_valid, target_vals, feat_cols)
 
-    # ── 6) feature × agg 매트릭스 구성 ──
+    # ── 6) Q25, Q75: quantile 집계 ──
+    q25_agg = grouped.quantile(0.25)
+    q75_agg = grouped.quantile(0.75)
+    corr_by_agg["Q25"] = _fast_corrwith(
+        q25_agg.loc[valid_mask].values, target_vals, feat_cols
+    )
+    corr_by_agg["Q75"] = _fast_corrwith(
+        q75_agg.loc[valid_mask].values, target_vals, feat_cols
+    )
+
+    # ── 7) kurtosis (excess): m4/m2² - 3 ──
+    m4 = np.zeros_like(unit_means)
+    np.add.at(m4, die_unit_idx, deviations ** 4)
+    m4 /= n_per_unit[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kurt_vals = np.where(m2 > 0, m4 / (m2 ** 2) - 3.0, 0.0)
+    corr_by_agg["kurtosis"] = _fast_corrwith(
+        kurt_vals[valid_mask.values], target_vals, feat_cols
+    )
+
+    # ── 8) CV (변동계수 = std / |mean|) ──
+    std_cols_idx = [(f, "std") for f in feat_cols]
+    mean_v = multi_agg.loc[valid_mask, mean_cols].values
+    std_v = multi_agg.loc[valid_mask, std_cols_idx].values
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cv_vals = np.where(np.abs(mean_v) > 1e-10, std_v / np.abs(mean_v), np.nan)
+    corr_by_agg["CV"] = _fast_corrwith(cv_vals, target_vals, feat_cols)
+
+    # ── 9) feature × agg 매트릭스 구성 ──
     # AGG_FUNCS 순서 유지
     corr_by_agg = {k: corr_by_agg[k] for k in AGG_FUNCS.keys()}
     summary_df = pd.DataFrame(corr_by_agg)
@@ -193,7 +228,7 @@ def print_agg_summary(corr_by_agg, summary_df):
 
     # mean 대비 다른 집계가 더 나은 feature 수
     mean_abs = summary_df["mean"].abs()
-    for agg_name in ["std", "range", "min", "max", "skew"]:
+    for agg_name in [k for k in AGG_FUNCS.keys() if k != "mean"]:
         other_abs = summary_df[agg_name].abs()
         n_better = (other_abs > mean_abs).sum()
         print(f"\n  {agg_name}이 mean보다 |r|이 높은 feature: {n_better:,}개 ({n_better/len(mean_abs)*100:.1f}%)")
@@ -256,8 +291,12 @@ def plot_mean_vs_others(summary_df):
     ----------
     summary_df : DataFrame
     """
-    others = ["std", "min", "max", "range", "skew"]
-    fig, axes = plt.subplots(1, 5, figsize=(22, 4))
+    others = [k for k in AGG_FUNCS.keys() if k != "mean"]
+    n_others = len(others)
+    n_cols = 5
+    n_rows = (n_others + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(22, 4 * n_rows))
+    axes = np.array(axes).flatten()
 
     mean_abs = summary_df["mean"].abs()
 
@@ -284,6 +323,9 @@ def plot_mean_vs_others(summary_df):
         axes[i].set_xlim(0, lim)
         axes[i].set_ylim(0, lim)
         axes[i].set_aspect("equal")
+
+    for j in range(n_others, len(axes)):
+        axes[j].set_visible(False)
 
     plt.suptitle("mean 집계 대비 다른 집계의 Target 상관 비교", fontsize=13, y=1.03)
     plt.tight_layout()

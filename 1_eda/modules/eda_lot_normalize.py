@@ -212,6 +212,98 @@ def normalize_and_compare(xs_dict, ys_train, feat_cols):
     return compare_df.drop(columns=["raw_abs", "norm_abs"])
 
 
+def plot_normalization_by_fratio(compare_df, variance_df, thresholds=(10, 100, 500, 1000)):
+    """
+    F-ratio 구간별 정규화 효과 비교.
+    "F-ratio > X인 feature만 정규화했을 때" 효과가 있는 구간을 찾는다.
+
+    Parameters
+    ----------
+    compare_df : DataFrame  - normalize_and_compare() 반환값
+    variance_df : DataFrame - lot_feature_variance() 반환값
+    thresholds : tuple      - F-ratio 구간 경계값
+    """
+    # compare_df와 variance_df merge
+    merged = compare_df.merge(
+        variance_df[["feature", "f_ratio"]], on="feature", how="inner"
+    )
+    merged = merged[np.isfinite(merged["f_ratio"])]
+    merged["raw_abs"] = merged["raw_corr"].abs()
+    merged["norm_abs"] = merged["norm_corr"].abs()
+
+    # 구간 생성
+    bins = [0] + list(thresholds) + [np.inf]
+    labels = []
+    for i in range(len(bins) - 1):
+        lo = bins[i]
+        hi = bins[i + 1]
+        if np.isinf(hi):
+            labels.append(f">{int(lo)}")
+        else:
+            labels.append(f"{int(lo)}-{int(hi)}")
+    merged["f_bin"] = pd.cut(merged["f_ratio"], bins=bins, labels=labels, right=True)
+
+    # 구간별 통계
+    print("=" * 75)
+    print("F-ratio 구간별 정규화 효과")
+    print("=" * 75)
+    print(f"  {'구간':>10}  {'n':>5}  {'향상%':>6}  {'평균Δ|r|':>10}  {'Raw mean|r|':>12}  {'Norm mean|r|':>13}")
+    print("-" * 75)
+
+    stats = []
+    for label in labels:
+        sub = merged[merged["f_bin"] == label]
+        if len(sub) == 0:
+            continue
+        n_imp = (sub["improvement"] > 0).sum()
+        pct = n_imp / len(sub) * 100
+        mean_delta = sub["improvement"].mean()
+        raw_mean = sub["raw_abs"].mean()
+        norm_mean = sub["norm_abs"].mean()
+        print(f"  {label:>10}  {len(sub):>5}  {pct:>5.1f}%  {mean_delta:>+10.6f}  {raw_mean:>12.6f}  {norm_mean:>13.6f}")
+        stats.append({"f_bin": label, "n": len(sub), "improved_pct": pct,
+                       "mean_delta": mean_delta, "raw_mean": raw_mean, "norm_mean": norm_mean})
+
+    stats_df = pd.DataFrame(stats)
+
+    # 시각화
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # 1) 구간별 향상 비율
+    colors = ["#D0021B" if p < 50 else "#7BC67E" for p in stats_df["improved_pct"]]
+    axes[0].bar(stats_df["f_bin"], stats_df["improved_pct"], color=colors,
+                edgecolor="black", alpha=0.8)
+    axes[0].axhline(50, color="gray", linestyle="--", alpha=0.5)
+    axes[0].set_xlabel("F-ratio 구간")
+    axes[0].set_ylabel("향상 비율 (%)")
+    axes[0].set_title("F-ratio 구간별 정규화 향상 비율")
+    axes[0].tick_params(axis="x", rotation=30)
+
+    # 2) 구간별 평균 Δ|r|
+    colors2 = ["#D0021B" if d < 0 else "#7BC67E" for d in stats_df["mean_delta"]]
+    axes[1].bar(stats_df["f_bin"], stats_df["mean_delta"], color=colors2,
+                edgecolor="black", alpha=0.8)
+    axes[1].axhline(0, color="gray", linestyle="-", alpha=0.5)
+    axes[1].set_xlabel("F-ratio 구간")
+    axes[1].set_ylabel("평균 Δ|r|")
+    axes[1].set_title("F-ratio 구간별 평균 상관 변화")
+    axes[1].tick_params(axis="x", rotation=30)
+
+    # 3) scatter: F-ratio vs improvement
+    axes[2].scatter(np.log10(merged["f_ratio"].clip(lower=1)),
+                    merged["improvement"], alpha=0.2, s=8, color="steelblue")
+    axes[2].axhline(0, color="red", linestyle="--", alpha=0.5)
+    axes[2].set_xlabel("log10(F-ratio)")
+    axes[2].set_ylabel("Δ|r| (정규화 후 - 전)")
+    axes[2].set_title("F-ratio vs 정규화 효과")
+
+    plt.suptitle("F-ratio 기반 선택적 정규화 분석", fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.show()
+
+    return stats_df
+
+
 def plot_normalization_effect(compare_df, n=20):
     """
     정규화 전후 상관 비교 시각화

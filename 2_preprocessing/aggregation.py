@@ -48,7 +48,7 @@ def run_aggregation(xs_train, xs_val, xs_test, feat_cols,
     unit_feat_cols : list (집계 후 feature 컬럼)
     """
     if agg_funcs is None:
-        agg_funcs = ["mean", "std", "min", "max"]
+        agg_funcs = ["mean", "std", "min", "max", "range", "median"]
     if output_dir is None:
         output_dir = OUTPUT_DIR
 

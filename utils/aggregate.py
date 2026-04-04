@@ -20,8 +20,9 @@ def aggregate_to_unit(xs, feat_cols=None, agg_funcs=None):
     feat_cols : list, optional
         집계할 feature 컬럼. None이면 자동 추출
     agg_funcs : list of str, optional
-        집계 함수 목록. 기본값: ["mean", "std", "min", "max"]
+        집계 함수 목록. 기본값: ["mean", "std", "min", "max", "range", "median"]
         지원: "mean", "std", "min", "max", "median", "skew", "range"
+        EDA Phase 26: median이 max|r| 1위(0.0377), range도 유용
 
     Returns
     -------
@@ -31,7 +32,7 @@ def aggregate_to_unit(xs, feat_cols=None, agg_funcs=None):
     if feat_cols is None:
         feat_cols = get_feat_cols(xs)
     if agg_funcs is None:
-        agg_funcs = ["mean", "std", "min", "max"]
+        agg_funcs = ["mean", "std", "min", "max", "range", "median"]
 
     # range는 직접 계산 필요
     builtin_funcs = [f for f in agg_funcs if f != "range"]

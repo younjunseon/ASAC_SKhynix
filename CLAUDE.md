@@ -190,7 +190,7 @@ study.optimize(objective, n_trials=100)
 
 ### Feature 유형
 - **연속형**: 696개, **이산형**(고유값 ≤20): 391개
-- **상수 feature**(std=0): **98개** → 즉시 제거 대상
+- **상수 feature**(std=0): **97개** → 즉시 제거 대상
 - **극저분산**(std<1e-6): **105개** → 제거 대상
 - 실질 유효 feature: ~982개
 
@@ -218,9 +218,10 @@ EDA 결과를 바탕으로 도출한 end-to-end 전략. 핵심은 **(1) die→un
 
 | 제거 대상 | 기준 | 예상 수량 |
 |-----------|------|----------|
-| 상수 feature | std = 0 | 98개 |
-| 극저분산 | std < 1e-6 | +7개 (총 105개) |
+| 상수 feature | std = 0 | 97개 |
+| 극저분산 | std < 1e-6 | +8개 (총 105개) |
 | 고결측 | 결측률 ≥ 50% | ~17개 |
+| 고상관 쌍 | \|r\| > 0.95 | 47쌍 (EDA Phase 11) |
 | 중복 컬럼 | 값이 완전히 동일한 쌍 | 확인 후 결정 |
 
 → 약 **1,087 → ~960개** feature로 축소
@@ -245,7 +246,7 @@ EDA 결과를 바탕으로 도출한 end-to-end 전략. 핵심은 **(1) die→un
 
 ### Stage 4: Die → Unit 집계 (Feature Engineering 핵심)
 
-단일 feature 상관이 max 0.037로 극도로 낮으므로, **집계 통계량의 다양성**이 성능을 좌우한다.
+단일 feature 상관이 max 0.037로 극도로 낮으므로, **집계 통계량의 다양성**이 성능을 좌우한다. EDA Phase 26에서 11종 집계 비교 결과, **CV(변동계수)가 |r|=0.147로 유일하게 |r|>0.05 달성** — mean(0.037)의 4배.
 
 ```
 die-level feature (4 dies per unit)
@@ -253,18 +254,23 @@ die-level feature (4 dies per unit)
 unit-level aggregated features
 ```
 
-| 집계 함수 | 설명 | 기대 효과 |
-|-----------|------|----------|
-| mean | 평균 | 기본 중심 경향 |
-| std | 표준편차 | die 간 편차 → 불균일성 지표 |
-| min, max | 최소/최대 | 극단 die 포착 |
-| max - min (range) | 범위 | die 간 산포 |
-| median | 중앙값 | robust 중심 경향 |
-| skew | 왜도 | die 분포 비대칭 |
+| 집계 함수 | 설명 | 기대 효과 | EDA 검증 (max\|r\|) |
+|-----------|------|----------|-------------------|
+| mean | 평균 | 기본 중심 경향 | 0.0372 |
+| std | 표준편차 | die 간 편차 → 불균일성 지표 | 0.0317 |
+| min, max | 최소/최대 | 극단 die 포착 | 0.0372 / 0.0362 |
+| max - min (range) | 범위 | die 간 산포 | 0.0299 |
+| median | 중앙값 | robust 중심 경향 | 0.0377 |
+| Q25, Q75 | 사분위수 | die 분포의 하위/상위 경향 | 0.0390 / 0.0383 |
+| **CV** | **std/\|mean\|** | **scale-free 변동률 → 핵심** | **0.1473** |
+| skew | 왜도 | die 분포 비대칭 (die=4 불안정) | 0.0212 |
+| kurtosis | 첨도 | die 분포 꼬리 (die=4 불안정) | 0.0276 |
 
-- 960개 feature × 7개 통계 = **~6,720개** unit-level feature 생성
+- **기본 9종**: mean + std + min + max + range + median + Q25 + Q75 + CV
+- skew/kurtosis는 die=4에서 불안정하므로 선택적 포함
+- 960개 feature × 9개 통계 = **~8,640개** unit-level feature 생성
 - position별 feature도 고려: position 1/2/3/4 각각의 값을 별도 컬럼으로 (960 × 4 = 3,840개 추가 가능)
-- 메모리 이슈 시 mean + std + range 3개로 시작 후 점진 확장
+- CV 핵심 feature: X375(0.147), X384(0.130) — mean으로는 무상관이나 die 간 변동률이 target과 강하게 연결
 
 ### Stage 4.5: Wafer 메타 피처 엔지니어링 (run_wf_xy 활용)
 
@@ -284,19 +290,18 @@ xs['die_y']    = split[3].astype(int)  # die Y 좌표
 
 웨이퍼 내 위치는 불량률과 직접적 관계가 있다 (edge 효과, 장비 균일성 등).
 
-| 피처 | 산출 방법 | 기대 효과 |
-|------|----------|----------|
-| `die_x`, `die_y` | 파싱 그대로 | 위치 자체의 영향 |
-| `radial_dist` | `sqrt(die_x² + die_y²)` (웨이퍼 중심 기준 보정 필요) | edge vs center 효과 |
-| `is_edge` | `radial_dist > threshold` (분포 확인 후 결정) | 이진 edge 플래그 |
+| 피처 | 산출 방법 | 기대 효과 | EDA 검증 결과 |
+|------|----------|----------|-------------|
+| `die_x`, `die_y` | 파싱 그대로 | 위치 자체의 영향 | 집계 후 unit 공간 분포 반영 |
+| ~~`radial_dist`~~ | ~~`sqrt(die_x² + die_y²)`~~ | ~~edge vs center 효과~~ | **r=0.006, 무상관 확인 (Phase 23) → 제외** |
+| ~~`is_edge`~~ | ~~`radial_dist > threshold`~~ | ~~이진 edge 플래그~~ | **ring별 불량률 차이 2%p 이내 → 제외** |
 
-- die→unit 집계 시: unit 내 4개 die의 `radial_dist`에 대해 mean, std, max, min 생성
-- die_x, die_y 자체도 mean, std, range로 집계 → unit의 공간 분포 특성 반영
+- die_x, die_y를 mean, std, range로 집계 → unit의 공간 분포 특성 반영
 
-**공간 잔차 피처** (논문 5-3 NNR, 논문 5-4 GPR 근거):
-- die의 WT 측정값에서 **인접 die 가중 평균(가우시안 가중)**을 뺀 잔차(residual)를 별도 피처로 생성
-- 공간 트렌드에서 크게 벗어난 die = 불량 위험 높음 → 잠재 이상치 15.6% 추가 검출 사례
-- 구현: 같은 웨이퍼 내 die 좌표 기반 거리 가중 평균 → 잔차 계산 → die→unit 집계
+**~~공간 잔차 피처~~** → **EDA Phase 24에서 비효과적 확인, 제외**:
+- ~~die의 WT 측정값에서 인접 die 가중 평균을 뺀 잔차를 별도 피처로 생성~~
+- EDA 결과: WT feature의 NNR 잔차가 원본보다 |r| 높은 feature **0개(0.0%)**, 평균 개선 **-0.021(악화)**
+- health의 NNR(r=0.71)은 강력하나 target leakage. WT NNR은 무효 → **전처리에서 제외**
 
 #### 4.5.3 로트/작업 피처 (run_id, wafer_no → 집계 통계 & 인코딩)
 
@@ -312,7 +317,7 @@ lot_stats = xs.groupby('run_id')[feat_cols].agg(['mean', 'std'])
 
 - run_id별: WT feature 평균, std → 로트 품질 지표
 - wafer_no별: 같은 로트 내 웨이퍼 간 차이 포착
-- **로트별 정규화 (공식 피처)** (논문 5-3 근거, Multi-Site 분리로 양품 폐기율 40%→8.9%): `(die_value - lot_mean) / lot_std` — 로트 간 공정 편차를 제거하여 die의 상대적 이탈 정도를 수치화. 단순 편차보다 정규화된 z-score가 로트 간 비교 가능
+- ~~**로트별 정규화 (공식 피처)**~~ → **EDA Phase 21에서 역효과 확인**: 전체 일괄 z-score 정규화 시 76.9% feature에서 target 상관 악화. F-ratio 구간별 추가 분석 결과 **F-ratio가 높을수록 악화 심각** (F>1000: 93% 악화, Δ|r| -0.015). 선택적 정규화도 무효 → 정규화 전면 제외. 집계 통계 피처(lot mean, lot std)만 사용
 
 **방법 B: Target Encoding (성능 향상 기대, 누수 주의)**
 
@@ -336,7 +341,6 @@ from category_encoders import TargetEncoder
 | 원본 피처 | 집계 방법 | 결과 피처 |
 |-----------|----------|----------|
 | `die_x`, `die_y` | mean, std, range | unit 내 die 공간 분포 |
-| `radial_dist` | mean, std, max, min | unit의 웨이퍼 내 위치 특성 |
 | `run_id` 집계 통계 | unit 내 동일하므로 first | 로트 품질 지표 |
 | `wafer_no` | first (unit 내 동일) | 웨이퍼 번호 |
 
@@ -344,7 +348,7 @@ from category_encoders import TargetEncoder
 
 | 순서 | 피처 | 이유 |
 |------|------|------|
-| 1 | die_x, die_y, radial_dist | 파싱만으로 즉시 생성, 누수 위험 없음 |
+| 1 | die_x, die_y | 파싱만으로 즉시 생성, 누수 위험 없음 |
 | 2 | run_id별 WT 집계 통계 | 누수 없는 로트 품질 지표 |
 | 3 | Target Encoding (CV fold) | RMSE 개선 기대, 구현 주의 필요 |
 | 4 | Frequency Encoding | 보조 피처, 간단 |
@@ -357,7 +361,7 @@ from category_encoders import TargetEncoder
 
 ### Stage 6: Feature Selection
 
-1,087개에서 집계로 ~6,720개로 확장되므로 선별이 필수.
+1,087개에서 집계로 ~8,640개로 확장되므로 선별이 필수.
 
 1. **분산 기반 제거** → 2. **높은 상관 쌍 제거** (|r|>0.95) → 3. **Boruta** → 4. **LightGBM importance + Null Importance** → 5. **Permutation Importance 검증** → 6. **투표 기반 최종 선정**
 
@@ -459,7 +463,7 @@ Stage 2: 회귀 (Y>0인 샘플만)
 | 1 | Stage 1~3 (정리/결측/이상치, **Pre-optimization 원칙 적용**) | 노이즈 제거, die 레벨 선처리 | 3-3, 1-2, 5-3, 5-4 |
 | 2 | Stage 4 (die→unit 집계) + Stage 7-A (**10개** 모델 baseline 비교) | **모델별 RMSE 확보, 유망 모델 선별** | 4-1, 4-2, Shmuel 2024 |
 | 3 | Stage 4 확장 (mean+std+range+position) | feature 풍부화 → RMSE 개선 | 3-3 |
-| 3.5 | Stage 4.5 (공간 피처 + **공간 잔차** + **로트별 정규화**) | 공정 맥락 정보 추가 → RMSE 개선 | 2-3, 5-3, 5-4, Kang 2015 |
+| 3.5 | Stage 4.5 (공간 피처 + **로트 집계 통계**) | 공정 맥락 정보 추가 → RMSE 개선 | 2-3, Kang 2015 |
 | 4 | Stage 6 (Boruta + Null Importance + **투표 기반 선정**) | 노이즈 feature 제거 → RMSE 개선 | 1-3, 1-4, 5-1 |
 | 5 | Stage 7-D (유망 모델 HPO) | 하이퍼파라미터 최적화 → RMSE 개선 | 4-1 |
 | 6 | Stage 7-B (Two-Stage + **Custom Loss + SMOTE**) | zero-inflated 대응 → RMSE 개선 | 1-4, 2-1, 2-2 |
