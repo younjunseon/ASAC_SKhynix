@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import stats as sp_stats
+from scipy.spatial.distance import cdist
 from utils.config import KEY_COL, DIE_KEY_COL, TARGET_COL, SEED
 
 
@@ -31,7 +32,7 @@ def _parse_and_prepare(xs_dict, ys_train, feat_cols, n_feats=30):
     die_df["die_y"] = parts[3].astype(int)
 
     # target 상관 상위 feature 선택
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged_tmp = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
     corr = merged_tmp[feat_cols].corrwith(merged_tmp[TARGET_COL]).abs().sort_values(ascending=False)
     selected_feats = corr.head(n_feats).index.tolist()
@@ -49,7 +50,7 @@ def _parse_and_prepare(xs_dict, ys_train, feat_cols, n_feats=30):
 
 def _compute_nnr_for_wafer(wf_data, feat, sigma=3.0):
     """
-    단일 웨이퍼에서 NNR(Nearest Neighbor Residual) 계산
+    단일 웨이퍼에서 NNR(Nearest Neighbor Residual) 계산 (벡터화)
 
     Parameters
     ----------
@@ -64,25 +65,25 @@ def _compute_nnr_for_wafer(wf_data, feat, sigma=3.0):
     coords = wf_data[["die_x", "die_y"]].values.astype(float)
     values = wf_data[feat].values.astype(float)
     n = len(coords)
-    residuals = np.full(n, np.nan)
 
-    for i in range(n):
-        if np.isnan(values[i]):
-            continue
+    # 거리 행렬 한번에 계산 (C-level, O(n²) → 단일 호출)
+    dist_matrix = cdist(coords, coords)
 
-        # 유클리드 거리 계산
-        dists = np.sqrt(np.sum((coords - coords[i]) ** 2, axis=1))
-        # 자기 자신 제외, 거리 3*sigma 이내 이웃
-        mask = (dists > 0) & (dists <= max(3, 3 * sigma)) & ~np.isnan(values)
+    cutoff = max(3, 3 * sigma)
+    valid = ~np.isnan(values)
 
-        if mask.sum() == 0:
-            residuals[i] = np.nan
-            continue
+    # 이웃 마스크: 자기 자신 제외, 거리 cutoff 이내, NaN 아닌 값
+    neighbor_mask = (dist_matrix > 0) & (dist_matrix <= cutoff) & valid[np.newaxis, :]
 
-        # 가우시안 가중 평균
-        weights = np.exp(-dists[mask] ** 2 / (2 * sigma ** 2))
-        weighted_avg = np.average(values[mask], weights=weights)
-        residuals[i] = values[i] - weighted_avg
+    # 가우시안 가중치 (이웃이 아닌 곳은 0)
+    gauss_weights = np.where(neighbor_mask, np.exp(-dist_matrix ** 2 / (2 * sigma ** 2)), 0.0)
+
+    # 가중 평균 계산 (행렬 연산)
+    weight_sums = gauss_weights.sum(axis=1)
+    values_safe = np.where(valid, values, 0.0)
+    weighted_avg = np.where(weight_sums > 0, gauss_weights @ values_safe / weight_sums, np.nan)
+
+    residuals = np.where(valid & (weight_sums > 0), values - weighted_avg, np.nan)
 
     return residuals
 
@@ -117,14 +118,13 @@ def compute_spatial_residual(xs_dict, ys_train, feat_cols, n_feats=30, sigma=3.0
         print(f"  [{fi+1}/{len(selected_feats)}] {feat} NNR 계산 중 ({n_wafers} wafers)...",
               end="\r")
 
-        # 웨이퍼별 NNR
-        all_residuals = []
+        # 웨이퍼별 NNR (원본 인덱스 기반 대입으로 행 정렬 보장)
+        die_df[f"{feat}_resid"] = np.nan
         for wid in wafer_ids:
-            wf = die_df[die_df["wafer_id"] == wid]
+            mask = die_df["wafer_id"] == wid
+            wf = die_df[mask]
             resids = _compute_nnr_for_wafer(wf, feat, sigma)
-            all_residuals.append(resids)
-
-        die_df[f"{feat}_resid"] = np.concatenate(all_residuals)
+            die_df.loc[mask, f"{feat}_resid"] = resids
 
         # unit-level 집계
         resid_col = f"{feat}_resid"
@@ -251,13 +251,13 @@ def plot_residual_distribution(xs_dict, ys_train, feat_cols, n_feats=6, sigma=3.
     axes = np.array(axes).flatten()
 
     for fi, feat in enumerate(use_feats):
-        # NNR
-        all_resids = []
+        # NNR (원본 인덱스 기반 대입으로 행 정렬 보장)
+        die_df[f"{feat}_resid"] = np.nan
         for wid in wafer_ids:
-            wf = die_df[die_df["wafer_id"] == wid]
+            mask = die_df["wafer_id"] == wid
+            wf = die_df[mask]
             resids = _compute_nnr_for_wafer(wf, feat, sigma)
-            all_resids.append(resids)
-        die_df[f"{feat}_resid"] = np.concatenate(all_resids)
+            die_df.loc[mask, f"{feat}_resid"] = resids
 
         # unit-level |mean residual|
         unit_resid = die_df.groupby(KEY_COL).agg(

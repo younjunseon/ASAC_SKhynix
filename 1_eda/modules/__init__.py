@@ -22,7 +22,9 @@
 #
 # Phase 6: 공간/구조 분석
 #   eda_wafer_map (wm)        - 웨이퍼 맵 시각화
+#   eda_wafer_pattern (wp)    - 웨이퍼 불량 패턴 분류 (Center/Edge/Scratch/Local/Random)
 #   eda_lot_wafer (lw)        - 로트/웨이퍼 품질 분석
+#   eda_timeseries (tss)      - 생산 순서별 불량 패턴 (시계열)
 #   eda_lot_normalize (ln)    - 로트 정규화 효과 분석
 #   eda_position (pos)        - die position 분석
 #   eda_spatial (sp)          - 공간 패턴 (radial, ring, NNR)

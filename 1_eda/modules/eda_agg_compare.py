@@ -48,24 +48,113 @@ def compute_agg_correlations(xs_dict, ys_train, feat_cols):
     summary_df : DataFrame  - feature × agg_method 상관계수 매트릭스
     """
     xs_train = xs_dict["train"]
+
+    # ── 1) groupby 1회로 built-in 집계 일괄 처리 ──
+    # skew·range 제외한 5개를 한번에 계산 (skew는 pandas groupby에서 극도로 느림)
+    grouped = xs_train.groupby(KEY_COL)[feat_cols]
+    multi_agg = grouped.agg(["mean", "std", "min", "max", "median"])
+
+    # ── 2) target을 index 기준으로 정렬 (merge 대신 reindex로 빠르게) ──
+    target_series = ys_train.set_index(KEY_COL)[TARGET_COL].reindex(multi_agg.index)
+    valid_mask = target_series.notna()
+    target_vals = target_series[valid_mask].values
+
+    # ── 3) 각 집계별 상관계수 계산 (numpy vectorized) ──
     corr_by_agg = {}
 
-    for agg_name, agg_func in AGG_FUNCS.items():
-        # die → unit 집계
-        xs_unit = xs_train.groupby(KEY_COL)[feat_cols].agg(agg_func)
+    # MultiIndex 컬럼 선택: [(feat, agg), ...] 튜플 리스트로 명시적 지정
+    for agg_name in ["mean", "std", "min", "max", "median"]:
+        cols = [(f, agg_name) for f in feat_cols]
+        agg_vals = multi_agg.loc[valid_mask, cols].values  # (n_units, n_feats)
+        corr_by_agg[agg_name] = _fast_corrwith(agg_vals, target_vals, feat_cols)
 
-        # target과 merge
-        merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
+    # ── 4) range = max - min (이미 계산된 값 재활용, groupby 추가 없음) ──
+    max_cols = [(f, "max") for f in feat_cols]
+    min_cols = [(f, "min") for f in feat_cols]
+    range_vals = (
+        multi_agg.loc[valid_mask, max_cols].values
+        - multi_agg.loc[valid_mask, min_cols].values
+    )
+    corr_by_agg["range"] = _fast_corrwith(range_vals, target_vals, feat_cols)
 
-        # 상관계수 계산
-        corr = merged[feat_cols].corrwith(merged[TARGET_COL]).dropna()
-        corr_by_agg[agg_name] = corr
+    # ── 5) skew: numpy로 직접 계산 (pandas groupby.skew 대비 ~10x 빠름) ──
+    # 각 unit의 die 4개에 대한 skew = n*m3/m2^1.5 (biased estimator, scipy 호환)
+    mean_cols = [(f, "mean") for f in feat_cols]
+    mean_vals_full = multi_agg.loc[:, mean_cols]  # unit × feat
+    # die-level에서 각 unit의 mean을 빼고 3차/2차 모멘트 계산
+    keys = xs_train[KEY_COL].values
+    feat_matrix = xs_train[feat_cols].values  # (n_dies, n_feats)
 
-    # feature × agg 매트릭스 구성
+    # unit index mapping
+    unique_keys = multi_agg.index.values
+    key_to_idx = {k: i for i, k in enumerate(unique_keys)}
+    die_unit_idx = np.array([key_to_idx[k] for k in keys])
+
+    unit_means = mean_vals_full.values  # (n_units, n_feats)
+    deviations = feat_matrix - unit_means[die_unit_idx]  # (n_dies, n_feats)
+
+    # m2, m3 by unit (sum then divide by n)
+    n_per_unit = np.bincount(die_unit_idx).astype(np.float64)  # (n_units,)
+    m2 = np.zeros_like(unit_means)
+    m3 = np.zeros_like(unit_means)
+    np.add.at(m2, die_unit_idx, deviations ** 2)
+    np.add.at(m3, die_unit_idx, deviations ** 3)
+    m2 /= n_per_unit[:, None]
+    m3 /= n_per_unit[:, None]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        skew_vals = np.where(m2 > 0, m3 / (m2 ** 1.5), 0.0)
+
+    skew_valid = skew_vals[valid_mask.values]
+    corr_by_agg["skew"] = _fast_corrwith(skew_valid, target_vals, feat_cols)
+
+    # ── 6) feature × agg 매트릭스 구성 ──
+    # AGG_FUNCS 순서 유지
+    corr_by_agg = {k: corr_by_agg[k] for k in AGG_FUNCS.keys()}
     summary_df = pd.DataFrame(corr_by_agg)
     summary_df.index.name = "feature"
 
     return corr_by_agg, summary_df
+
+
+def _fast_corrwith(X, y, feat_cols):
+    """
+    numpy vectorized Pearson correlation: 각 컬럼과 y의 상관계수
+    X: (n, p) array, y: (n,) array → Series(feat_cols → r)
+    NaN이 포함된 컬럼은 해당 행을 제외하고 per-column으로 계산
+    """
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n_feats = X.shape[1]
+    r = np.full(n_feats, np.nan)
+
+    # NaN이 전혀 없으면 vectorized 계산
+    has_nan = np.isnan(X).any()
+    if not has_nan:
+        X_centered = X - X.mean(axis=0, keepdims=True)
+        y_centered = y - y.mean()
+        numerator = (X_centered * y_centered[:, None]).sum(axis=0)
+        denom_x = np.sqrt((X_centered ** 2).sum(axis=0))
+        denom_y = np.sqrt((y_centered ** 2).sum())
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = np.where(denom_x > 0, numerator / (denom_x * denom_y), np.nan)
+    else:
+        # NaN이 있으면 컬럼별로 유효 행만 사용
+        y_mean = np.nanmean(y)
+        for j in range(n_feats):
+            col = X[:, j]
+            valid = ~(np.isnan(col) | np.isnan(y))
+            if valid.sum() < 3:
+                continue
+            xv, yv = col[valid], y[valid]
+            xc = xv - xv.mean()
+            yc = yv - yv.mean()
+            dx = np.sqrt((xc ** 2).sum())
+            dy = np.sqrt((yc ** 2).sum())
+            if dx > 0 and dy > 0:
+                r[j] = (xc * yc).sum() / (dx * dy)
+
+    return pd.Series(r, index=feat_cols)
 
 
 def print_agg_summary(corr_by_agg, summary_df):
@@ -174,15 +263,20 @@ def plot_mean_vs_others(summary_df):
 
     for i, agg_name in enumerate(others):
         other_abs = summary_df[agg_name].abs()
-        axes[i].scatter(mean_abs, other_abs, alpha=0.3, s=8, color="steelblue")
 
-        # 대각선
-        lim = max(mean_abs.max(), other_abs.max()) * 1.05
+        # 유효한 (NaN 아닌) 값만으로 scatter
+        valid = mean_abs.notna() & other_abs.notna()
+        mx, ox = mean_abs[valid], other_abs[valid]
+        axes[i].scatter(mx, ox, alpha=0.3, s=8, color="steelblue")
+
+        # 대각선 (유효값이 없거나 모두 0이면 기본 범위 사용)
+        raw_lim = max(mx.max(), ox.max()) if len(mx) > 0 else 0.0
+        lim = raw_lim * 1.05 if raw_lim > 0 and np.isfinite(raw_lim) else 0.05
         axes[i].plot([0, lim], [0, lim], "r--", alpha=0.5, linewidth=1)
 
         # 대각선 위 비율
-        n_better = (other_abs > mean_abs).sum()
-        pct = n_better / len(mean_abs) * 100
+        n_better = (ox > mx).sum()
+        pct = n_better / len(mx) * 100 if len(mx) > 0 else 0.0
 
         axes[i].set_xlabel("mean |r|")
         axes[i].set_ylabel(f"{agg_name} |r|")
@@ -230,18 +324,22 @@ def find_best_agg_features(summary_df, n=15):
         })
 
     gain_df = pd.DataFrame(records)
-    gain_df = gain_df.sort_values("gain_over_mean", ascending=False).reset_index(drop=True)
+    # NaN gain은 -inf로 처리하여 정렬 시 맨 뒤로
+    gain_df = gain_df.sort_values("gain_over_mean", ascending=False, na_position="last").reset_index(drop=True)
 
-    # mean이 아닌 최적 집계인 feature만
-    non_mean = gain_df[gain_df["best_agg"] != "mean"]
+    # mean이 아닌 최적 집계인 feature만 (NaN 제외)
+    non_mean = gain_df[(gain_df["best_agg"] != "mean") & gain_df["gain_over_mean"].notna()]
 
     print("=" * 70)
     print(f"mean 외 집계가 더 좋은 상위 {n}개 Feature")
     print("=" * 70)
-    print(f"  {'Feature':>8}  {'최적집계':>8}  {'best|r|':>8}  {'mean|r|':>8}  {'향상':>8}")
-    print("-" * 55)
-    for _, row in non_mean.head(n).iterrows():
-        print(f"  {row['feature']:>8}  {row['best_agg']:>8}  {row['best_r']:>8.4f}  "
-              f"{row['mean_r']:>8.4f}  {row['gain_over_mean']:>+8.4f}")
+    if len(non_mean) == 0:
+        print("  (유효한 결과 없음 — mean 상관계수가 모두 NaN이면 비교 불가)")
+    else:
+        print(f"  {'Feature':>8}  {'최적집계':>8}  {'best|r|':>8}  {'mean|r|':>8}  {'향상':>8}")
+        print("-" * 55)
+        for _, row in non_mean.head(n).iterrows():
+            print(f"  {row['feature']:>8}  {row['best_agg']:>8}  {row['best_r']:>8.4f}  "
+                  f"{row['mean_r']:>8.4f}  {row['gain_over_mean']:>+8.4f}")
 
     return gain_df

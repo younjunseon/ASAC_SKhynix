@@ -23,7 +23,7 @@ def _prepare_data(xs_dict, ys_train, feat_cols, n_feats=30):
     selected_feats : list
     """
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
 
     # target 상관 상위 feature 선택

@@ -32,7 +32,7 @@ def _parse_wafer_data(xs_dict, ys_train, feat_cols, n_feats=20):
     die_df["die_y"] = parts[3].astype(int)
 
     # target 상관 상위 feature 선택
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged_tmp = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
     corr = merged_tmp[feat_cols].corrwith(merged_tmp[TARGET_COL]).abs().sort_values(ascending=False)
     selected_feats = corr.head(n_feats).index.tolist()
@@ -47,7 +47,20 @@ def _parse_wafer_data(xs_dict, ys_train, feat_cols, n_feats=20):
     return die_df, selected_feats
 
 
-def neighbor_similarity(xs_dict, ys_train, feat_cols, n_feats=20, radius=1.5):
+def _auto_radius(die_df):
+    """
+    die 좌표의 최소 간격을 자동 감지하여 인접 판정 radius를 반환한다.
+    최소 step × 1.5 → 직접 인접 die + 대각선 이웃 포함.
+    """
+    dx_sorted = np.sort(die_df["die_x"].unique())
+    dy_sorted = np.sort(die_df["die_y"].unique())
+    step_x = np.min(np.diff(dx_sorted)) if len(dx_sorted) > 1 else 1
+    step_y = np.min(np.diff(dy_sorted)) if len(dy_sorted) > 1 else 1
+    step = min(step_x, step_y)
+    return step * 1.5
+
+
+def neighbor_similarity(xs_dict, ys_train, feat_cols, n_feats=20, radius=None):
     """
     인접 die 간 WT 측정값 유사도 분석
 
@@ -69,6 +82,11 @@ def neighbor_similarity(xs_dict, ys_train, feat_cols, n_feats=20, radius=1.5):
     """
     die_df, selected_feats = _parse_wafer_data(xs_dict, ys_train, feat_cols, n_feats)
     wafer_ids = die_df["wafer_id"].unique()
+
+    # radius 자동 감지
+    if radius is None:
+        radius = _auto_radius(die_df)
+        print(f"인접 판정 radius 자동 감지: {radius:.1f}")
 
     # 웨이퍼별로 인접 die 쌍의 absolute difference 계산
     results = {f: {"y0_diffs": [], "ypos_diffs": []} for f in selected_feats}
@@ -96,19 +114,26 @@ def neighbor_similarity(xs_dict, ys_train, feat_cols, n_feats=20, radius=1.5):
 
         health_vals = wf[TARGET_COL].values
 
+        # 쌍 중 하나라도 Y>0이면 ypos, 둘 다 Y=0이면 y0
+        pair_health = np.maximum(health_vals[i_idx], health_vals[j_idx])
+        y0_mask = pair_health == 0
+        ypos_mask = pair_health > 0
+
         for feat in selected_feats:
             vals = wf[feat].values.astype(float)
             abs_diffs = np.abs(vals[i_idx] - vals[j_idx])
 
-            # 쌍 중 하나라도 Y>0이면 ypos, 둘 다 Y=0이면 y0
-            pair_health = np.maximum(health_vals[i_idx], health_vals[j_idx])
-            y0_mask = pair_health == 0
-            ypos_mask = pair_health > 0
+            # NaN diff 제거 (feature 결측치 전파 방지)
+            valid_d = ~np.isnan(abs_diffs)
 
             if y0_mask.any():
-                results[feat]["y0_diffs"].extend(abs_diffs[y0_mask].tolist())
+                keep = valid_d & y0_mask
+                if keep.any():
+                    results[feat]["y0_diffs"].extend(abs_diffs[keep].tolist())
             if ypos_mask.any():
-                results[feat]["ypos_diffs"].extend(abs_diffs[ypos_mask].tolist())
+                keep = valid_d & ypos_mask
+                if keep.any():
+                    results[feat]["ypos_diffs"].extend(abs_diffs[keep].tolist())
 
     print(" " * 60)
 
@@ -204,7 +229,7 @@ def plot_neighbor_similarity(similarity_df, n=15):
     plt.show()
 
 
-def neighbor_defect_rate(xs_dict, ys_train, feat_cols, radius=1.5, n_bins=5):
+def neighbor_defect_rate(xs_dict, ys_train, feat_cols, radius=None, n_bins=5):
     """
     인접 die의 건강 상태가 중심 die에 미치는 영향 분석
 
@@ -216,7 +241,7 @@ def neighbor_defect_rate(xs_dict, ys_train, feat_cols, radius=1.5, n_bins=5):
     xs_dict : dict
     ys_train : DataFrame
     feat_cols : list of str  (사용하지 않지만 인터페이스 통일)
-    radius : float
+    radius : float or None  - None이면 die 간격에서 자동 감지
     n_bins : int  - 분석용 bin 수
 
     Returns
@@ -225,6 +250,11 @@ def neighbor_defect_rate(xs_dict, ys_train, feat_cols, radius=1.5, n_bins=5):
     """
     die_df, _ = _parse_wafer_data(xs_dict, ys_train, feat_cols, n_feats=5)
     wafer_ids = die_df["wafer_id"].unique()
+
+    # radius 자동 감지
+    if radius is None:
+        radius = _auto_radius(die_df)
+        print(f"인접 판정 radius 자동 감지: {radius:.1f}")
 
     # 각 die에 대해 인접 die의 평균 health 계산
     die_df["neighbor_health"] = np.nan
@@ -336,6 +366,10 @@ def spatial_autocorrelation_moran(xs_dict, ys_train, feat_cols, n_wafers=50):
     die_df, _ = _parse_wafer_data(xs_dict, ys_train, feat_cols, n_feats=5)
     wafer_ids = die_df["wafer_id"].unique()
 
+    # 인접 판정 거리 자동 감지
+    moran_radius = _auto_radius(die_df)
+    print(f"Moran's I 인접 판정 radius: {moran_radius:.1f}")
+
     rng = np.random.RandomState(SEED)
     sampled = rng.choice(wafer_ids, min(n_wafers, len(wafer_ids)), replace=False)
 
@@ -352,25 +386,20 @@ def spatial_autocorrelation_moran(xs_dict, ys_train, feat_cols, n_wafers=50):
         # 공간 가중 행렬 (inverse distance, threshold)
         dists = cdist(coords, coords)
         W = np.zeros_like(dists)
-        mask = (dists > 0) & (dists <= 2.0)
+        mask = (dists > 0) & (dists <= moran_radius)
         W[mask] = 1.0 / dists[mask]
 
-        # S0, S1, S2는 정규화 전 원본 W에서 계산
+        # S0, S1, S2 — 원본 W 기준 (분자도 원본 W 사용하여 일관성 보장)
         S0 = W.sum()
         if S0 == 0:
             continue
         S1 = 0.5 * np.sum((W + W.T) ** 2)
         S2 = np.sum((W.sum(axis=0) + W.sum(axis=1)) ** 2)
 
-        # 행 정규화 (Moran's I 계산용)
-        row_sums = W.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1.0
-        W_norm = W / row_sums
-
-        # Moran's I 계산
+        # Moran's I 계산 (원본 W를 분자에도 동일하게 사용)
         y_bar = y.mean()
         y_dev = y - y_bar
-        numerator = np.sum(W_norm * np.outer(y_dev, y_dev))
+        numerator = np.sum(W * np.outer(y_dev, y_dev))
         denominator = np.sum(y_dev ** 2)
 
         if denominator == 0:

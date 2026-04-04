@@ -33,14 +33,17 @@ def _parse_coords(xs_dict, ys_train):
     die_df["die_x"] = parts[2].astype(int)
     die_df["die_y"] = parts[3].astype(int)
 
-    # 웨이퍼별 중심 계산 후 radial distance
-    wafer_centers = die_df.groupby("wafer_id").agg(
-        cx=("die_x", "mean"), cy=("die_y", "mean")
+    # 웨이퍼별 중심 + 반지름 계산 후 타원 정규화 radial distance
+    wafer_stats = die_df.groupby("wafer_id").agg(
+        cx=("die_x", lambda x: (x.max() + x.min()) / 2),
+        cy=("die_y", lambda x: (x.max() + x.min()) / 2),
+        Rx=("die_x", lambda x: max((x.max() - x.min()) / 2, 1.0)),
+        Ry=("die_y", lambda x: max((x.max() - x.min()) / 2, 1.0)),
     )
-    die_df = die_df.merge(wafer_centers, on="wafer_id", how="left")
+    die_df = die_df.merge(wafer_stats, on="wafer_id", how="left")
     die_df["radial_dist"] = np.sqrt(
-        (die_df["die_x"] - die_df["cx"])**2 +
-        (die_df["die_y"] - die_df["cy"])**2
+        ((die_df["die_x"] - die_df["cx"]) / die_df["Rx"])**2 +
+        ((die_df["die_y"] - die_df["cy"]) / die_df["Ry"])**2
     )
 
     # target merge
@@ -149,11 +152,13 @@ def zone_analysis(die_df, n_rings=3, n_quadrants=4):
     die_df["ring"] = pd.qcut(die_df["radial_dist"], q=n_rings, labels=ring_labels, duplicates="drop")
 
     # Quadrant 구분 (각도 기반)
+    # arctan2 범위: [-π, π]. pd.cut은 오름차순 bin이므로 라벨도 각도 순서에 맞춤
     die_df["angle"] = np.arctan2(
         die_df["die_y"] - die_df["cy"],
         die_df["die_x"] - die_df["cx"]
     )
-    quad_labels = ["Q1(↗)", "Q2(↖)", "Q3(↙)", "Q4(↘)"]
+    # [-π,-π/2): Q3(↙), [-π/2,0): Q4(↘), [0,π/2): Q1(↗), [π/2,π]: Q2(↖)
+    quad_labels = ["Q3(↙)", "Q4(↘)", "Q1(↗)", "Q2(↖)"]
     die_df["quadrant"] = pd.cut(die_df["angle"], bins=n_quadrants,
                                 labels=quad_labels[:n_quadrants])
 
@@ -226,7 +231,7 @@ def spatial_autocorrelation(die_df, n_wafers=6):
         if n_defect == 0 or n_defect == n_total:
             continue
 
-        # 인접 die 쌍 찾기 (Manhattan distance == 1)
+        # 인접 die 쌍 찾기 (Manhattan distance ≤ 2: 직접 인접 + 대각선 이웃)
         coords = wf[["die_x", "die_y"]].values
         defects = wf["is_defect"].values
 
@@ -235,7 +240,7 @@ def spatial_autocorrelation(die_df, n_wafers=6):
         for i in range(len(coords)):
             for j in range(i + 1, len(coords)):
                 dist = abs(coords[i, 0] - coords[j, 0]) + abs(coords[i, 1] - coords[j, 1])
-                if dist <= 2:  # 인접 (가까운 die)
+                if dist <= 2:  # Manhattan ≤ 2 (직접 인접 + 대각선)
                     n_pairs += 1
                     if defects[i] == defects[j]:
                         n_same += 1

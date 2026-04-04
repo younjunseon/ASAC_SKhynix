@@ -31,7 +31,7 @@ def compute_correlation(xs_dict, ys_train, feat_cols):
         절대값 기준 내림차순 정렬
     """
     xs_train = xs_dict["train"]
-    xs_unit_mean = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit_mean = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
 
     train_merged = xs_unit_mean.merge(ys_train, left_index=True, right_on=KEY_COL, how='inner')
     print(f"Train merged shape: {train_merged.shape}")
@@ -188,7 +188,7 @@ def plot_discrete_vs_target(xs_dict, ys_train, discrete_feats):
         group_mean.plot(kind='bar', ax=axes[i], color='steelblue', edgecolor='black')
         axes[i].set_title(f'{col}별 health 평균')
         axes[i].set_ylabel('health 평균')
-        axes[i].tick_params(axis='x', rotation=0)
+        axes[i].tick_params(axis='x', rotation=90)
 
     for j in range(i + 1, len(axes)):
         axes[j].set_visible(False)

@@ -89,4 +89,15 @@ else:
 
 plt.rcParams["axes.unicode_minus"] = False
 
+# ─── EDA 시각화 스타일 적용 ────────────────────────────────
+_style_path = os.path.join(_this, "1_eda", "eda_style.mplstyle")
+if os.path.exists(_style_path):
+    plt.style.use(_style_path)
+    # 스타일 적용 후 한글 폰트 재설정 (style.use가 font.family를 덮어쓰므로)
+    if ENV == "colab":
+        plt.rcParams["font.family"] = "NanumGothic"
+    else:
+        plt.rcParams["font.family"] = "Malgun Gothic"
+    plt.rcParams["axes.unicode_minus"] = False
+
 print("setup 완료")

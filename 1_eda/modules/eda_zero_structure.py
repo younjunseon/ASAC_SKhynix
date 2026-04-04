@@ -28,7 +28,7 @@ def _prepare_zero_data(xs_dict, ys_train, feat_cols):
     valid_feats : list  (분산 > 0인 feature)
     """
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
 
     zero_df = merged[merged[TARGET_COL] == 0].copy()
@@ -209,7 +209,7 @@ def compare_zero_clusters_with_positive(xs_dict, ys_train, feat_cols, zero_df):
     """
     # Y>0 데이터 준비
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
     pos_df = merged[merged[TARGET_COL] > 0]
 
@@ -295,7 +295,7 @@ def boundary_analysis(xs_dict, ys_train, feat_cols, n_feats=8):
     """
     Y=0 unit 중 Y>0과 가까운 "경계선 unit" 분석
 
-    Mahalanobis 거리로 Y>0 중심으로부터의 거리를 계산하여
+    StandardScaler 표준화 후 Y>0 centroid까지의 유클리드 거리를 계산하여
     Y=0을 "확실한 양품" vs "경계선 양품"으로 분리
 
     Parameters
@@ -310,7 +310,7 @@ def boundary_analysis(xs_dict, ys_train, feat_cols, n_feats=8):
     zero_scored : DataFrame  ('dist_score' 컬럼 추가)
     """
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
 
     zero_df = merged[merged[TARGET_COL] == 0].copy()
@@ -334,7 +334,8 @@ def boundary_analysis(xs_dict, ys_train, feat_cols, n_feats=8):
     pos_vals = pos_df[use_feats].values
     pos_mean = pos_vals.mean(axis=0)
 
-    # 유사도 = Y>0 centroid까지의 유클리드 거리 (표준화 후)
+    # 유사도 = Y>0 centroid까지의 표준화 유클리드 거리
+    # (StandardScaler로 feature별 스케일 보정 후 유클리드 거리 계산)
     scaler = StandardScaler()
     scaler.fit(merged[use_feats].values)
 

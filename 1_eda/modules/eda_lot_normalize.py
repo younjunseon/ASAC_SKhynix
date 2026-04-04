@@ -147,7 +147,7 @@ def normalize_and_compare(xs_dict, ys_train, feat_cols):
     xs_train = _parse_lot(xs_dict)
 
     # ── 1) Raw 상관 (정규화 전) ──
-    xs_raw_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_raw_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged_raw = xs_raw_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
     raw_corr = merged_raw[feat_cols].corrwith(merged_raw[TARGET_COL]).dropna()
 
@@ -290,7 +290,12 @@ def lot_distribution_shift(xs_dict, feat_cols, variance_df=None, n_feats=6):
     if variance_df is None:
         variance_df = lot_feature_variance(xs_dict, feat_cols, n_feats=n_feats)
 
-    top_feats = variance_df.head(n_feats)["feature"].tolist()
+    # F=inf(로트 내 상수)는 boxplot이 의미 없으므로 제외, 유한 F 상위 선택
+    finite_df = variance_df[np.isfinite(variance_df["f_ratio"])]
+    top_feats = finite_df.head(n_feats)["feature"].tolist()
+    if not top_feats:
+        print("유한 F-ratio를 가진 feature가 없습니다.")
+        return
 
     n_cols = min(3, n_feats)
     n_rows = (n_feats + n_cols - 1) // n_cols

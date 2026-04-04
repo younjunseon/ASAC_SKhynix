@@ -35,7 +35,7 @@ def _prepare_unit_data(xs_dict, ys_train, feat_cols):
         분산 > 0인 feature 컬럼명 리스트
     """
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
 
     # NaN median imputation

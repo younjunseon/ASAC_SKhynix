@@ -39,7 +39,7 @@ def _prepare_data(xs_dict, ys_train, feat_cols):
         unit-level로 집계된 X features + target (health) 합본
     """
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
     print(f"Die→Unit 집계 완료: {len(xs_train):,} dies → {len(merged):,} units")
     return merged

@@ -23,7 +23,7 @@ def _build_group_data(xs_dict, ys_train, feat_cols):
     grp_pos  : DataFrame  (Y>0인 unit)
     """
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
 
     grp_zero = merged[merged[TARGET_COL] == 0]
@@ -282,7 +282,7 @@ def compare_within_positive(xs_dict, ys_train, feat_cols, test_df, q_low=0.1, q_
     pos_test_df : DataFrame  - Y>0 내 상위 vs 하위 통계 검정 결과
     """
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
 
     pos_only = merged[merged[TARGET_COL] > 0].copy()

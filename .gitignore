@@ -39,3 +39,6 @@ catboost_info/
 
 # 빌드 아티팩트
 code.zip
+
+# EDA 생성 아티팩트
+1_eda/charts/

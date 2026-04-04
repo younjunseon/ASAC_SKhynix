@@ -55,7 +55,11 @@ def position_overview(xs_dict, ys_train, feat_cols, n_feats=10):
                   for p in sorted(xs_train[POSITION_COL].unique())]
         groups = [g for g in groups if len(g) > 0]
         if len(groups) >= 2:
-            h_stat, p_val = sp_stats.kruskal(*groups)
+            try:
+                h_stat, p_val = sp_stats.kruskal(*groups)
+            except ValueError:
+                # 모든 값이 동일한 상수 feature → 검정 불가
+                h_stat, p_val = 0, 1.0
         else:
             h_stat, p_val = 0, 1.0
 
@@ -143,7 +147,7 @@ def position_corr_with_target(xs_dict, ys_train, feat_cols, n_feats=15):
     corr_results = {}
 
     # mean 집계 상관 (기준선)
-    xs_mean = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_mean = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged_mean = xs_mean.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
     corr_mean = merged_mean[feat_cols].corrwith(merged_mean[TARGET_COL])
     corr_results["mean"] = corr_mean

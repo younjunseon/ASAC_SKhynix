@@ -24,7 +24,7 @@ def _prepare_data(xs_dict, ys_train, feat_cols):
     valid_feats : list  (분산 > 0인 feature만)
     """
     xs_train = xs_dict["train"]
-    xs_unit = xs_train.groupby(KEY_COL)[feat_cols].mean()
+    xs_unit = xs_dict['train_unit_mean'] if 'train_unit_mean' in xs_dict else xs_train.groupby(KEY_COL)[feat_cols].mean()
     merged = xs_unit.merge(ys_train, left_index=True, right_on=KEY_COL, how="inner")
 
     # MI는 NaN을 처리하지 못하므로 median imputation
@@ -79,7 +79,7 @@ def compute_nonlinear_corr(xs_dict, ys_train, feat_cols, n_neighbors=5):
     spearman_corr = pd.Series(spearman_corr)
 
     # 3) Mutual Information
-    print(f"Mutual Information 계산 중 (n_neighbors={n_neighbors})... (1~3분 소요)")
+    print(f"Mutual Information 계산 중 (n_neighbors={n_neighbors})...")
     mi_scores = mutual_info_regression(
         X, y, n_neighbors=n_neighbors, random_state=SEED
     )
