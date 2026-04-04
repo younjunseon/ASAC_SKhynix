@@ -46,6 +46,57 @@ def _prepare_zero_data(xs_dict, ys_train, feat_cols):
     return zero_df, valid_feats
 
 
+def plot_k_search(xs_dict, ys_train, feat_cols, k_range=range(2, 9)):
+    """
+    K=2~8에 대해 Silhouette Score + Elbow(Inertia) 커브를 그려서
+    최적 K를 눈으로 판단할 수 있게 한다.
+    결과를 보고 zero_cluster_analysis(n_clusters=선택값)으로 넘기면 됨.
+    """
+    zero_df, valid_feats = _prepare_zero_data(xs_dict, ys_train, feat_cols)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(zero_df[valid_feats].values)
+
+    # Silhouette 샘플링 (속도)
+    n_sample = min(5000, len(X_scaled))
+    rng = np.random.RandomState(SEED)
+    idx = rng.choice(len(X_scaled), n_sample, replace=False)
+    X_sample = X_scaled[idx]
+
+    sil_scores, inertias = [], []
+    for k in k_range:
+        km = KMeans(n_clusters=k, random_state=SEED, n_init=10)
+        labels = km.fit_predict(X_scaled)
+        inertias.append(km.inertia_)
+        sil_scores.append(silhouette_score(X_sample, labels[idx]))
+        print(f"  K={k}: Silhouette={sil_scores[-1]:.4f}, Inertia={km.inertia_:,.0f}")
+
+    best_k = list(k_range)[int(np.argmax(sil_scores))]
+    print(f"\n  → Silhouette 최대: K={best_k} ({max(sil_scores):.4f})")
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].plot(list(k_range), sil_scores, "o-", color="#4A90D9", linewidth=2)
+    axes[0].axvline(best_k, color="red", linestyle="--", alpha=0.7, label=f"Best K={best_k}")
+    axes[0].set_xlabel("K (클러스터 수)")
+    axes[0].set_ylabel("Silhouette Score")
+    axes[0].set_title("Silhouette Score by K")
+    axes[0].legend()
+    axes[0].set_xticks(list(k_range))
+
+    axes[1].plot(list(k_range), inertias, "o-", color="#D0021B", linewidth=2)
+    axes[1].set_xlabel("K (클러스터 수)")
+    axes[1].set_ylabel("Inertia (SSE)")
+    axes[1].set_title("Elbow Method")
+    axes[1].set_xticks(list(k_range))
+
+    plt.suptitle("Y=0 클러스터 수 탐색", fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.show()
+
+    return {"k_range": list(k_range), "silhouette": sil_scores, "inertia": inertias}
+
+
 def zero_cluster_analysis(xs_dict, ys_train, feat_cols, n_clusters=3):
     """
     Y=0 unit에 대해 K-Means 클러스터링 → 하위 그룹 발견
