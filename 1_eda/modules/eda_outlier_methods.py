@@ -13,7 +13,7 @@ import seaborn as sns
 from utils.config import KEY_COL, TARGET_COL, SEED
 
 
-def _prepare_data(xs_dict, ys_train, feat_cols, n_feats=30):
+def _prepare_data(xs_dict, ys_train, feat_cols, n_feats=None):
     """
     Die→unit mean 집계 + target merge + 상위 feature 선택
 
@@ -29,7 +29,7 @@ def _prepare_data(xs_dict, ys_train, feat_cols, n_feats=30):
     # target 상관 상위 feature 선택
     corr = merged[feat_cols].corrwith(merged[TARGET_COL]).abs().sort_values(ascending=False)
     valid = [c for c in corr.index if merged[c].std() > 0]
-    selected_feats = valid[:n_feats]
+    selected_feats = valid[:n_feats] if n_feats is not None else valid
 
     return merged, selected_feats
 
@@ -70,7 +70,7 @@ def _detect_mad_zscore(vals, threshold=3.5):
     return np.abs(modified_z) > threshold, None, None
 
 
-def detect_outliers_comparison(xs_dict, ys_train, feat_cols, n_feats=30):
+def detect_outliers_comparison(xs_dict, ys_train, feat_cols, n_feats=None):
     """
     4가지 이상치 탐지 방법 비교
 
@@ -214,7 +214,7 @@ def plot_outlier_comparison(outlier_counts_df, n=12):
     plt.show()
 
 
-def outlier_impact_on_correlation(xs_dict, ys_train, feat_cols, n_feats=30):
+def outlier_impact_on_correlation(xs_dict, ys_train, feat_cols, n_feats=None):
     """
     이상치 처리 전후 target 상관 변화 비교
 
@@ -396,19 +396,32 @@ def target_outlier_analysis(ys_train):
         if hi is not None and np.isfinite(hi):
             axes[0].axvline(x=hi, color=colors[name], linestyle="--",
                             linewidth=1.5, alpha=0.8, label=f"{name} upper")
+    # 오른쪽 확대 영역 표시 (빨간 점선 박스)
+    from matplotlib.patches import Rectangle
+    q95_val = np.percentile(pos_health, 95)
+    q999_val = np.percentile(pos_health, 99.9)
+    xlim_lo, xlim_hi = q95_val * 0.5, q999_val * 2.5
+    ylim = axes[0].get_ylim()
+    rect = Rectangle((xlim_lo, 0), xlim_hi - xlim_lo, ylim[1] * 0.15,
+                      linewidth=1.5, edgecolor="red", facecolor="none", linestyle="--")
+    axes[0].add_patch(rect)
+    axes[0].annotate("→ 오른쪽 확대", xy=(xlim_hi, ylim[1] * 0.075),
+                     fontsize=8, color="red", va="center")
     axes[0].set_xlabel("health (Y>0)")
     axes[0].set_ylabel("Unit 수")
     axes[0].set_title("Y>0 health 분포 + 이상치 경계")
     axes[0].legend(fontsize=8)
 
-    # 2) 극단값 확대 (상위 5%)
+    # 2) 극단값 확대 (상위 5%, x축 줌인)
     q95 = np.percentile(pos_health, 95)
     extreme = pos_health[pos_health >= q95]
-    axes[1].hist(extreme, bins=40, edgecolor="black", color="coral", alpha=0.7)
+    axes[1].hist(extreme, bins=40, edgecolor="black", color="lightsteelblue", alpha=0.7)
     for name, (lo, hi) in boundaries.items():
         if hi is not None and np.isfinite(hi) and hi >= q95:
             axes[1].axvline(x=hi, color=colors[name], linestyle="--",
                             linewidth=1.5, alpha=0.8, label=f"{name}")
+    q999 = np.percentile(pos_health, 99.9)
+    axes[1].set_xlim(q95 * 0.5, q999 * 2.5)
     axes[1].set_xlabel("health (상위 5%)")
     axes[1].set_ylabel("Unit 수")
     axes[1].set_title("극단값 확대 (상위 5%)")

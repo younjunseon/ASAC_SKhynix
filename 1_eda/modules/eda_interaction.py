@@ -203,6 +203,7 @@ def pairwise_interaction_corr(xs_dict, ys_train, feat_cols,
 def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     """
     상위 N개 interaction feature vs health scatter plot
+    왼쪽: 전체 데이터, 오른쪽: Y>0만 (비교)
 
     Parameters
     ----------
@@ -224,24 +225,27 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     merged, _ = _prepare_unit_data(xs_dict, ys_train, feat_cols)
     target = merged[TARGET_COL]
 
+    # Y>0 서브셋
+    pos_mask = target > 0
+    merged_pos = merged[pos_mask]
+    target_pos = target[pos_mask]
+
     display_n = min(n, len(interaction_df))
+    op_symbols = {"ratio": "/", "product": "*", "difference": "-"}
+    epsilon = 1e-8
+
+    # 전체 scatter (기존)
     n_cols = 3
     n_rows = (display_n + n_cols - 1) // n_cols
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 5.5 * n_rows))
     axes = np.array(axes).flatten()
 
-    # 시각화용 샘플링
     sample_idx = merged.sample(
         n=min(5000, len(merged)), random_state=SEED
     ).index
 
-    op_symbols = {"ratio": "/", "product": "*", "difference": "-"}
-    epsilon = 1e-8
-
     for i, (_, row) in enumerate(interaction_df.head(display_n).iterrows()):
-        feat_a = row["feat_a"]
-        feat_b = row["feat_b"]
-        op = row["operation"]
+        feat_a, feat_b, op = row["feat_a"], row["feat_b"], row["operation"]
         r_val = row["corr"]
         sym = op_symbols.get(op, op)
         formula = f"{feat_a} {sym} {feat_b}"
@@ -254,10 +258,9 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
             inter_vals = a_vals / (b_vals + epsilon)
         elif op == "product":
             inter_vals = a_vals * b_vals
-        else:  # difference
+        else:
             inter_vals = a_vals - b_vals
 
-        # inf/nan 제거
         mask = np.isfinite(inter_vals)
         axes[i].scatter(inter_vals[mask], y_vals[mask],
                         alpha=0.15, s=5, color="steelblue")
@@ -268,10 +271,141 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     for j in range(display_n, len(axes)):
         axes[j].set_visible(False)
 
-    plt.suptitle(f"상위 {display_n}개 Interaction Feature vs Target",
+    plt.suptitle(f"상위 {display_n}개 Interaction Feature vs Target (전체)",
                  fontsize=14, y=1.01)
     plt.tight_layout()
     plt.show()
+
+    # Y>0만 scatter (비교용)
+    fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(18, 5.5 * n_rows))
+    axes2 = np.array(axes2).flatten()
+
+    sample_pos_idx = merged_pos.sample(
+        n=min(5000, len(merged_pos)), random_state=SEED
+    ).index
+
+    for i, (_, row) in enumerate(interaction_df.head(display_n).iterrows()):
+        feat_a, feat_b, op = row["feat_a"], row["feat_b"], row["operation"]
+        sym = op_symbols.get(op, op)
+        formula = f"{feat_a} {sym} {feat_b}"
+
+        a_vals = merged_pos.loc[sample_pos_idx, feat_a].values
+        b_vals = merged_pos.loc[sample_pos_idx, feat_b].values
+        y_vals = target_pos.loc[sample_pos_idx].values
+
+        if op == "ratio":
+            inter_vals = a_vals / (b_vals + epsilon)
+        elif op == "product":
+            inter_vals = a_vals * b_vals
+        else:
+            inter_vals = a_vals - b_vals
+
+        mask = np.isfinite(inter_vals)
+        # Y>0에서의 상관계수 재계산
+        r_pos = pd.Series(inter_vals[mask]).corr(pd.Series(y_vals[mask]))
+        r_pos = r_pos if pd.notna(r_pos) else 0.0
+
+        axes2[i].scatter(inter_vals[mask], y_vals[mask],
+                         alpha=0.2, s=8, color="coral")
+        axes2[i].set_xlabel(formula, fontsize=10)
+        axes2[i].set_ylabel("health")
+        axes2[i].set_title(f"{formula}\nr(Y>0) = {r_pos:+.5f}", fontsize=10)
+
+    for j in range(display_n, len(axes2)):
+        axes2[j].set_visible(False)
+
+    plt.suptitle(f"상위 {display_n}개 Interaction Feature vs Target (Y>0만, n={pos_mask.sum():,})",
+                 fontsize=14, y=1.01)
+    plt.tight_layout()
+    plt.show()
+
+    # Y>0 + 이상치 제거 scatter
+    upper = target_pos.quantile(0.99)
+    clip_mask = target_pos <= upper
+    merged_clip = merged_pos[clip_mask]
+    target_clip = target_pos[clip_mask]
+    sample_clip_idx = merged_clip.sample(
+        n=min(5000, len(merged_clip)), random_state=SEED
+    ).index
+
+    fig3, axes3 = plt.subplots(n_rows, n_cols, figsize=(18, 5.5 * n_rows))
+    axes3 = np.array(axes3).flatten()
+
+    for i, (_, row) in enumerate(interaction_df.head(display_n).iterrows()):
+        feat_a, feat_b, op = row["feat_a"], row["feat_b"], row["operation"]
+        sym = op_symbols.get(op, op)
+        formula = f"{feat_a} {sym} {feat_b}"
+
+        a_vals = merged_clip.loc[sample_clip_idx, feat_a].values
+        b_vals = merged_clip.loc[sample_clip_idx, feat_b].values
+        y_vals = target_clip.loc[sample_clip_idx].values
+
+        if op == "ratio":
+            inter_vals = a_vals / (b_vals + epsilon)
+        elif op == "product":
+            inter_vals = a_vals * b_vals
+        else:
+            inter_vals = a_vals - b_vals
+
+        mask = np.isfinite(inter_vals)
+        r_clip = pd.Series(inter_vals[mask]).corr(pd.Series(y_vals[mask]))
+        r_clip = r_clip if pd.notna(r_clip) else 0.0
+
+        axes3[i].scatter(inter_vals[mask], y_vals[mask],
+                         alpha=0.2, s=8, color="mediumseagreen")
+        axes3[i].set_xlabel(formula, fontsize=10)
+        axes3[i].set_ylabel("health")
+        axes3[i].set_title(f"{formula}\nr(clip99) = {r_clip:+.5f}", fontsize=10)
+
+    for j in range(display_n, len(axes3)):
+        axes3[j].set_visible(False)
+
+    plt.suptitle(f"상위 {display_n}개 Interaction Feature vs Target "
+                 f"(Y>0 + 상위1% 제거, n={clip_mask.sum():,})",
+                 fontsize=14, y=1.01)
+    plt.tight_layout()
+    plt.show()
+
+    # 전체 vs Y>0 vs clip99 상관계수 비교 출력
+    print(f"\n{'='*75}")
+    print(f"전체 vs Y>0 vs Y>0+clip99 상관계수 비교")
+    print(f"  (전체: {len(merged):,}, Y>0: {pos_mask.sum():,}, "
+          f"Y>0+clip99: {clip_mask.sum():,}, 상위1% 기준: {upper:.4f})")
+    print(f"{'='*75}")
+    print(f"  {'Interaction':>30}  {'r(전체)':>10}  {'r(Y>0)':>10}  {'r(clip99)':>10}")
+    print("-" * 70)
+
+    for _, row in interaction_df.head(display_n).iterrows():
+        feat_a, feat_b, op = row["feat_a"], row["feat_b"], row["operation"]
+        sym = op_symbols.get(op, op)
+        formula = f"{feat_a} {sym} {feat_b}"
+        r_all = row["corr"]
+
+        a_p = merged_pos[feat_a].values
+        b_p = merged_pos[feat_b].values
+        if op == "ratio":
+            iv = a_p / (b_p + epsilon)
+        elif op == "product":
+            iv = a_p * b_p
+        else:
+            iv = a_p - b_p
+        m = np.isfinite(iv)
+        r_p = pd.Series(iv[m]).corr(pd.Series(target_pos.values[m]))
+        r_p = r_p if pd.notna(r_p) else 0.0
+
+        a_c = merged_clip[feat_a].values
+        b_c = merged_clip[feat_b].values
+        if op == "ratio":
+            iv_c = a_c / (b_c + epsilon)
+        elif op == "product":
+            iv_c = a_c * b_c
+        else:
+            iv_c = a_c - b_c
+        m_c = np.isfinite(iv_c)
+        r_c = pd.Series(iv_c[m_c]).corr(pd.Series(target_clip.values[m_c]))
+        r_c = r_c if pd.notna(r_c) else 0.0
+
+        print(f"  {formula:>30}  {r_all:>+10.5f}  {r_p:>+10.5f}  {r_c:>+10.5f}")
 
 
 def shallow_tree_analysis(xs_dict, ys_train, feat_cols,

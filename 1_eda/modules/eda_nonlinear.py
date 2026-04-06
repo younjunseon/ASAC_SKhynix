@@ -255,28 +255,86 @@ def plot_mi_top_scatter(xs_dict, ys_train, feat_cols, result_df, n=8):
     merged, valid_feats = _prepare_data(xs_dict, ys_train, feat_cols)
 
     top_feats = result_df.head(n)
+    target = merged[TARGET_COL]
 
-    n_rows = (n + 3) // 4
-    fig, axes = plt.subplots(n_rows, 4, figsize=(18, 4.5 * n_rows))
+    n_cols = 4
+    n_rows_grid = (n + n_cols - 1) // n_cols
+
+    # 전체 scatter
+    fig, axes = plt.subplots(n_rows_grid, n_cols, figsize=(18, 4.5 * n_rows_grid))
     axes = np.array(axes).flatten()
-
-    # 시각화용 샘플링
     sample = merged.sample(n=min(5000, len(merged)), random_state=SEED)
 
     for i, (_, row) in enumerate(top_feats.iterrows()):
-        feat = row["feature"]
-        mi_val = row["mi"]
-        p_val = row["pearson"]
-
+        feat, mi_val, p_val = row["feature"], row["mi"], row["pearson"]
         axes[i].scatter(sample[feat], sample[TARGET_COL],
                         alpha=0.15, s=5, color="steelblue")
         axes[i].set_xlabel(feat)
         axes[i].set_ylabel("health")
         axes[i].set_title(f"{feat}\nMI={mi_val:.4f}, r={p_val:+.4f}", fontsize=9)
-
     for j in range(i + 1, len(axes)):
         axes[j].set_visible(False)
-
-    plt.suptitle(f"MI 상위 {n}개 Feature vs Target (비선형 패턴 확인)", fontsize=14, y=1.01)
+    plt.suptitle(f"MI 상위 {n}개 Feature vs Target (전체)", fontsize=14, y=1.01)
     plt.tight_layout()
     plt.show()
+
+    # Y>0만 scatter
+    pos_mask = target > 0
+    merged_pos = merged[pos_mask]
+    target_pos = target[pos_mask]
+    sample_pos = merged_pos.sample(n=min(5000, len(merged_pos)), random_state=SEED)
+
+    fig2, axes2 = plt.subplots(n_rows_grid, n_cols, figsize=(18, 4.5 * n_rows_grid))
+    axes2 = np.array(axes2).flatten()
+
+    for i, (_, row) in enumerate(top_feats.iterrows()):
+        feat, mi_val = row["feature"], row["mi"]
+        r_pos = sample_pos[feat].corr(sample_pos[TARGET_COL])
+        axes2[i].scatter(sample_pos[feat], sample_pos[TARGET_COL],
+                         alpha=0.2, s=8, color="coral")
+        axes2[i].set_xlabel(feat)
+        axes2[i].set_ylabel("health")
+        axes2[i].set_title(f"{feat}\nMI={mi_val:.4f}, r(Y>0)={r_pos:+.4f}", fontsize=9)
+    for j in range(i + 1, len(axes2)):
+        axes2[j].set_visible(False)
+    plt.suptitle(f"MI 상위 {n}개 Feature vs Target (Y>0만, n={pos_mask.sum():,})",
+                 fontsize=14, y=1.01)
+    plt.tight_layout()
+    plt.show()
+
+    # Y>0 + 이상치 제거 scatter
+    upper = target_pos.quantile(0.99)
+    clip_mask = target_pos <= upper
+    merged_clip = merged_pos[clip_mask]
+    target_clip = target_pos[clip_mask]
+    sample_clip = merged_clip.sample(n=min(5000, len(merged_clip)), random_state=SEED)
+
+    fig3, axes3 = plt.subplots(n_rows_grid, n_cols, figsize=(18, 4.5 * n_rows_grid))
+    axes3 = np.array(axes3).flatten()
+    for i, (_, row) in enumerate(top_feats.iterrows()):
+        feat, mi_val = row["feature"], row["mi"]
+        r_clip = sample_clip[feat].corr(sample_clip[TARGET_COL])
+        axes3[i].scatter(sample_clip[feat], sample_clip[TARGET_COL],
+                         alpha=0.2, s=8, color="mediumseagreen")
+        axes3[i].set_xlabel(feat)
+        axes3[i].set_ylabel("health")
+        axes3[i].set_title(f"{feat}\nMI={mi_val:.4f}, r(clip99)={r_clip:+.4f}", fontsize=9)
+    for j in range(i + 1, len(axes3)):
+        axes3[j].set_visible(False)
+    plt.suptitle(f"MI 상위 {n}개 Feature vs Target "
+                 f"(Y>0 + 상위1% 제거, n={clip_mask.sum():,})",
+                 fontsize=14, y=1.01)
+    plt.tight_layout()
+    plt.show()
+
+    # 비교 테이블
+    print(f"\n전체 vs Y>0 vs Y>0+clip99 상관계수 비교")
+    print(f"  (전체: {len(merged):,}, Y>0: {pos_mask.sum():,}, "
+          f"Y>0+clip99: {clip_mask.sum():,}, 상위1% 기준: {upper:.4f})")
+    print(f"  {'Feature':>10}  {'r(전체)':>10}  {'r(Y>0)':>10}  {'r(clip99)':>10}")
+    print("-" * 50)
+    for _, row in top_feats.iterrows():
+        feat, r_all = row["feature"], row["pearson"]
+        r_p = merged_pos[feat].corr(target_pos)
+        r_c = merged_clip[feat].corr(target_clip)
+        print(f"  {feat:>10}  {r_all:>+10.4f}  {r_p:>+10.4f}  {r_c:>+10.4f}")

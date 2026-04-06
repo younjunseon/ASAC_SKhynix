@@ -42,3 +42,6 @@ code.zip
 
 # EDA 생성 아티팩트
 1_eda/charts/
+1_eda/images/
+1_eda/report/
+1_eda/modules/modules.zip

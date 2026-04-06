@@ -113,18 +113,29 @@ def plot_scree(pca, top_n=30):
 
     # 80%, 90% 달성 주성분 수 표시
     cum_pct = np.cumsum(pca.explained_variance_ratio_) * 100
-    n_80 = np.argmax(cum_pct >= 80) + 1
-    n_90 = np.argmax(cum_pct >= 90) + 1
-    axes[1].axvline(x=n_80, color="blue", linestyle="--", alpha=0.4)
-    axes[1].axvline(x=n_90, color="red", linestyle="--", alpha=0.4)
-    axes[1].text(n_80 + 0.5, 75, f"80%: PC{n_80}", fontsize=9, color="blue")
-    axes[1].text(n_90 + 0.5, 85, f"90%: PC{n_90}", fontsize=9, color="red")
+    n_80 = int(np.argmax(cum_pct >= 80) + 1) if np.any(cum_pct >= 80) else None
+    n_90 = int(np.argmax(cum_pct >= 90) + 1) if np.any(cum_pct >= 90) else None
+
+    if n_80 is not None:
+        axes[1].axvline(x=n_80, color="blue", linestyle="--", alpha=0.4)
+        axes[1].text(n_80 + 0.5, 75, f"80%: PC{n_80}", fontsize=9, color="blue")
+    if n_90 is not None:
+        axes[1].axvline(x=n_90, color="red", linestyle="--", alpha=0.4)
+        axes[1].text(n_90 + 0.5, 85, f"90%: PC{n_90}", fontsize=9, color="red")
 
     plt.tight_layout()
     plt.show()
 
-    print(f"80% 분산 달성: PC{n_80}개 필요")
-    print(f"90% 분산 달성: PC{n_90}개 필요")
+    total_var = cum_pct[-1]
+    print(f"계산된 {len(cum_pct)}개 주성분의 누적 분산: {total_var:.1f}%")
+    if n_80 is not None:
+        print(f"80% 분산 달성: PC{n_80}개 필요")
+    else:
+        print(f"80% 분산 미달성: {len(cum_pct)}개 PC로 {total_var:.1f}% (더 많은 주성분 필요)")
+    if n_90 is not None:
+        print(f"90% 분산 달성: PC{n_90}개 필요")
+    else:
+        print(f"90% 분산 미달성: {len(cum_pct)}개 PC로 {total_var:.1f}% (더 많은 주성분 필요)")
 
 
 def plot_pca_scatter(X_pca, y):
@@ -261,7 +272,7 @@ def run_umap_and_plot(X_pca, y, n_components_pca=20):
     except ImportError:
         from sklearn.manifold import TSNE
         print(f"UMAP 미설치 → t-SNE fallback (입력: PC1~PC{n_components_pca}, {len(y):,} units)")
-        tsne = TSNE(n_components=2, perplexity=30, random_state=SEED, n_iter=1000)
+        tsne = TSNE(n_components=2, perplexity=30, random_state=SEED, max_iter=1000)
         X_2d = tsne.fit_transform(X_input)
         method_name = "t-SNE"
 
