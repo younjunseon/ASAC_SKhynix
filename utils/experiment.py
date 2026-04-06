@@ -202,6 +202,7 @@ def log_experiment(
     agg_params: dict = None,
     feature_sel_params: dict = None,
     model_params: dict = None,
+    feature_cols: list = None,
     xlsx_gdrive_id: str = "",
     json_gdrive_id: str = "",
 ):
@@ -276,6 +277,8 @@ def log_experiment(
         detail["feature_sel_params"] = feature_sel_params
     if model_params is not None:
         detail["model_params"] = model_params
+    if feature_cols is not None:
+        detail["feature_cols"] = list(feature_cols)
 
     data[exp_id] = detail
     _save_json(data)
