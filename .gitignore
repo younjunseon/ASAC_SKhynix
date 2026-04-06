@@ -40,8 +40,14 @@ catboost_info/
 # 빌드 아티팩트
 code.zip
 
-# EDA 생성 아티팩트
-1_eda/charts/
-1_eda/images/
-1_eda/report/
-1_eda/modules/modules.zip
+# EDA: eda.ipynb + modules/*.py만 추적
+1_eda/*
+!1_eda/eda.ipynb
+!1_eda/modules/
+1_eda/modules/*
+!1_eda/modules/*.py
+!1_eda/modules/__init__.py
+
+# 출력물 (xlsx, json)
+4_output/**/*.xlsx
+4_output/**/*.json
