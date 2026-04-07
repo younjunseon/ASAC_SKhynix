@@ -85,8 +85,48 @@ def winsorize(xs_train, xs_val, xs_test, feat_cols,
     return xs_train, xs_val, xs_test, bounds
 
 
+def iqr_clip(xs_train, xs_val, xs_test, feat_cols, multiplier=1.5):
+    """
+    IQR 기반 클리핑: Q1-k*IQR ~ Q3+k*IQR 경계로 clip
+    (Winsorization과 달리 사분위수 기반 경계 사용)
+
+    Parameters
+    ----------
+    xs_train, xs_val, xs_test : DataFrame
+    feat_cols : list
+    multiplier : float
+        IQR 배수 (1.5: 표준, 3.0: 극단값만)
+
+    Returns
+    -------
+    xs_train, xs_val, xs_test : DataFrame (클리핑된 복사본)
+    bounds : DataFrame (feature별 lower/upper 경계)
+    """
+    Q1 = xs_train[feat_cols].quantile(0.25)
+    Q3 = xs_train[feat_cols].quantile(0.75)
+    IQR = Q3 - Q1
+    lower = Q1 - multiplier * IQR
+    upper = Q3 + multiplier * IQR
+
+    xs_train = xs_train.copy()
+    xs_val = xs_val.copy()
+    xs_test = xs_test.copy()
+
+    xs_train[feat_cols] = xs_train[feat_cols].clip(lower, upper, axis=1)
+    xs_val[feat_cols] = xs_val[feat_cols].clip(lower, upper, axis=1)
+    xs_test[feat_cols] = xs_test[feat_cols].clip(lower, upper, axis=1)
+
+    bounds = pd.DataFrame({"lower": lower, "upper": upper})
+
+    print(f"[IQR Clip] multiplier={multiplier}")
+    print(f"  적용 feature: {len(feat_cols)}개")
+    return xs_train, xs_val, xs_test, bounds
+
+
 def run_outlier_treatment(xs_train, xs_val, xs_test, feat_cols,
-                          lower_pct=0.01, upper_pct=0.99):
+                          method="winsorize",
+                          lower_pct=0.01, upper_pct=0.99,
+                          iqr_multiplier=1.5):
     """
     이상치 처리 파이프라인 전체 실행
 
@@ -94,7 +134,14 @@ def run_outlier_treatment(xs_train, xs_val, xs_test, feat_cols,
     ----------
     xs_train, xs_val, xs_test : DataFrame
     feat_cols : list
+    method : str
+        "winsorize" — 분위수 경계 clip (기본)
+        "iqr_clip" — IQR 기반 경계 clip
+        "none" — 이상치 처리 안 함
     lower_pct, upper_pct : float
+        winsorize 시 하위/상위 분위수
+    iqr_multiplier : float
+        iqr_clip 시 IQR 배수 (1.5: 표준)
 
     Returns
     -------
@@ -102,20 +149,31 @@ def run_outlier_treatment(xs_train, xs_val, xs_test, feat_cols,
     report : dict
     """
     print("=" * 60)
-    print("이상치 처리 파이프라인 시작")
+    print(f"이상치 처리 파이프라인 시작 (method={method})")
     print("=" * 60)
 
-    report = {}
+    report = {"method": method}
 
     # 1. 처리 전 이상치 현황
     stats_before = detect_outliers_iqr(xs_train, feat_cols)
     report["before"] = stats_before
 
-    # 2. Winsorization
-    xs_train, xs_val, xs_test, bounds = winsorize(
-        xs_train, xs_val, xs_test, feat_cols, lower_pct, upper_pct
-    )
-    report["bounds"] = bounds
+    # 2. 메서드별 처리
+    if method == "winsorize":
+        xs_train, xs_val, xs_test, bounds = winsorize(
+            xs_train, xs_val, xs_test, feat_cols, lower_pct, upper_pct
+        )
+        report["bounds"] = bounds
+    elif method == "iqr_clip":
+        xs_train, xs_val, xs_test, bounds = iqr_clip(
+            xs_train, xs_val, xs_test, feat_cols, iqr_multiplier
+        )
+        report["bounds"] = bounds
+    elif method == "none":
+        print("[이상치 처리 스킵]")
+    else:
+        raise ValueError(f"Unknown outlier method: {method}. "
+                         f"Use 'winsorize', 'iqr_clip', or 'none'")
 
     # 3. 처리 후 이상치 현황
     stats_after = detect_outliers_iqr(xs_train, feat_cols)

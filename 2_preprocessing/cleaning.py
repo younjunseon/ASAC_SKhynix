@@ -157,9 +157,9 @@ def remove_high_corr_features(xs, feat_cols, threshold=0.95, sample_n=10000, see
 
 
 def impute_missing(xs_train, xs_val, xs_test, feat_cols, add_indicator=False,
-                   indicator_threshold=0.01):
+                   indicator_threshold=0.01, method="median", knn_neighbors=5):
     """
-    결측치를 train의 median으로 imputation (data leakage 방지)
+    결측치 imputation (data leakage 방지: fit on train, transform all)
 
     Parameters
     ----------
@@ -171,15 +171,18 @@ def impute_missing(xs_train, xs_val, xs_test, feat_cols, add_indicator=False,
         EDA Phase 5: 결측률 1~50% feature 약 11개에 대해 정보 보존
     indicator_threshold : float
         이 비율 이상 결측인 feature에만 indicator 추가. 기본 0.01 (1%)
+    method : str
+        "median" — train median으로 채움 (빠름, 기본)
+        "knn" — KNNImputer (논문 1-3 근거, 지역 구조 보존)
+    knn_neighbors : int
+        method="knn"일 때 이웃 수. 기본 5
 
     Returns
     -------
     xs_train, xs_val, xs_test : DataFrame (결측 채워진 복사본)
-    medians : Series (train 기준 median 값)
+    imputer_info : dict (method별 정보)
     indicator_cols : list (추가된 indicator 컬럼명, add_indicator=False면 빈 리스트)
     """
-    medians = xs_train[feat_cols].median()
-
     xs_train = xs_train.copy()
     xs_val = xs_val.copy()
     xs_test = xs_test.copy()
@@ -199,14 +202,32 @@ def impute_missing(xs_train, xs_val, xs_test, feat_cols, add_indicator=False,
             print(f"[결측 indicator] {len(indicator_cols)}개 컬럼 추가 "
                   f"(결측률 >= {indicator_threshold*100:.0f}%)")
 
-    xs_train[feat_cols] = xs_train[feat_cols].fillna(medians)
-    xs_val[feat_cols] = xs_val[feat_cols].fillna(medians)
-    xs_test[feat_cols] = xs_test[feat_cols].fillna(medians)
+    imputer_info = {"method": method}
+
+    if method == "median":
+        medians = xs_train[feat_cols].median()
+        xs_train[feat_cols] = xs_train[feat_cols].fillna(medians)
+        xs_val[feat_cols] = xs_val[feat_cols].fillna(medians)
+        xs_test[feat_cols] = xs_test[feat_cols].fillna(medians)
+        imputer_info["medians"] = medians
+        print(f"[결측 imputation] method=median")
+
+    elif method == "knn":
+        from sklearn.impute import KNNImputer
+        imputer = KNNImputer(n_neighbors=knn_neighbors, weights="uniform")
+        print(f"[결측 imputation] method=knn (n_neighbors={knn_neighbors})")
+        print(f"  fitting on train ({len(xs_train):,} rows)...")
+        xs_train[feat_cols] = imputer.fit_transform(xs_train[feat_cols])
+        xs_val[feat_cols] = imputer.transform(xs_val[feat_cols])
+        xs_test[feat_cols] = imputer.transform(xs_test[feat_cols])
+        imputer_info["knn_neighbors"] = knn_neighbors
+
+    else:
+        raise ValueError(f"Unknown imputation method: {method}. Use 'median' or 'knn'")
 
     remaining = xs_train[feat_cols].isnull().sum().sum()
-    print(f"[결측 imputation] train median 기준")
     print(f"  imputation 후 잔여 결측: {remaining}")
-    return xs_train, xs_val, xs_test, medians, indicator_cols
+    return xs_train, xs_val, xs_test, imputer_info, indicator_cols
 
 
 def run_cleaning(xs, feat_cols, xs_dict,
@@ -215,7 +236,9 @@ def run_cleaning(xs, feat_cols, xs_dict,
                  remove_duplicates=True,
                  corr_threshold=0.95,
                  add_indicator=False,
-                 indicator_threshold=0.01):
+                 indicator_threshold=0.01,
+                 imputation_method="median",
+                 knn_neighbors=5):
     """
     클리닝 파이프라인 전체 실행
 
@@ -233,6 +256,10 @@ def run_cleaning(xs, feat_cols, xs_dict,
         결측 indicator 컬럼 추가 여부
     indicator_threshold : float
         indicator 추가 기준 결측률
+    imputation_method : str
+        "median" 또는 "knn"
+    knn_neighbors : int
+        knn일 때 이웃 수
 
     Returns
     -------
@@ -301,12 +328,14 @@ def run_cleaning(xs, feat_cols, xs_dict,
         print(f"    DataFrame: {xs_train.shape}\n")
 
     # 5. 결측 imputation + indicator
-    xs_train, xs_val, xs_test, medians, indicator_cols = impute_missing(
+    xs_train, xs_val, xs_test, imputer_info, indicator_cols = impute_missing(
         xs_train, xs_val, xs_test, current_cols,
         add_indicator=add_indicator,
         indicator_threshold=indicator_threshold,
+        method=imputation_method,
+        knn_neighbors=knn_neighbors,
     )
-    report["medians"] = medians
+    report["imputer_info"] = imputer_info
     report["indicator_cols"] = indicator_cols
 
     # indicator 컬럼도 feature 목록에 추가
