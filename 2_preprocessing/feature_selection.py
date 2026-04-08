@@ -17,8 +17,47 @@ CLAUDE.md 전략:
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from sklearn.ensemble import RandomForestRegressor
 from utils.config import SEED
+
+
+def _detect_device():
+    """GPU 사용 가능 여부 감지 → 'gpu' 또는 'cpu' 반환"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "gpu"
+    except ImportError:
+        pass
+    try:
+        # Colab 등에서 nvidia-smi 확인
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi"], capture_output=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return "gpu"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return "cpu"
+
+
+DEVICE = _detect_device()
+
+
+def _default_lgbm_params(seed=SEED):
+    """LightGBM 기본 파라미터 (GPU 자동 감지 포함)"""
+    return dict(
+        n_estimators=500,
+        learning_rate=0.05,
+        num_leaves=31,
+        max_depth=7,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=seed,
+        n_jobs=-1,
+        verbose=-1,
+        device=DEVICE,
+    )
 
 
 def select_by_boruta(X_train, y_train, feat_cols,
@@ -63,16 +102,22 @@ def select_by_boruta(X_train, y_train, feat_cols,
         X_sub = X
         y_sub = y
 
-    rf = RandomForestRegressor(
-        n_jobs=-1, max_depth=max_depth, random_state=seed,
+    # LGBMRegressor 사용 (GPU 자동 감지, sklearn RF 대비 대폭 빠름)
+    estimator = lgb.LGBMRegressor(
+        n_estimators=500,
+        max_depth=max_depth,
+        random_state=seed,
+        n_jobs=-1,
+        verbose=-1,
+        device=DEVICE,
     )
     boruta = BorutaPy(
-        rf, n_estimators='auto', max_iter=max_iter,
+        estimator, n_estimators='auto', max_iter=max_iter,
         perc=perc, random_state=seed, verbose=0,
     )
 
     print(f"[Boruta] max_iter={max_iter}, max_depth={max_depth}, perc={perc}, "
-          f"n_samples={len(X_sub):,}")
+          f"device={DEVICE}, n_samples={len(X_sub):,}")
     boruta.fit(X_sub.values, y_sub)
 
     confirmed = [feat_cols[i] for i in range(len(feat_cols)) if boruta.support_[i]]
@@ -123,17 +168,7 @@ def select_by_lgbm_importance(X_train, y_train, feat_cols,
     report : dict
     """
     if lgbm_params is None:
-        lgbm_params = dict(
-            n_estimators=500,
-            learning_rate=0.05,
-            num_leaves=31,
-            max_depth=7,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=seed,
-            n_jobs=-1,
-            verbose=-1,
-        )
+        lgbm_params = _default_lgbm_params(seed)
 
     X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
     y = y_train.values if hasattr(y_train, 'values') else y_train
@@ -188,17 +223,7 @@ def select_by_null_importance(X_train, y_train, feat_cols,
     report : dict
     """
     if lgbm_params is None:
-        lgbm_params = dict(
-            n_estimators=500,
-            learning_rate=0.05,
-            num_leaves=31,
-            max_depth=7,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=seed,
-            n_jobs=-1,
-            verbose=-1,
-        )
+        lgbm_params = _default_lgbm_params(seed)
 
     X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
     y = y_train.values if hasattr(y_train, 'values') else np.array(y_train)
@@ -271,11 +296,7 @@ def select_by_rfe(X_train, y_train, feat_cols,
     from sklearn.feature_selection import RFE
 
     if lgbm_params is None:
-        lgbm_params = dict(
-            n_estimators=500, learning_rate=0.05, num_leaves=31,
-            max_depth=7, subsample=0.8, colsample_bytree=0.8,
-            random_state=seed, n_jobs=-1, verbose=-1,
-        )
+        lgbm_params = _default_lgbm_params(seed)
 
     X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
     y = y_train.values if hasattr(y_train, 'values') else y_train
@@ -324,11 +345,7 @@ def select_by_permutation(X_train, y_train, feat_cols,
     from sklearn.inspection import permutation_importance
 
     if lgbm_params is None:
-        lgbm_params = dict(
-            n_estimators=500, learning_rate=0.05, num_leaves=31,
-            max_depth=7, subsample=0.8, colsample_bytree=0.8,
-            random_state=seed, n_jobs=-1, verbose=-1,
-        )
+        lgbm_params = _default_lgbm_params(seed)
 
     X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
     y = y_train.values if hasattr(y_train, 'values') else y_train
@@ -506,6 +523,7 @@ def run_feature_selection(X_train, y_train, feat_cols,
     print("Feature Selection 파이프라인 시작")
     print(f"입력 feature 수: {len(feat_cols)}")
     print(f"방법: {methods}, 최소 투표: {min_votes}")
+    print(f"Device: {DEVICE}")
     print("=" * 60)
 
     selections = {}
