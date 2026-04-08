@@ -9,14 +9,15 @@ pipeline_config로 모든 스위치를 제어한다:
 
 optuna=OFF인 단계는 1번만 실행하고 캐싱하여 trial당 시간을 절약한다.
 """
+import warnings
 import numpy as np
 import pandas as pd
 import optuna
-from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
 
 from utils.config import SEED, TARGET_COL, KEY_COL, POSITION_COL
 from utils.evaluate import rmse, postprocess
-from .model_zoo import create_model, fit_model, supports_early_stopping, get_default_params
+from .model_zoo import create_model, fit_model, supports_early_stopping, get_default_params, DEVICE
 from .search_space import SEARCH_SPACES
 from .aggregate import aggregate_die_to_unit
 from .feature_select import select_top_k, remove_zero_variance
@@ -112,8 +113,25 @@ def _run_clf_oof(pos_data, feat_cols, clf_params, model_name,
         for tr_idx, val_idx in skf.split(X_tr, y_tr):
             clf = create_model(model_name, "clf", actual_params)
             if supports_early_stopping(model_name):
-                fit_model(clf, X_tr[tr_idx], y_tr[tr_idx],
-                          X_tr[val_idx], y_tr[val_idx], early_stop)
+                # ES용 inner holdout을 tr_idx 내부에서 분리 (val_idx 누수 방지)
+                X_tr_fold = X_tr[tr_idx]
+                y_tr_fold = y_tr[tr_idx]
+                if len(np.unique(y_tr_fold)) >= 2:
+                    inner_tr, inner_es = train_test_split(
+                        np.arange(len(tr_idx)),
+                        test_size=0.15,
+                        random_state=SEED,
+                        stratify=y_tr_fold,
+                    )
+                    fit_model(
+                        clf,
+                        X_tr_fold[inner_tr], y_tr_fold[inner_tr],
+                        X_tr_fold[inner_es], y_tr_fold[inner_es],
+                        early_stop,
+                    )
+                else:
+                    # stratify 불가 (단일 클래스) → ES 없이 학습
+                    fit_model(clf, X_tr_fold, y_tr_fold)
             else:
                 fit_model(clf, X_tr[tr_idx], y_tr[tr_idx])
 
@@ -140,6 +158,156 @@ def _run_clf_oof(pos_data, feat_cols, clf_params, model_name,
         }
 
     return clf_result
+
+
+# ═════════════════════════════════════════════════════════════
+# 단일 모델 분류 (rerun mode='single')
+# ═════════════════════════════════════════════════════════════
+def _run_clf_single(pos_data, feat_cols, clf_params, model_name,
+                    early_stop, label_col, imbalance_method,
+                    clf_output="proba", es_holdout=0.1):
+    """
+    Position별 분류 단일 학습 (KFold 없음, train 100% 사용)
+
+    - ES용 holdout만 train에서 내부 분리
+    - train 예측은 in-sample (진단용)
+    - val/test는 단일 모델 예측
+    """
+    clf_result = {}
+
+    for pos in sorted(pos_data.keys()):
+        d = pos_data[pos]
+        X_tr_full = d["train"][feat_cols].values
+        y_tr_full = d["train"][label_col].values
+        X_val = d["val"][feat_cols].values
+        X_test = d["test"][feat_cols].values
+
+        # 불균형 처리
+        actual_params = clf_params.copy()
+        if imbalance_method == "scale_pos_weight":
+            n_neg = (y_tr_full == 0).sum()
+            n_pos = (y_tr_full == 1).sum()
+            spw = n_neg / n_pos if n_pos > 0 else 1.0
+            if model_name in ("lgbm", "xgb"):
+                actual_params["scale_pos_weight"] = spw
+            elif model_name == "catboost":
+                actual_params["auto_class_weights"] = "Balanced"
+            elif model_name in ("rf", "et"):
+                actual_params["class_weight"] = "balanced"
+
+        # ES용 holdout 분리 (stratified)
+        use_es = supports_early_stopping(model_name) and es_holdout > 0
+        if use_es and len(np.unique(y_tr_full)) >= 2:
+            X_fit, X_es, y_fit, y_es = train_test_split(
+                X_tr_full, y_tr_full,
+                test_size=es_holdout,
+                random_state=SEED,
+                stratify=y_tr_full,
+            )
+        else:
+            X_fit, y_fit = X_tr_full, y_tr_full
+            X_es, y_es = None, None
+
+        clf = create_model(model_name, "clf", actual_params)
+        if use_es and X_es is not None:
+            fit_model(clf, X_fit, y_fit, X_es, y_es, early_stop)
+        else:
+            fit_model(clf, X_fit, y_fit)
+
+        train_proba = clf.predict_proba(X_tr_full)[:, 1]  # in-sample
+        val_proba = clf.predict_proba(X_val)[:, 1]
+        test_proba = clf.predict_proba(X_test)[:, 1]
+
+        if clf_output == "binary":
+            train_proba = (train_proba > 0.5).astype(float)
+            val_proba = (val_proba > 0.5).astype(float)
+            test_proba = (test_proba > 0.5).astype(float)
+
+        clf_result[pos] = {
+            "train_proba": train_proba,
+            "val_proba": val_proba,
+            "test_proba": test_proba,
+        }
+
+    return clf_result
+
+
+# ═════════════════════════════════════════════════════════════
+# 단일 모델 회귀 (rerun mode='single')
+# ═════════════════════════════════════════════════════════════
+def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
+                    early_stop, use_clf=True, clf_filter=False,
+                    es_holdout=0.1):
+    """
+    Unit-level 회귀 단일 학습 (KFold 없음, train 100% 사용)
+    """
+    X_train = unit_data["train"][feat_cols].values
+    y_train = unit_data["train"][TARGET_COL].values
+    X_val = unit_data["val"][feat_cols].values
+    X_test = unit_data["test"][feat_cols].values
+
+    # 학습 샘플 선택
+    if use_clf and not clf_filter:
+        # two-stage: Y>0인 샘플만
+        mask = y_train > 0
+    elif clf_filter and "clf_proba_mean" in unit_data["train"].columns:
+        clf_pred = unit_data["train"]["clf_proba_mean"].values
+        mask = clf_pred > 0.5
+    else:
+        mask = np.ones(len(y_train), dtype=bool)
+
+    if mask.sum() == 0:
+        oof_reg = np.zeros(len(X_train))
+        val_reg = np.zeros(len(X_val))
+        test_reg = np.zeros(len(X_test))
+    else:
+        X_fit_pool = X_train[mask]
+        y_fit_pool = y_train[mask]
+
+        use_es = (
+            supports_early_stopping(model_name)
+            and es_holdout > 0
+            and len(X_fit_pool) >= 10
+        )
+        if use_es:
+            X_fit, X_es, y_fit, y_es = train_test_split(
+                X_fit_pool, y_fit_pool,
+                test_size=es_holdout,
+                random_state=SEED,
+            )
+        else:
+            X_fit, y_fit = X_fit_pool, y_fit_pool
+            X_es, y_es = None, None
+
+        reg = create_model(model_name, "reg", reg_params)
+        if use_es and X_es is not None:
+            fit_model(reg, X_fit, y_fit, X_es, y_es, early_stop)
+        else:
+            fit_model(reg, X_fit, y_fit)
+
+        oof_reg = reg.predict(X_train)  # in-sample
+        val_reg = reg.predict(X_val)
+        test_reg = reg.predict(X_test)
+
+    # two-stage 곱셈
+    if use_clf and "clf_proba_mean" in unit_data["train"].columns:
+        proba_train = unit_data["train"]["clf_proba_mean"].values
+        proba_val = unit_data["val"]["clf_proba_mean"].values
+        proba_test = unit_data["test"]["clf_proba_mean"].values
+        oof_pred = postprocess(proba_train * oof_reg)
+        val_pred = postprocess(proba_val * val_reg)
+        test_pred = postprocess(proba_test * test_reg)
+    else:
+        oof_pred = postprocess(oof_reg)
+        val_pred = postprocess(val_reg)
+        test_pred = postprocess(test_reg)
+
+    return {
+        "val_pred": val_pred,
+        "test_pred": test_pred,
+        "train_pred_insample": oof_pred,  # in-sample 예측 (OOF 아님, 진단/val/test만 안전)
+        "train_rmse": rmse(y_train, oof_pred),
+    }
 
 
 # ═════════════════════════════════════════════════════════════
@@ -170,49 +338,77 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
     else:
         train_mask = None
 
+    # Fallback: fold skip 시 사용할 보수적 예측값 (Y>0 평균)
+    # two-stage에서 회귀 모델이 학습하는 분포가 y>0이므로 y>0 평균이 합리적
+    pos_mask_all = y_train > 0
+    fallback_val = float(y_train[pos_mask_all].mean()) if pos_mask_all.any() else 0.0
+
     kf = KFold(n_splits=n_folds, shuffle=True, random_state=SEED)
-    oof_reg = np.zeros(len(X_train))
+    oof_reg = np.full(len(X_train), fallback_val, dtype=float)  # 0 대신 fallback 초기화
     fold_models = []
+    skipped_folds = 0
 
     for tr_idx, va_idx in kf.split(X_train):
+        # ─── 1단계: X_fit, y_fit 결정 ───
         if use_clf and not clf_filter:
             # two-stage: Y>0인 샘플만 학습
             pos_tr = y_train[tr_idx] > 0
-            pos_va = y_train[va_idx] > 0
             if pos_tr.sum() == 0:
+                skipped_folds += 1
                 continue
             X_fit, y_fit = X_train[tr_idx][pos_tr], y_train[tr_idx][pos_tr]
-            if pos_va.sum() > 0:
-                X_es, y_es = X_train[va_idx][pos_va], y_train[va_idx][pos_va]
-            else:
-                X_es, y_es = None, None
         elif clf_filter and train_mask is not None:
             # clf_filter: 분류기가 1로 예측한 샘플만 학습
             tr_keep = train_mask[tr_idx]
-            va_keep = train_mask[va_idx]
             if tr_keep.sum() == 0:
+                skipped_folds += 1
                 continue
             X_fit, y_fit = X_train[tr_idx][tr_keep], y_train[tr_idx][tr_keep]
-            if va_keep.sum() > 0:
-                X_es, y_es = X_train[va_idx][va_keep], y_train[va_idx][va_keep]
-            else:
-                X_es, y_es = None, None
         else:
             # 단순 회귀: 전체 학습
             X_fit, y_fit = X_train[tr_idx], y_train[tr_idx]
-            X_es, y_es = X_train[va_idx], y_train[va_idx]
 
+        # ─── 2단계: inner holdout 분리 (ES용, va_idx 누수 방지) ───
         reg = create_model(model_name, "reg", reg_params)
-        if supports_early_stopping(model_name) and X_es is not None:
-            fit_model(reg, X_fit, y_fit, X_es, y_es, early_stop)
+        if supports_early_stopping(model_name) and len(X_fit) >= 10:
+            inner_tr, inner_es = train_test_split(
+                np.arange(len(X_fit)),
+                test_size=0.15,
+                random_state=SEED,
+            )
+            fit_model(
+                reg,
+                X_fit[inner_tr], y_fit[inner_tr],
+                X_fit[inner_es], y_fit[inner_es],
+                early_stop,
+            )
         else:
             fit_model(reg, X_fit, y_fit)
 
         oof_reg[va_idx] = reg.predict(X_train[va_idx])
         fold_models.append(reg)
 
-    val_reg = np.mean([m.predict(X_val) for m in fold_models], axis=0)
-    test_reg = np.mean([m.predict(X_test) for m in fold_models], axis=0)
+    # fold skip 경고 (일부 fold만 스킵된 경우)
+    if skipped_folds > 0:
+        warnings.warn(
+            f"[_run_reg_oof] {skipped_folds}/{n_folds} fold(s) skipped due to "
+            f"empty training samples (pos_tr or tr_keep == 0). "
+            f"OOF for skipped folds filled with fallback value "
+            f"({fallback_val:.6f} = mean of y>0).",
+            stacklevel=2,
+        )
+
+    if len(fold_models) == 0:
+        warnings.warn(
+            f"[_run_reg_oof] All {n_folds} folds skipped. "
+            f"val/test predictions filled with fallback value ({fallback_val:.6f}).",
+            stacklevel=2,
+        )
+        val_reg = np.full(len(X_val), fallback_val, dtype=float)
+        test_reg = np.full(len(X_test), fallback_val, dtype=float)
+    else:
+        val_reg = np.mean([m.predict(X_val) for m in fold_models], axis=0)
+        test_reg = np.mean([m.predict(X_test) for m in fold_models], axis=0)
 
     # two-stage: proba * reg_pred
     if use_clf and "clf_proba_mean" in unit_data["train"].columns:
@@ -233,6 +429,53 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         "oof_pred": oof_pred,
         "train_rmse": rmse(y_train, oof_pred),
     }
+
+
+# ═════════════════════════════════════════════════════════════
+# Die 예측 → Unit 집계 (reg_level='position' 전용)
+# ═════════════════════════════════════════════════════════════
+def _die_pred_to_unit(unit_data, reg_result):
+    """
+    reg_level='position'에서 die-level 예측을 unit-level로 집계.
+
+    train 예측 키는 'oof_pred' (kfold) 또는 'train_pred_insample' (single) 둘 중 하나.
+    어느 쪽이든 자동 감지하여 동일 키로 반환한다.
+
+    Returns
+    -------
+    agg_result : dict
+        val_pred, test_pred, <train_key> (unit-level), train_rmse
+    agg_unit_data : dict
+        {"train": df, "val": df, "test": df} — KEY_COL + TARGET_COL만 포함
+    """
+    # train 키 자동 감지
+    if "oof_pred" in reg_result:
+        train_key = "oof_pred"
+    elif "train_pred_insample" in reg_result:
+        train_key = "train_pred_insample"
+    else:
+        raise KeyError(
+            "reg_result에 'oof_pred' 또는 'train_pred_insample' 키가 없습니다."
+        )
+
+    agg_result = {}
+    agg_unit_data = {}
+
+    for split_name, pred_key in [
+        ("train", train_key), ("val", "val_pred"), ("test", "test_pred"),
+    ]:
+        df = unit_data[split_name][[KEY_COL, TARGET_COL]].copy()
+        df["_pred"] = reg_result[pred_key]
+        grp = df.groupby(KEY_COL, sort=False).agg(
+            {TARGET_COL: "first", "_pred": "mean"}
+        ).reset_index()
+        agg_result[pred_key] = grp["_pred"].values
+        agg_unit_data[split_name] = grp[[KEY_COL, TARGET_COL]]
+
+    y_train = agg_unit_data["train"][TARGET_COL].values
+    agg_result["train_rmse"] = rmse(y_train, agg_result[train_key])
+
+    return agg_result, agg_unit_data
 
 
 # ═════════════════════════════════════════════════════════════
@@ -259,10 +502,8 @@ def _prepare_unit_data(pos_data, feat_cols, clf_result, cfg, agg_funcs):
                 frames.append(df)
             unit_data[split_name] = pd.concat(frames, ignore_index=True)
 
-        # position을 피처에 포함
+        # position을 피처에 포함 (clf_proba_mean은 곱셈용이므로 feature 제외)
         unit_feat_cols = feat_cols + [POSITION_COL]
-        if clf_result is not None:
-            unit_feat_cols = unit_feat_cols + ["clf_proba_mean"]
 
         return unit_data, unit_feat_cols
 
@@ -406,7 +647,11 @@ def run_e2e_optimization(
             n_folds, reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
         )
-        y_val = cached["unit_data"]["val"][TARGET_COL].values
+        if cfg["reg_level"] == "position":
+            reg_result, agg_ud = _die_pred_to_unit(cached["unit_data"], reg_result)
+            y_val = agg_ud["val"][TARGET_COL].values
+        else:
+            y_val = cached["unit_data"]["val"][TARGET_COL].values
         val_rmse_score = rmse(y_val, reg_result["val_pred"])
         print(f"Val RMSE: {val_rmse_score:.6f}")
 
@@ -480,7 +725,18 @@ def run_e2e_optimization(
         )
 
         # ── ⑤ RMSE ──
+        if cfg["reg_level"] == "position":
+            reg_result, _ = _die_pred_to_unit(unit_data, reg_result)
+
         y_val = unit_data["val"][TARGET_COL].values
+        if cfg["reg_level"] == "position":
+            # unit-level y (중복 제거)
+            y_val = (
+                unit_data["val"]
+                .groupby(KEY_COL, sort=False)[TARGET_COL]
+                .first()
+                .values
+            )
         val_rmse_score = rmse(y_val, reg_result["val_pred"])
 
         trial.set_user_attr("train_rmse", reg_result["train_rmse"])
@@ -536,7 +792,9 @@ def rerun_best_trial(
     pipeline_config=None,
     clf_model="lgbm",
     reg_model="lgbm",
+    mode="single",
     n_folds=5,
+    es_holdout=0.1,
     clf_early_stop=100,
     reg_early_stop=100,
     label_col="label_bin",
@@ -549,8 +807,20 @@ def rerun_best_trial(
     unit_feat_cols_input=None,
 ):
     """
-    Best trial 파라미터로 최종 예측 재실행 (더 많은 fold)
+    Best trial 파라미터로 최종 예측 재실행
+
+    Parameters
+    ----------
+    mode : str
+        'single' → train 100%로 단일 모델 학습 (빠름, 데이터 최대 활용)
+        'kfold'  → n_folds CV로 fold별 모델 학습 후 예측 평균 (앙상블 효과)
+    n_folds : int
+        mode='kfold'일 때만 사용
+    es_holdout : float
+        mode='single'일 때 early stopping용 train 내부 holdout 비율
     """
+    if mode not in ("single", "kfold"):
+        raise ValueError(f"mode must be 'single' or 'kfold', got '{mode}'")
     cfg = _merge_config(pipeline_config)
     clf_fixed = clf_fixed or {}
     reg_fixed = reg_fixed or {}
@@ -567,12 +837,20 @@ def rerun_best_trial(
             clf_params = get_default_params(clf_model, "clf")
             clf_params.update(clf_fixed)
 
-        print(f"Rerun CLF: {clf_model}, folds={n_folds}")
-        clf_result = _run_clf_oof(
-            pos_data, feat_cols, clf_params, clf_model,
-            n_folds, clf_early_stop, label_col, imbalance_method,
-            clf_output=cfg["clf_output"],
-        )
+        if mode == "single":
+            print(f"Rerun CLF: {clf_model}, mode=single (es_holdout={es_holdout})")
+            clf_result = _run_clf_single(
+                pos_data, feat_cols, clf_params, clf_model,
+                clf_early_stop, label_col, imbalance_method,
+                clf_output=cfg["clf_output"], es_holdout=es_holdout,
+            )
+        else:
+            print(f"Rerun CLF: {clf_model}, mode=kfold (folds={n_folds})")
+            clf_result = _run_clf_oof(
+                pos_data, feat_cols, clf_params, clf_model,
+                n_folds, clf_early_stop, label_col, imbalance_method,
+                clf_output=cfg["clf_output"],
+            )
     else:
         clf_result = None
 
@@ -614,28 +892,50 @@ def rerun_best_trial(
         reg_params = get_default_params(reg_model, "reg")
         reg_params.update(reg_fixed)
 
-    print(f"Rerun REG: {reg_model}, features={len(selected_cols)}, folds={n_folds}")
-    reg_result = _run_reg_oof(
-        unit_data, selected_cols, reg_params, reg_model,
-        n_folds, reg_early_stop,
-        use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
-    )
+    if mode == "single":
+        print(f"Rerun REG: {reg_model}, features={len(selected_cols)}, mode=single (es_holdout={es_holdout})")
+        reg_result = _run_reg_single(
+            unit_data, selected_cols, reg_params, reg_model,
+            reg_early_stop,
+            use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            es_holdout=es_holdout,
+        )
+    else:
+        print(f"Rerun REG: {reg_model}, features={len(selected_cols)}, mode=kfold (folds={n_folds})")
+        reg_result = _run_reg_oof(
+            unit_data, selected_cols, reg_params, reg_model,
+            n_folds, reg_early_stop,
+            use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+        )
 
-    y_val = unit_data["val"][TARGET_COL].values
+    # position 모드: die → unit 집계
+    if cfg["reg_level"] == "position":
+        reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
+        y_val = agg_unit_data["val"][TARGET_COL].values
+        # CSV용으로 unit_data를 unit-level로 교체
+        unit_data = agg_unit_data
+    else:
+        y_val = unit_data["val"][TARGET_COL].values
+
     val_rmse_score = rmse(y_val, reg_result["val_pred"])
     print(f"Rerun Val RMSE: {val_rmse_score:.6f}")
 
-    return {
+    result = {
         "unit_data": unit_data,
         "selected_cols": selected_cols,
         "val_pred": reg_result["val_pred"],
         "test_pred": reg_result["test_pred"],
-        "oof_pred": reg_result["oof_pred"],
         "val_rmse": val_rmse_score,
         "clf_result": clf_result,
         "importances": sel_importances,
         "pipeline_config": cfg,
     }
+    # mode='kfold'만 진짜 OOF. single은 in-sample이므로 별도 키로 분리.
+    if mode == "kfold":
+        result["oof_pred"] = reg_result["oof_pred"]
+    else:  # single
+        result["train_pred_insample"] = reg_result["train_pred_insample"]
+    return result
 
 
 # ═════════════════════════════════════════════════════════════
@@ -643,7 +943,6 @@ def rerun_best_trial(
 # ═════════════════════════════════════════════════════════════
 def _build_params_from_best(best_params, prefix, model_name, fixed):
     """Optuna best_params에서 prefix 파라미터 추출 + 고정값 추가"""
-    from .model_zoo import DEVICE
 
     params = {}
     for k, v in best_params.items():
@@ -668,6 +967,8 @@ def _build_params_from_best(best_params, prefix, model_name, fixed):
         params.setdefault("task_type", "GPU" if DEVICE == "gpu" else "CPU")
         params.setdefault("random_seed", SEED)
         params.setdefault("verbose", 0)
+        # subsample을 쓰려면 Bernoulli 필요 (기본 Bayesian은 subsample 미지원)
+        params.setdefault("bootstrap_type", "Bernoulli")
     elif model_name in ("rf", "et"):
         params.setdefault("random_state", SEED)
         params.setdefault("n_jobs", -1)

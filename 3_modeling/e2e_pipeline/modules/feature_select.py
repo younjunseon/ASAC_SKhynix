@@ -47,7 +47,8 @@ def select_top_k(X_train, y_train, feat_cols, top_k, lgbm_params=None):
             device=DEVICE,
         )
 
-    lgbm_params["importance_type"] = "gain"
+    # 입력 dict를 mutate하지 않도록 사본 생성 (호출자 재사용 시 오염 방지)
+    lgbm_params = {**lgbm_params, "importance_type": "gain"}
     model = lgb.LGBMRegressor(**lgbm_params)
     model.fit(X_train, y_train)
 

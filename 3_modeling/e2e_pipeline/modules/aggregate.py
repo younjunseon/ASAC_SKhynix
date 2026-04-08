@@ -58,12 +58,14 @@ def aggregate_die_to_unit(
         die_all = pd.concat(die_frames, ignore_index=True)
 
         # --- WT feature 집계 ---
-        grp = die_all.groupby(KEY_COL)[feat_cols]
+        # sort=False로 통일: _die_pred_to_unit(e2e_hpo.py)과 unit 순서 일관성 확보
+        grp = die_all.groupby(KEY_COL, sort=False)[feat_cols]
         agg_parts = []
 
         for func in agg_funcs:
             if func == "cv":
-                cv_df = grp.std() / grp.mean().abs().clip(lower=1.0)
+                mean_abs = grp.mean().abs()
+                cv_df = (grp.std() / mean_abs).where(mean_abs > 1e-8, 0.0)
                 cv_df.columns = [f"{c}_cv" for c in feat_cols]
                 agg_parts.append(cv_df)
             elif func == "range":
@@ -86,19 +88,19 @@ def aggregate_die_to_unit(
                 unit_features = unit_features.join(pos_df)
 
         # --- 분류 확률 집계 ---
-        proba_mean = die_all.groupby(KEY_COL)["clf_proba"].mean()
+        proba_mean = die_all.groupby(KEY_COL, sort=False)["clf_proba"].mean()
         proba_mean.name = "clf_proba_mean"
         unit_features = unit_features.join(proba_mean)
 
         # --- health (target) ---
-        health = die_all.groupby(KEY_COL)[TARGET_COL].first()
+        health = die_all.groupby(KEY_COL, sort=False)[TARGET_COL].first()
         unit_features = unit_features.join(health)
 
         unit_features = unit_features.reset_index()
         unit_data[split_name] = unit_features
 
     # --- unit_feat_cols 목록 생성 ---
-    meta_cols = {KEY_COL, TARGET_COL}
+    meta_cols = {KEY_COL, TARGET_COL, "clf_proba_mean"}
     unit_feat_cols = [
         c for c in unit_data["train"].columns if c not in meta_cols
     ]

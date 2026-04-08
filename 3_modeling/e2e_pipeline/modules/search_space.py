@@ -51,13 +51,18 @@ def xgb_space(trial, prefix=""):
 
 
 def catboost_space(trial, prefix=""):
-    """CatBoost 탐색 공간"""
+    """CatBoost 탐색 공간
+
+    Note: 기본 bootstrap_type=Bayesian은 subsample을 지원하지 않으므로
+    subsample을 탐색하기 위해 Bernoulli로 고정한다.
+    """
     p = prefix
     return dict(
         iterations=trial.suggest_int(f"{p}iterations", 100, 3000),
         learning_rate=trial.suggest_float(f"{p}learning_rate", 0.005, 0.3, log=True),
         depth=trial.suggest_int(f"{p}depth", 3, 10),
         min_data_in_leaf=trial.suggest_int(f"{p}min_data_in_leaf", 5, 300),
+        bootstrap_type="Bernoulli",
         subsample=trial.suggest_float(f"{p}subsample", 0.5, 1.0),
         colsample_bylevel=trial.suggest_float(f"{p}colsample_bylevel", 0.1, 1.0),
         l2_leaf_reg=trial.suggest_float(f"{p}l2_leaf_reg", 1e-8, 10.0, log=True),

@@ -1,7 +1,8 @@
 """
 EDA 모듈: Feature Interaction 탐색
-- 단일 feature-target 상관이 max |r|=0.037으로 극도로 약한 상황에서
-  feature 간 상호작용(ratio, product, difference)이 더 높은 상관을 보이는지 탐색
+- 전체 feature 쌍의 상호작용(ratio, product, difference)이
+  단일 feature보다 높은 Mutual Information을 보이는지 탐색
+- MI 기반으로 비선형 의존성까지 포착 (Pearson/Spearman 대비 우위)
 - Shallow Decision Tree로 자연스러운 feature split 조합 발굴
 - 노트북에서 import eda_interaction as ia 로 사용
 """
@@ -11,6 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from itertools import combinations
 from sklearn.tree import DecisionTreeRegressor, export_text, plot_tree
+from sklearn.feature_selection import mutual_info_regression
 from utils.config import KEY_COL, TARGET_COL, SEED
 
 
@@ -50,12 +52,14 @@ def _prepare_unit_data(xs_dict, ys_train, feat_cols):
 
 
 def pairwise_interaction_corr(xs_dict, ys_train, feat_cols,
-                              top_n_feats=30, n_top_pairs=20):
+                              top_n_feats=None, n_top_pairs=20,
+                              batch_size=1000):
     """
-    상위 feature 쌍의 상호작용(ratio, product, difference)과 target 간 상관 분석
+    전체 feature 쌍의 상호작용(ratio, product, difference)과 target 간 MI 분석
 
     반도체 맥락:
     - 개별 WT feature와 health의 선형 상관이 극도로 약함 (max |r|=0.037)
+    - Mutual Information은 비선형 의존성까지 포착하므로 interaction 평가에 적합
     - 두 feature의 비율(공정 균형), 곱(복합 효과), 차이(편차)가
       불량 예측에 더 강한 신호를 줄 수 있음
 
@@ -67,127 +71,142 @@ def pairwise_interaction_corr(xs_dict, ys_train, feat_cols,
         train Y 데이터 (ufs_serial, health 컬럼)
     feat_cols : list of str
         feature 컬럼명 리스트
-    top_n_feats : int
-        target과 |Pearson r| 상위 N개 feature를 선정하여 조합 탐색 (기본 30)
+    top_n_feats : int or None
+        None이면 전체 feature 사용, 정수면 단일 MI 상위 N개만 사용
     n_top_pairs : int
         출력할 상위 interaction feature 수 (기본 20)
+    batch_size : int
+        MI 계산 시 한 번에 처리할 pair 수 (기본 1000)
 
     Returns
     -------
     interaction_df : DataFrame
-        columns = [feat_a, feat_b, operation, corr, abs_corr,
-                   best_single_corr, improvement_over_best_single]
-        improvement_over_best_single 기준 내림차순 정렬
+        columns = [feat_a, feat_b, operation, mi,
+                   best_single_mi, improvement]
+        improvement 기준 내림차순 정렬
     """
     merged, valid_feats = _prepare_unit_data(xs_dict, ys_train, feat_cols)
-    target = merged[TARGET_COL]
+    target = merged[TARGET_COL].values
 
-    # 1) 각 feature와 target의 Pearson 상관 계산
-    print(f"단일 feature-target 상관 계산 중 ({len(valid_feats)}개)...")
-    single_corr = {}
-    for col in valid_feats:
-        r = merged[col].corr(target)
-        if pd.notna(r):
-            single_corr[col] = r
-    single_corr = pd.Series(single_corr)
-    single_abs = single_corr.abs().sort_values(ascending=False)
+    # 1) 단일 feature MI 계산
+    print(f"단일 feature-target MI 계산 중 ({len(valid_feats)}개)...")
+    X_all = merged[valid_feats].values
+    single_mi_vals = mutual_info_regression(
+        X_all, target, random_state=SEED, n_jobs=-1
+    )
+    single_mi = dict(zip(valid_feats, single_mi_vals))
+    single_mi_series = pd.Series(single_mi).sort_values(ascending=False)
 
-    # 2) 상위 N개 feature 선정
-    top_feats = single_abs.head(top_n_feats).index.tolist()
-    n_pairs = len(list(combinations(top_feats, 2)))
-    print(f"상위 {len(top_feats)}개 feature 선정 → {n_pairs}개 쌍 탐색")
-    print(f"  단일 feature 최대 |r| = {single_abs.iloc[0]:.6f} ({single_abs.index[0]})")
+    print(f"  단일 feature 최대 MI = {single_mi_series.iloc[0]:.6f} "
+          f"({single_mi_series.index[0]})")
 
-    # 3) 모든 쌍에 대해 3가지 연산 수행
+    # 2) feature 선정
+    if top_n_feats is not None:
+        use_feats = single_mi_series.head(top_n_feats).index.tolist()
+        label = f"상위 {top_n_feats}개"
+    else:
+        use_feats = valid_feats
+        label = "전체"
+
+    n_feats = len(use_feats)
+    all_pairs = list(combinations(use_feats, 2))
+    n_pairs = len(all_pairs)
+    print(f"{label} feature {n_feats}개 → {n_pairs:,}개 쌍 탐색")
+
+    # 3) batch MI 계산
     results = []
-    for feat_a, feat_b in combinations(top_feats, 2):
-        a_vals = merged[feat_a].values
-        b_vals = merged[feat_b].values
-        best_single = max(abs(single_corr[feat_a]), abs(single_corr[feat_b]))
+    epsilon = 1e-8
 
-        # ratio: a / (b + epsilon)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            epsilon = 1e-8
-            ratio_vals = a_vals / (b_vals + epsilon)
-            # inf/nan 제거 후 상관 계산
-            mask_ratio = np.isfinite(ratio_vals)
-            if mask_ratio.sum() > 100:
-                r_ratio = pd.Series(ratio_vals[mask_ratio]).corr(
-                    pd.Series(target.values[mask_ratio]))
-                if pd.notna(r_ratio) and abs(r_ratio) > best_single:
-                    results.append({
-                        "feat_a": feat_a, "feat_b": feat_b,
-                        "operation": "ratio",
-                        "corr": r_ratio,
-                        "abs_corr": abs(r_ratio),
-                        "best_single_corr": best_single,
-                        "improvement_over_best_single": abs(r_ratio) - best_single,
-                    })
+    for batch_start in range(0, n_pairs, batch_size):
+        batch_end = min(batch_start + batch_size, n_pairs)
+        batch_pairs = all_pairs[batch_start:batch_end]
 
-        # product: a * b
-        prod_vals = a_vals * b_vals
-        mask_prod = np.isfinite(prod_vals)
-        if mask_prod.sum() > 100:
-            r_prod = pd.Series(prod_vals[mask_prod]).corr(
-                pd.Series(target.values[mask_prod]))
-            if pd.notna(r_prod) and abs(r_prod) > best_single:
+        interaction_cols = []
+        interaction_meta = []
+
+        for feat_a, feat_b in batch_pairs:
+            a = merged[feat_a].values
+            b = merged[feat_b].values
+            best_single = max(single_mi[feat_a], single_mi[feat_b])
+
+            # product: a * b
+            prod = a * b
+            prod = np.where(np.isfinite(prod), prod, np.nan)
+            med = np.nanmedian(prod)
+            prod = np.where(np.isnan(prod), med if np.isfinite(med) else 0.0, prod)
+            interaction_cols.append(prod)
+            interaction_meta.append((feat_a, feat_b, "product", best_single))
+
+            # ratio: a / (b + epsilon)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                ratio = a / (b + epsilon)
+            ratio = np.where(np.isfinite(ratio), ratio, np.nan)
+            med = np.nanmedian(ratio)
+            ratio = np.where(np.isnan(ratio), med if np.isfinite(med) else 0.0, ratio)
+            interaction_cols.append(ratio)
+            interaction_meta.append((feat_a, feat_b, "ratio", best_single))
+
+            # difference: a - b
+            diff = a - b
+            diff = np.where(np.isfinite(diff), diff, np.nan)
+            med = np.nanmedian(diff)
+            diff = np.where(np.isnan(diff), med if np.isfinite(med) else 0.0, diff)
+            interaction_cols.append(diff)
+            interaction_meta.append((feat_a, feat_b, "difference", best_single))
+
+        X_batch = np.column_stack(interaction_cols)
+        mi_batch = mutual_info_regression(
+            X_batch, target, random_state=SEED, n_jobs=-1
+        )
+
+        for (feat_a, feat_b, op, best_single), mi_val in zip(
+            interaction_meta, mi_batch
+        ):
+            if mi_val > best_single:
                 results.append({
                     "feat_a": feat_a, "feat_b": feat_b,
-                    "operation": "product",
-                    "corr": r_prod,
-                    "abs_corr": abs(r_prod),
-                    "best_single_corr": best_single,
-                    "improvement_over_best_single": abs(r_prod) - best_single,
+                    "operation": op, "mi": mi_val,
+                    "best_single_mi": best_single,
+                    "improvement": mi_val - best_single,
                 })
 
-        # difference: a - b
-        diff_vals = a_vals - b_vals
-        mask_diff = np.isfinite(diff_vals)
-        if mask_diff.sum() > 100:
-            r_diff = pd.Series(diff_vals[mask_diff]).corr(
-                pd.Series(target.values[mask_diff]))
-            if pd.notna(r_diff) and abs(r_diff) > best_single:
-                results.append({
-                    "feat_a": feat_a, "feat_b": feat_b,
-                    "operation": "difference",
-                    "corr": r_diff,
-                    "abs_corr": abs(r_diff),
-                    "best_single_corr": best_single,
-                    "improvement_over_best_single": abs(r_diff) - best_single,
-                })
+        pct = batch_end / n_pairs * 100
+        print(f"\r  진행: {batch_end:,}/{n_pairs:,} ({pct:.1f}%)", end="", flush=True)
+
+    print()  # 진행률 후 줄바꿈
 
     # 4) 결과 정리
     if not results:
-        print("\n단일 feature보다 높은 |r|을 가진 interaction이 없습니다.")
+        print("\n단일 feature보다 높은 MI를 가진 interaction이 없습니다.")
         return pd.DataFrame(columns=[
-            "feat_a", "feat_b", "operation", "corr", "abs_corr",
-            "best_single_corr", "improvement_over_best_single",
+            "feat_a", "feat_b", "operation", "mi",
+            "best_single_mi", "improvement",
         ])
 
     interaction_df = pd.DataFrame(results)
     interaction_df = interaction_df.sort_values(
-        "improvement_over_best_single", ascending=False
+        "improvement", ascending=False
     ).reset_index(drop=True)
 
     # 5) 상위 결과 출력
     print(f"\n{'='*80}")
-    print(f"단일 feature보다 높은 |r|을 가진 Interaction: {len(interaction_df)}개")
+    print(f"단일 feature보다 높은 MI를 가진 Interaction: {len(interaction_df)}개")
     print(f"{'='*80}")
 
     op_symbols = {"ratio": "/", "product": "*", "difference": "-"}
     display_n = min(n_top_pairs, len(interaction_df))
     print(f"\n상위 {display_n}개 Interaction Feature:")
-    print(f"  {'#':>3}  {'Interaction':>30}  {'|r|':>8}  "
-          f"{'Best Single |r|':>15}  {'Improvement':>11}")
+    print(f"  {'#':>3}  {'Interaction':>30}  {'MI':>10}  "
+          f"{'Best Single MI':>15}  {'Improvement':>12}")
     print("-" * 80)
 
     for idx, row in interaction_df.head(display_n).iterrows():
         sym = op_symbols.get(row["operation"], row["operation"])
         formula = f"{row['feat_a']} {sym} {row['feat_b']}"
-        print(f"  {idx+1:>3}  {formula:>30}  {row['abs_corr']:>8.5f}  "
-              f"{row['best_single_corr']:>15.5f}  "
-              f"{row['improvement_over_best_single']:>+11.5f}")
+        print(f"  {idx+1:>3}  {formula:>30}  {row['mi']:>10.6f}  "
+              f"{row['best_single_mi']:>15.6f}  "
+              f"{row['improvement']:>+12.6f}")
 
     # 연산별 통계
     print(f"\n연산별 발견 수:")
@@ -195,15 +214,31 @@ def pairwise_interaction_corr(xs_dict, ys_train, feat_cols,
         subset = interaction_df[interaction_df["operation"] == op]
         if len(subset) > 0:
             print(f"  {op:>12}: {len(subset):>4}개  "
-                  f"(최대 |r| = {subset['abs_corr'].max():.5f})")
+                  f"(최대 MI = {subset['mi'].max():.6f})")
 
     return interaction_df
 
 
+def _compute_interaction_vals(a, b, op, epsilon=1e-8):
+    """interaction 값 계산 + inf/nan → median 대체"""
+    if op == "product":
+        vals = a * b
+    elif op == "ratio":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            vals = a / (b + epsilon)
+    else:  # difference
+        vals = a - b
+    vals = np.where(np.isfinite(vals), vals, np.nan)
+    med = np.nanmedian(vals)
+    vals = np.where(np.isnan(vals), med if np.isfinite(med) else 0.0, vals)
+    return vals
+
+
 def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     """
-    상위 N개 interaction feature vs health scatter plot
-    왼쪽: 전체 데이터, 오른쪽: Y>0만 (비교)
+    상위 N개 interaction feature vs health scatter plot + MI 비교
+    전체 / Y>0 / Y>0+clip99 세 조건에서 MI를 비교 출력
 
     Parameters
     ----------
@@ -230,11 +265,16 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     merged_pos = merged[pos_mask]
     target_pos = target[pos_mask]
 
+    # Y>0 + 이상치 제거 서브셋
+    upper = target_pos.quantile(0.99)
+    clip_mask = target_pos <= upper
+    merged_clip = merged_pos[clip_mask]
+    target_clip = target_pos[clip_mask]
+
     display_n = min(n, len(interaction_df))
     op_symbols = {"ratio": "/", "product": "*", "difference": "-"}
-    epsilon = 1e-8
 
-    # 전체 scatter (기존)
+    # --- 전체 scatter ---
     n_cols = 3
     n_rows = (display_n + n_cols - 1) // n_cols
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 5.5 * n_rows))
@@ -246,27 +286,22 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
 
     for i, (_, row) in enumerate(interaction_df.head(display_n).iterrows()):
         feat_a, feat_b, op = row["feat_a"], row["feat_b"], row["operation"]
-        r_val = row["corr"]
+        mi_val = row["mi"]
         sym = op_symbols.get(op, op)
         formula = f"{feat_a} {sym} {feat_b}"
 
-        a_vals = merged.loc[sample_idx, feat_a].values
-        b_vals = merged.loc[sample_idx, feat_b].values
+        inter_vals = _compute_interaction_vals(
+            merged.loc[sample_idx, feat_a].values,
+            merged.loc[sample_idx, feat_b].values, op
+        )
         y_vals = target.loc[sample_idx].values
-
-        if op == "ratio":
-            inter_vals = a_vals / (b_vals + epsilon)
-        elif op == "product":
-            inter_vals = a_vals * b_vals
-        else:
-            inter_vals = a_vals - b_vals
-
         mask = np.isfinite(inter_vals)
+
         axes[i].scatter(inter_vals[mask], y_vals[mask],
                         alpha=0.15, s=5, color="steelblue")
         axes[i].set_xlabel(formula, fontsize=10)
         axes[i].set_ylabel("health")
-        axes[i].set_title(f"{formula}\nr = {r_val:+.5f}", fontsize=10)
+        axes[i].set_title(f"{formula}\nMI = {mi_val:.5f}", fontsize=10)
 
     for j in range(display_n, len(axes)):
         axes[j].set_visible(False)
@@ -276,7 +311,7 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     plt.tight_layout()
     plt.show()
 
-    # Y>0만 scatter (비교용)
+    # --- Y>0 scatter ---
     fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(18, 5.5 * n_rows))
     axes2 = np.array(axes2).flatten()
 
@@ -289,41 +324,33 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
         sym = op_symbols.get(op, op)
         formula = f"{feat_a} {sym} {feat_b}"
 
-        a_vals = merged_pos.loc[sample_pos_idx, feat_a].values
-        b_vals = merged_pos.loc[sample_pos_idx, feat_b].values
+        inter_vals = _compute_interaction_vals(
+            merged_pos.loc[sample_pos_idx, feat_a].values,
+            merged_pos.loc[sample_pos_idx, feat_b].values, op
+        )
         y_vals = target_pos.loc[sample_pos_idx].values
-
-        if op == "ratio":
-            inter_vals = a_vals / (b_vals + epsilon)
-        elif op == "product":
-            inter_vals = a_vals * b_vals
-        else:
-            inter_vals = a_vals - b_vals
-
         mask = np.isfinite(inter_vals)
-        # Y>0에서의 상관계수 재계산
-        r_pos = pd.Series(inter_vals[mask]).corr(pd.Series(y_vals[mask]))
-        r_pos = r_pos if pd.notna(r_pos) else 0.0
+
+        mi_pos = mutual_info_regression(
+            inter_vals[mask].reshape(-1, 1),
+            y_vals[mask], random_state=SEED, n_jobs=-1
+        )[0]
 
         axes2[i].scatter(inter_vals[mask], y_vals[mask],
                          alpha=0.2, s=8, color="coral")
         axes2[i].set_xlabel(formula, fontsize=10)
         axes2[i].set_ylabel("health")
-        axes2[i].set_title(f"{formula}\nr(Y>0) = {r_pos:+.5f}", fontsize=10)
+        axes2[i].set_title(f"{formula}\nMI(Y>0) = {mi_pos:.5f}", fontsize=10)
 
     for j in range(display_n, len(axes2)):
         axes2[j].set_visible(False)
 
-    plt.suptitle(f"상위 {display_n}개 Interaction Feature vs Target (Y>0만, n={pos_mask.sum():,})",
-                 fontsize=14, y=1.01)
+    plt.suptitle(f"상위 {display_n}개 Interaction Feature vs Target "
+                 f"(Y>0만, n={pos_mask.sum():,})", fontsize=14, y=1.01)
     plt.tight_layout()
     plt.show()
 
-    # Y>0 + 이상치 제거 scatter
-    upper = target_pos.quantile(0.99)
-    clip_mask = target_pos <= upper
-    merged_clip = merged_pos[clip_mask]
-    target_clip = target_pos[clip_mask]
+    # --- Y>0 + clip99 scatter ---
     sample_clip_idx = merged_clip.sample(
         n=min(5000, len(merged_clip)), random_state=SEED
     ).index
@@ -336,26 +363,23 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
         sym = op_symbols.get(op, op)
         formula = f"{feat_a} {sym} {feat_b}"
 
-        a_vals = merged_clip.loc[sample_clip_idx, feat_a].values
-        b_vals = merged_clip.loc[sample_clip_idx, feat_b].values
+        inter_vals = _compute_interaction_vals(
+            merged_clip.loc[sample_clip_idx, feat_a].values,
+            merged_clip.loc[sample_clip_idx, feat_b].values, op
+        )
         y_vals = target_clip.loc[sample_clip_idx].values
-
-        if op == "ratio":
-            inter_vals = a_vals / (b_vals + epsilon)
-        elif op == "product":
-            inter_vals = a_vals * b_vals
-        else:
-            inter_vals = a_vals - b_vals
-
         mask = np.isfinite(inter_vals)
-        r_clip = pd.Series(inter_vals[mask]).corr(pd.Series(y_vals[mask]))
-        r_clip = r_clip if pd.notna(r_clip) else 0.0
+
+        mi_clip = mutual_info_regression(
+            inter_vals[mask].reshape(-1, 1),
+            y_vals[mask], random_state=SEED, n_jobs=-1
+        )[0]
 
         axes3[i].scatter(inter_vals[mask], y_vals[mask],
                          alpha=0.2, s=8, color="mediumseagreen")
         axes3[i].set_xlabel(formula, fontsize=10)
         axes3[i].set_ylabel("health")
-        axes3[i].set_title(f"{formula}\nr(clip99) = {r_clip:+.5f}", fontsize=10)
+        axes3[i].set_title(f"{formula}\nMI(clip99) = {mi_clip:.5f}", fontsize=10)
 
     for j in range(display_n, len(axes3)):
         axes3[j].set_visible(False)
@@ -366,46 +390,40 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     plt.tight_layout()
     plt.show()
 
-    # 전체 vs Y>0 vs clip99 상관계수 비교 출력
+    # --- 전체 vs Y>0 vs clip99 MI 비교 테이블 ---
     print(f"\n{'='*75}")
-    print(f"전체 vs Y>0 vs Y>0+clip99 상관계수 비교")
+    print(f"전체 vs Y>0 vs Y>0+clip99 MI 비교")
     print(f"  (전체: {len(merged):,}, Y>0: {pos_mask.sum():,}, "
           f"Y>0+clip99: {clip_mask.sum():,}, 상위1% 기준: {upper:.4f})")
     print(f"{'='*75}")
-    print(f"  {'Interaction':>30}  {'r(전체)':>10}  {'r(Y>0)':>10}  {'r(clip99)':>10}")
+    print(f"  {'Interaction':>30}  {'MI(전체)':>10}  {'MI(Y>0)':>10}  {'MI(clip99)':>10}")
     print("-" * 70)
 
     for _, row in interaction_df.head(display_n).iterrows():
         feat_a, feat_b, op = row["feat_a"], row["feat_b"], row["operation"]
         sym = op_symbols.get(op, op)
         formula = f"{feat_a} {sym} {feat_b}"
-        r_all = row["corr"]
+        mi_all = row["mi"]
 
-        a_p = merged_pos[feat_a].values
-        b_p = merged_pos[feat_b].values
-        if op == "ratio":
-            iv = a_p / (b_p + epsilon)
-        elif op == "product":
-            iv = a_p * b_p
-        else:
-            iv = a_p - b_p
-        m = np.isfinite(iv)
-        r_p = pd.Series(iv[m]).corr(pd.Series(target_pos.values[m]))
-        r_p = r_p if pd.notna(r_p) else 0.0
+        # Y>0 MI
+        iv_p = _compute_interaction_vals(
+            merged_pos[feat_a].values, merged_pos[feat_b].values, op
+        )
+        mi_p = mutual_info_regression(
+            iv_p.reshape(-1, 1), target_pos.values,
+            random_state=SEED, n_jobs=-1
+        )[0]
 
-        a_c = merged_clip[feat_a].values
-        b_c = merged_clip[feat_b].values
-        if op == "ratio":
-            iv_c = a_c / (b_c + epsilon)
-        elif op == "product":
-            iv_c = a_c * b_c
-        else:
-            iv_c = a_c - b_c
-        m_c = np.isfinite(iv_c)
-        r_c = pd.Series(iv_c[m_c]).corr(pd.Series(target_clip.values[m_c]))
-        r_c = r_c if pd.notna(r_c) else 0.0
+        # clip99 MI
+        iv_c = _compute_interaction_vals(
+            merged_clip[feat_a].values, merged_clip[feat_b].values, op
+        )
+        mi_c = mutual_info_regression(
+            iv_c.reshape(-1, 1), target_clip.values,
+            random_state=SEED, n_jobs=-1
+        )[0]
 
-        print(f"  {formula:>30}  {r_all:>+10.5f}  {r_p:>+10.5f}  {r_c:>+10.5f}")
+        print(f"  {formula:>30}  {mi_all:>10.5f}  {mi_p:>10.5f}  {mi_c:>10.5f}")
 
 
 def shallow_tree_analysis(xs_dict, ys_train, feat_cols,

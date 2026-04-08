@@ -254,7 +254,11 @@ def _calc_delta(df: pd.DataFrame, exp_id: str, val_rmse: float, test_rmse: float
 
     ref = match.iloc[0]
     val_delta = val_rmse - ref["val_rmse"]
-    test_delta = test_rmse - ref["test_rmse"]
+    test_delta = (
+        test_rmse - ref["test_rmse"]
+        if test_rmse is not None and ref["test_rmse"] is not None
+        else None
+    )
     return val_delta, test_delta
 
 
@@ -324,7 +328,7 @@ def log_experiment(
         "타입": exp_type,
         "베스트모델": best_model,
         "val_rmse": round(val_rmse, 6),
-        "test_rmse": round(test_rmse, 6),
+        "test_rmse": round(test_rmse, 6) if test_rmse is not None else None,
         "val_증감": round(val_delta, 6) if val_delta is not None else None,
         "test_증감": round(test_delta, 6) if test_delta is not None else None,
         "피처수": n_features,
@@ -363,7 +367,7 @@ def log_experiment(
         sign = "+" if val_delta >= 0 else ""
         print(f"  ({sign}{val_delta:.6f})", end="")
     print()
-    print(f"  Test RMSE: {test_rmse:.6f}", end="")
+    print(f"  Test RMSE: {test_rmse:.6f}" if test_rmse is not None else "  Test RMSE: N/A", end="")
     if test_delta is not None:
         sign = "+" if test_delta >= 0 else ""
         print(f"  ({sign}{test_delta:.6f})", end="")
