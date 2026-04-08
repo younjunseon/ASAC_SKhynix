@@ -23,6 +23,7 @@
 import os
 import sys
 import json
+import hashlib
 from datetime import datetime
 
 import pandas as pd
@@ -157,6 +158,76 @@ def check_exp_id(exp_id: str):
     df = _load_xlsx()
     if exp_id in df["실험번호"].values:
         raise ValueError(f"이미 존재하는 실험번호입니다: '{exp_id}'")
+
+
+def _params_hash(params_dict: dict) -> str:
+    """파라미터 딕셔너리 → 결정적 해시 (비교용)"""
+    serialized = json.dumps(params_dict, sort_keys=True, default=str)
+    return hashlib.md5(serialized.encode()).hexdigest()
+
+
+def check_duplicate_params(
+    exp_id: str,
+    *,
+    cleaning_params: dict = None,
+    outlier_params: dict = None,
+    meta_params: dict = None,
+    agg_params: dict = None,
+    feature_sel_params: dict = None,
+    model_params: dict = None,
+):
+    """
+    실험 내용(파라미터) 중복 검사.
+    동일한 파라미터 조합의 실험이 이미 존재하면 에러 발생.
+
+    Parameters
+    ----------
+    exp_id : str
+        현재 실험번호 (자기 자신은 비교에서 제외)
+    cleaning_params ~ model_params : dict
+        현재 실험의 파라미터들
+
+    Raises
+    ------
+    ValueError
+        동일한 파라미터 조합이 이미 존재할 때
+    """
+    current = {}
+    if cleaning_params is not None:
+        current["cleaning_params"] = cleaning_params
+    if outlier_params is not None:
+        current["outlier_params"] = outlier_params
+    if meta_params is not None:
+        current["meta_params"] = meta_params
+    if agg_params is not None:
+        current["agg_params"] = agg_params
+    if feature_sel_params is not None:
+        current["feature_sel_params"] = feature_sel_params
+    if model_params is not None:
+        current["model_params"] = model_params
+
+    if not current:
+        return  # 비교할 파라미터가 없으면 스킵
+
+    current_hash = _params_hash(current)
+
+    existing = _load_json()
+    for existing_id, existing_params in existing.items():
+        if existing_id == exp_id:
+            continue  # 자기 자신 제외
+
+        # 기존 실험에서 같은 키만 추출하여 비교
+        existing_subset = {
+            k: v for k, v in existing_params.items() if k in current
+        }
+        if not existing_subset:
+            continue
+
+        if _params_hash(existing_subset) == current_hash:
+            raise ValueError(
+                f"실험 '{existing_id}'과 동일한 파라미터 조합입니다. "
+                f"파라미터를 변경하거나 기존 실험을 확인하세요."
+            )
 
 
 def _calc_delta(df: pd.DataFrame, exp_id: str, val_rmse: float, test_rmse: float):
