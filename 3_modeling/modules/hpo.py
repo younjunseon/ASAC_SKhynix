@@ -71,7 +71,10 @@ def _xgb_search_space(trial, task):
 
 
 def _catboost_search_space(trial, task):
-    """CatBoost 탐색 공간"""
+    """CatBoost 탐색 공간
+
+    task_type='CPU' 강제: Colab T4 GPU에서 LGBM과 GPU 메모리 경합으로 OOM 발생하여 CPU로 고정.
+    """
     params = dict(
         iterations=trial.suggest_int("iterations", 100, 3000),
         learning_rate=trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
@@ -80,7 +83,7 @@ def _catboost_search_space(trial, task):
         subsample=trial.suggest_float("subsample", 0.5, 1.0),
         colsample_bylevel=trial.suggest_float("colsample_bylevel", 0.1, 1.0),
         l2_leaf_reg=trial.suggest_float("l2_leaf_reg", 1e-8, 10.0, log=True),
-        task_type="GPU" if DEVICE == "gpu" else "CPU",
+        task_type="CPU",
         random_seed=SEED,
         verbose=0,
     )

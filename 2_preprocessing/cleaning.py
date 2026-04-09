@@ -105,24 +105,50 @@ def remove_duplicate_features(xs, feat_cols, sample_n=5000, seed=42):
     return keep, removed
 
 
-def remove_high_corr_features(xs, feat_cols, threshold=0.95, sample_n=10000, seed=42):
+def remove_high_corr_features(
+    xs, feat_cols,
+    threshold=0.95,
+    keep_by="std",
+    ys_train=None,
+    winsorize_pct=0.0,
+    sample_n=10000,
+    seed=42,
+):
     """
     피처 간 |상관계수| > threshold인 쌍에서 한쪽 제거 (다중공선성 감소)
 
     EDA Phase 11: |r|>0.95 쌍 47개 발견
     (X234↔X235↔X236↔X237, X254↔X256↔X257, X1↔X3 등)
 
-    제거 기준: 쌍 중 target 상관이 낮은 쪽 제거 (target_corr 제공 시)
-              미제공 시 뒤에 나오는 컬럼 제거
+    쌍 중 어느 쪽을 남길지는 `keep_by`로 선택:
+    - "std" (기본): std 큰 쪽을 남김.
+        winsorize_pct > 0이면 각 컬럼을 [q, 1-q] 분위수로 클립한 뒤
+        std를 계산하여 극단값의 영향을 줄임 (예: 0.01 → 1%/99% clip).
+    - "target_corr": |corr(feature, target)| 큰 쪽을 남김. ys_train 필수.
+        EDA(eda_relationships.compute_correlation)와 동일한 방식:
+        die → unit mean 집계 후 unit-level에서 target과 Pearson 상관 계산.
+
+    알고리즘: feat_cols 순서대로 i<j 쌍을 순회하고, |r|>threshold인 쌍에서
+    score가 큰 쪽을 남김. 한 컬럼이 제거되면 그 컬럼의 나머지 쌍은 스킵.
 
     Parameters
     ----------
     xs : DataFrame
+        die-level DataFrame. KEY_COL(ufs_serial) 컬럼이 있어야 target_corr 동작
     feat_cols : list
     threshold : float
         |r|이 이 값 초과인 쌍에서 한쪽 제거. 기본 0.95
+    keep_by : {"std", "target_corr"}
+        남길 컬럼을 고르는 기준. 기본 "std"
+    ys_train : DataFrame or Series, optional
+        keep_by="target_corr"일 때 필수. unit-level target.
+        DataFrame이면 KEY_COL, TARGET_COL 컬럼이 있어야 함.
+    winsorize_pct : float
+        keep_by="std"일 때 std 계산 전 양쪽 분위수 클립 비율.
+        0이면 생략. 기본 0.0
     sample_n : int
-        상관 계산 시 샘플 수 (속도)
+        std 경로에서 상관/score 계산 시 샘플 수 (속도).
+        target_corr 경로에선 unit-level 집계라 전체를 사용.
     seed : int
 
     Returns
@@ -131,27 +157,81 @@ def remove_high_corr_features(xs, feat_cols, threshold=0.95, sample_n=10000, see
     removed_cols : list
     """
     sample = xs[feat_cols].sample(n=min(sample_n, len(xs)), random_state=seed)
+
+    # 피처간 상관 행렬 (절대값) — numpy로 빠르게 접근
     corr_matrix = sample.corr().abs()
+    corr_arr = corr_matrix.values
 
-    # 상삼각 행렬만 사용
-    upper = corr_matrix.where(
-        np.triu(np.ones(corr_matrix.shape, dtype=bool), k=1)
-    )
+    # ── 남길 기준 score 계산 ──
+    # tuple score 사용: Python lexicographic 비교로 primary → tiebreaker 적용
+    if keep_by == "target_corr":
+        if ys_train is None:
+            raise ValueError(
+                "keep_by='target_corr'일 때는 ys_train을 반드시 전달해야 합니다"
+            )
+        from utils.config import KEY_COL, TARGET_COL
+        if KEY_COL not in xs.columns:
+            raise ValueError(
+                f"keep_by='target_corr'는 xs에 '{KEY_COL}' 컬럼이 있어야 합니다"
+            )
+        # EDA와 동일: die → unit mean 집계 후 target과 unit-level에서 상관 계산
+        xs_unit_mean = xs.groupby(KEY_COL)[feat_cols].mean()
+        merged = xs_unit_mean.merge(
+            ys_train, left_index=True, right_on=KEY_COL, how='inner'
+        )
+        primary = merged[feat_cols].corrwith(merged[TARGET_COL]).abs()
+        tiebreak = sample.std()  # 동률일 때 die-level std 큰 쪽
+        primary_d = primary.fillna(-np.inf).to_dict()
+        tiebreak_d = tiebreak.fillna(-np.inf).to_dict()
+        scores_dict = {
+            col: (primary_d.get(col, -np.inf), tiebreak_d.get(col, -np.inf))
+            for col in feat_cols
+        }
+        criterion_desc = (
+            f"|target 상관| 우선, 동률이면 std "
+            f"(unit-level merge n={len(merged):,})"
+        )
+    elif keep_by == "std":
+        if winsorize_pct > 0:
+            q_low = sample.quantile(winsorize_pct)
+            q_high = sample.quantile(1 - winsorize_pct)
+            clipped = sample.clip(lower=q_low, upper=q_high, axis=1)
+            primary = clipped.std()
+            criterion_desc = f"winsorized({winsorize_pct*100:.0f}%) std"
+        else:
+            primary = sample.std()
+            criterion_desc = "std"
+        primary_d = primary.fillna(-np.inf).to_dict()
+        scores_dict = {
+            col: (primary_d.get(col, -np.inf),) for col in feat_cols
+        }
+    else:
+        raise ValueError(
+            f"Unknown keep_by={keep_by!r}. Use 'std' or 'target_corr'"
+        )
 
+    # ── 쌍 단위 greedy 제거 ──
     removed = set()
-    for col in feat_cols:
-        if col in removed:
+    n = len(feat_cols)
+    for i in range(n):
+        col_i = feat_cols[i]
+        if col_i in removed:
             continue
-        # 이 컬럼과 threshold 초과 상관인 컬럼들
-        high_corr = upper.index[upper[col] > threshold].tolist()
-        for hc in high_corr:
-            if hc not in removed:
-                removed.add(hc)
+        for j in range(i + 1, n):
+            col_j = feat_cols[j]
+            if col_j in removed:
+                continue
+            if corr_arr[i, j] > threshold:
+                if scores_dict[col_i] >= scores_dict[col_j]:
+                    removed.add(col_j)
+                else:
+                    removed.add(col_i)
+                    break  # col_i 제거됐으므로 나머지 j 스킵
 
     removed = list(removed)
     keep = [c for c in feat_cols if c not in removed]
 
-    print(f"[고상관 제거] threshold={threshold}")
+    print(f"[고상관 제거] threshold={threshold}, keep_by={keep_by} ({criterion_desc})")
     print(f"  제거: {len(removed)}개, 잔여: {len(keep)}개")
     return keep, removed
 
@@ -376,6 +456,9 @@ def run_cleaning(xs, feat_cols, xs_dict,
                  missing_threshold=0.5,
                  remove_duplicates=True,
                  corr_threshold=0.95,
+                 corr_keep_by="std",
+                 corr_winsorize_pct=0.0,
+                 ys_train=None,
                  add_indicator=False,
                  indicator_threshold=0.01,
                  imputation_method="median",
@@ -394,6 +477,17 @@ def run_cleaning(xs, feat_cols, xs_dict,
     remove_duplicates : bool
     corr_threshold : float or None
         |r| > 이 값인 피처 쌍에서 한쪽 제거. None이면 스킵
+    corr_keep_by : {"std", "target_corr"}
+        고상관 쌍에서 남길 기준. 기본 "std"
+        - "std": std 큰 쪽 남김 (corr_winsorize_pct>0이면 분위수 클립 후 std)
+        - "target_corr": |corr(feature, target)| 큰 쪽 남김 (ys_train 필수).
+          내부에서 die→unit mean 집계 후 unit-level에서 상관 계산 (EDA와 동일).
+    corr_winsorize_pct : float
+        corr_keep_by="std"일 때 std 계산 전 양쪽 분위수 클립 비율.
+        예: 0.01 → 1%/99% clip. 0이면 생략. 기본 0.0
+    ys_train : DataFrame, optional
+        corr_keep_by="target_corr"일 때 필수.
+        unit-level train Y 데이터 (KEY_COL, TARGET_COL 컬럼 필요).
     add_indicator : bool
         결측 indicator 컬럼 추가 여부
     indicator_threshold : float
@@ -468,7 +562,11 @@ def run_cleaning(xs, feat_cols, xs_dict,
     if corr_threshold is not None:
         before = len(current_cols)
         current_cols, removed = remove_high_corr_features(
-            xs_train, current_cols, threshold=corr_threshold
+            xs_train, current_cols,
+            threshold=corr_threshold,
+            keep_by=corr_keep_by,
+            ys_train=ys_train,
+            winsorize_pct=corr_winsorize_pct,
         )
         _drop_from_all(removed)
         report["high_corr"] = removed

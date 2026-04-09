@@ -1,8 +1,12 @@
 """
 EDA 모듈: Feature Interaction 탐색
 - 전체 feature 쌍의 상호작용(ratio, product, difference)이
-  단일 feature보다 높은 Mutual Information을 보이는지 탐색
-- MI 기반으로 비선형 의존성까지 포착 (Pearson/Spearman 대비 우위)
+  단일 feature보다 높은 신호를 보이는지 탐색
+- 3가지 metric 동시 평가: Pearson r, Spearman ρ, Mutual Information
+  · Pearson  : 선형 관계
+  · Spearman : monotonic 비선형 관계 (rank 기반)
+  · MI       : 임의 비선형 의존성 (KSG estimator, n_neighbors=15 권장)
+- MI n_neighbors 기본값은 15 (k=3 진단 결과 SNR 5 → k=15 SNR 10.6)
 - Shallow Decision Tree로 자연스러운 feature split 조합 발굴
 - 노트북에서 import eda_interaction as ia 로 사용
 """
@@ -11,9 +15,42 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from itertools import combinations
+from scipy.stats import spearmanr
 from sklearn.tree import DecisionTreeRegressor, export_text, plot_tree
 from sklearn.feature_selection import mutual_info_regression
 from utils.config import KEY_COL, TARGET_COL, SEED
+
+
+# ── MI estimator의 KSG k 파라미터 기본값 ──
+# k=3 (sklearn default)는 우리 데이터(n=26K, zero-inflated)에서
+# null/real ≈ 11%, SNR=5.06 으로 신뢰도 낮음.
+# k=15에서 null/real ≈ 5%, SNR=10.6으로 안정. 진단 결과 권장값.
+DEFAULT_MI_K = 15
+
+
+def _batch_pearson(X, y):
+    """벡터화 Pearson r: 각 컬럼 vs y. (n,p) × (n,) → (p,)"""
+    Xc = X - X.mean(axis=0, keepdims=True)
+    yc = y - y.mean()
+    num = Xc.T @ yc
+    denom = np.sqrt((Xc ** 2).sum(axis=0)) * np.sqrt((yc ** 2).sum())
+    denom = np.where(denom == 0, 1.0, denom)
+    return num / denom
+
+
+def _batch_spearman(X, y_ranks):
+    """벡터화 Spearman ρ: 각 컬럼의 rank vs y의 rank로 Pearson 계산.
+
+    Parameters
+    ----------
+    X : (n, p) ndarray
+        interaction 컬럼 batch
+    y_ranks : (n,) ndarray
+        target의 rank (사전 계산하여 재사용)
+    """
+    # argsort.argsort 로 rank 산출 (ties는 임의 순서, 연속형이라 무방)
+    X_ranks = X.argsort(axis=0).argsort(axis=0).astype(np.float64)
+    return _batch_pearson(X_ranks, y_ranks)
 
 
 def _prepare_unit_data(xs_dict, ys_train, feat_cols):
@@ -53,15 +90,21 @@ def _prepare_unit_data(xs_dict, ys_train, feat_cols):
 
 def pairwise_interaction_corr(xs_dict, ys_train, feat_cols,
                               top_n_feats=None, n_top_pairs=20,
-                              batch_size=1000):
+                              batch_size=1000,
+                              n_neighbors=DEFAULT_MI_K,
+                              sort_by="mi"):
     """
-    전체 feature 쌍의 상호작용(ratio, product, difference)과 target 간 MI 분석
+    전체 feature 쌍의 상호작용(ratio, product, difference)을
+    Pearson r / Spearman ρ / Mutual Information 3가지 metric으로 동시 평가.
 
     반도체 맥락:
     - 개별 WT feature와 health의 선형 상관이 극도로 약함 (max |r|=0.037)
-    - Mutual Information은 비선형 의존성까지 포착하므로 interaction 평가에 적합
     - 두 feature의 비율(공정 균형), 곱(복합 효과), 차이(편차)가
       불량 예측에 더 강한 신호를 줄 수 있음
+    - 3 metric을 동시에 보는 이유:
+        · MI만 보면 noise 신호를 잡을 위험 (k 작을수록 심함)
+        · r/ρ는 거의 공짜 (벡터화) → 같이 봐서 신호 robustness 검증
+        · 3 metric 모두 개선되는 interaction이 가장 신뢰도 높음
 
     Parameters
     ----------
@@ -76,34 +119,55 @@ def pairwise_interaction_corr(xs_dict, ys_train, feat_cols,
     n_top_pairs : int
         출력할 상위 interaction feature 수 (기본 20)
     batch_size : int
-        MI 계산 시 한 번에 처리할 pair 수 (기본 1000)
+        한 번에 처리할 pair 수 (기본 1000)
+    n_neighbors : int
+        MI(KSG estimator)의 k 파라미터. 기본 15
+        (진단 결과 sklearn default 3은 SNR 5에 그쳐 noise 큼)
+    sort_by : {'mi', 'pearson', 'spearman'}
+        상위 N개 출력 정렬 기준 metric (기본 'mi')
 
     Returns
     -------
     interaction_df : DataFrame
-        columns = [feat_a, feat_b, operation, mi,
-                   best_single_mi, improvement]
-        improvement 기준 내림차순 정렬
+        columns = [feat_a, feat_b, operation,
+                   mi, pearson, spearman,
+                   best_single_mi, best_single_pearson, best_single_spearman,
+                   imp_mi, imp_pearson, imp_spearman]
+        지정 sort_by의 improvement 기준 내림차순 정렬
+        pearson/spearman은 부호 포함, best_single_*과 imp_*는 |·| 기준
     """
     merged, valid_feats = _prepare_unit_data(xs_dict, ys_train, feat_cols)
     target = merged[TARGET_COL].values
 
-    # 1) 단일 feature MI 계산
-    print(f"단일 feature-target MI 계산 중 ({len(valid_feats)}개)...")
+    # 1) 단일 feature 3 metric 계산 (한 번만)
+    print(f"단일 feature 3-metric 계산 중 ({len(valid_feats)}개)...")
     X_all = merged[valid_feats].values
+
+    # MI
     single_mi_vals = mutual_info_regression(
-        X_all, target, random_state=SEED, n_jobs=-1
+        X_all, target, n_neighbors=n_neighbors,
+        random_state=SEED, n_jobs=-1,
     )
+    # Pearson (벡터화)
+    single_r_vals = _batch_pearson(X_all, target)
+    # Spearman: target rank 한 번만 계산하여 재사용
+    target_ranks = target.argsort().argsort().astype(np.float64)
+    single_rho_vals = _batch_spearman(X_all, target_ranks)
+
     single_mi = dict(zip(valid_feats, single_mi_vals))
-    single_mi_series = pd.Series(single_mi).sort_values(ascending=False)
+    single_r = dict(zip(valid_feats, single_r_vals))
+    single_rho = dict(zip(valid_feats, single_rho_vals))
 
-    print(f"  단일 feature 최대 MI = {single_mi_series.iloc[0]:.6f} "
-          f"({single_mi_series.index[0]})")
+    print(f"  단일 max  MI={single_mi_vals.max():.5f}  "
+          f"|r|={np.abs(single_r_vals).max():.5f}  "
+          f"|ρ|={np.abs(single_rho_vals).max():.5f}  "
+          f"(MI k={n_neighbors})")
 
-    # 2) feature 선정
+    # 2) feature 선정 (MI 상위 기준 — 비선형 포함)
+    mi_series = pd.Series(single_mi).sort_values(ascending=False)
     if top_n_feats is not None:
-        use_feats = single_mi_series.head(top_n_feats).index.tolist()
-        label = f"상위 {top_n_feats}개"
+        use_feats = mi_series.head(top_n_feats).index.tolist()
+        label = f"단일 MI 상위 {top_n_feats}개"
     else:
         use_feats = valid_feats
         label = "전체"
@@ -111,9 +175,10 @@ def pairwise_interaction_corr(xs_dict, ys_train, feat_cols,
     n_feats = len(use_feats)
     all_pairs = list(combinations(use_feats, 2))
     n_pairs = len(all_pairs)
-    print(f"{label} feature {n_feats}개 → {n_pairs:,}개 쌍 탐색")
+    print(f"{label} feature {n_feats}개 → {n_pairs:,}개 쌍 × 3연산 "
+          f"= {n_pairs * 3:,}개 interaction 탐색")
 
-    # 3) batch MI 계산
+    # 3) batch 계산
     results = []
     epsilon = 1e-8
 
@@ -127,94 +192,123 @@ def pairwise_interaction_corr(xs_dict, ys_train, feat_cols,
         for feat_a, feat_b in batch_pairs:
             a = merged[feat_a].values
             b = merged[feat_b].values
-            best_single = max(single_mi[feat_a], single_mi[feat_b])
+            best_mi  = max(single_mi[feat_a],  single_mi[feat_b])
+            best_r   = max(abs(single_r[feat_a]),   abs(single_r[feat_b]))
+            best_rho = max(abs(single_rho[feat_a]), abs(single_rho[feat_b]))
+            best = (best_mi, best_r, best_rho)
 
-            # product: a * b
-            prod = a * b
-            prod = np.where(np.isfinite(prod), prod, np.nan)
-            med = np.nanmedian(prod)
-            prod = np.where(np.isnan(prod), med if np.isfinite(med) else 0.0, prod)
-            interaction_cols.append(prod)
-            interaction_meta.append((feat_a, feat_b, "product", best_single))
-
-            # ratio: a / (b + epsilon)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                ratio = a / (b + epsilon)
-            ratio = np.where(np.isfinite(ratio), ratio, np.nan)
-            med = np.nanmedian(ratio)
-            ratio = np.where(np.isnan(ratio), med if np.isfinite(med) else 0.0, ratio)
-            interaction_cols.append(ratio)
-            interaction_meta.append((feat_a, feat_b, "ratio", best_single))
-
-            # difference: a - b
-            diff = a - b
-            diff = np.where(np.isfinite(diff), diff, np.nan)
-            med = np.nanmedian(diff)
-            diff = np.where(np.isnan(diff), med if np.isfinite(med) else 0.0, diff)
-            interaction_cols.append(diff)
-            interaction_meta.append((feat_a, feat_b, "difference", best_single))
+            for op in ("product", "ratio", "difference"):
+                vals = _compute_interaction_vals(a, b, op, epsilon=epsilon)
+                interaction_cols.append(vals)
+                interaction_meta.append((feat_a, feat_b, op, best))
 
         X_batch = np.column_stack(interaction_cols)
-        mi_batch = mutual_info_regression(
-            X_batch, target, random_state=SEED, n_jobs=-1
-        )
 
-        for (feat_a, feat_b, op, best_single), mi_val in zip(
-            interaction_meta, mi_batch
-        ):
-            if mi_val > best_single:
+        # 3-1) MI (가장 비싼 단계)
+        mi_batch = mutual_info_regression(
+            X_batch, target, n_neighbors=n_neighbors,
+            random_state=SEED, n_jobs=-1,
+        )
+        # 3-2) Pearson (벡터화, 거의 0초)
+        r_batch = _batch_pearson(X_batch, target)
+        # 3-3) Spearman (벡터화 rank, 빠름)
+        rho_batch = _batch_spearman(X_batch, target_ranks)
+
+        for (feat_a, feat_b, op, (best_mi, best_r, best_rho)), \
+                mi_val, r_val, rho_val in zip(
+                    interaction_meta, mi_batch, r_batch, rho_batch):
+            imp_mi  = mi_val - best_mi
+            imp_r   = abs(r_val) - best_r
+            imp_rho = abs(rho_val) - best_rho
+
+            # 3 metric 중 하나라도 개선되면 기록
+            if imp_mi > 0 or imp_r > 0 or imp_rho > 0:
                 results.append({
-                    "feat_a": feat_a, "feat_b": feat_b,
-                    "operation": op, "mi": mi_val,
-                    "best_single_mi": best_single,
-                    "improvement": mi_val - best_single,
+                    "feat_a": feat_a, "feat_b": feat_b, "operation": op,
+                    "mi": float(mi_val),
+                    "pearson": float(r_val),
+                    "spearman": float(rho_val),
+                    "best_single_mi": best_mi,
+                    "best_single_pearson": best_r,
+                    "best_single_spearman": best_rho,
+                    "imp_mi": float(imp_mi),
+                    "imp_pearson": float(imp_r),
+                    "imp_spearman": float(imp_rho),
                 })
 
         pct = batch_end / n_pairs * 100
-        print(f"\r  진행: {batch_end:,}/{n_pairs:,} ({pct:.1f}%)", end="", flush=True)
+        print(f"\r  진행: {batch_end:,}/{n_pairs:,} ({pct:.1f}%)",
+              end="", flush=True)
 
     print()  # 진행률 후 줄바꿈
 
-    # 4) 결과 정리
     if not results:
-        print("\n단일 feature보다 높은 MI를 가진 interaction이 없습니다.")
+        print("\n단일 feature보다 높은 (MI/r/ρ) interaction이 없습니다.")
         return pd.DataFrame(columns=[
-            "feat_a", "feat_b", "operation", "mi",
-            "best_single_mi", "improvement",
+            "feat_a", "feat_b", "operation",
+            "mi", "pearson", "spearman",
+            "best_single_mi", "best_single_pearson", "best_single_spearman",
+            "imp_mi", "imp_pearson", "imp_spearman",
         ])
 
     interaction_df = pd.DataFrame(results)
+
+    # 정렬
+    sort_col_map = {
+        "mi": "imp_mi",
+        "pearson": "imp_pearson",
+        "spearman": "imp_spearman",
+    }
+    sort_col = sort_col_map.get(sort_by, "imp_mi")
     interaction_df = interaction_df.sort_values(
-        "improvement", ascending=False
+        sort_col, ascending=False
     ).reset_index(drop=True)
 
-    # 5) 상위 결과 출력
-    print(f"\n{'='*80}")
-    print(f"단일 feature보다 높은 MI를 가진 Interaction: {len(interaction_df)}개")
-    print(f"{'='*80}")
+    # 4) 결과 요약
+    n_total = len(interaction_df)
+    n_mi  = int((interaction_df["imp_mi"] > 0).sum())
+    n_r   = int((interaction_df["imp_pearson"] > 0).sum())
+    n_rho = int((interaction_df["imp_spearman"] > 0).sum())
+    n_triple = int(((interaction_df["imp_mi"] > 0) &
+                    (interaction_df["imp_pearson"] > 0) &
+                    (interaction_df["imp_spearman"] > 0)).sum())
+
+    print(f"\n{'='*100}")
+    print(f"3-metric 중 하나 이상 개선된 Interaction: {n_total:,}개")
+    print(f"  - MI 개선:   {n_mi:>7,}개")
+    print(f"  - |r| 개선:  {n_r:>7,}개")
+    print(f"  - |ρ| 개선:  {n_rho:>7,}개")
+    print(f"  - 3개 모두:  {n_triple:>7,}개  ← 가장 신뢰도 높은 후보")
+    print(f"{'='*100}")
 
     op_symbols = {"ratio": "/", "product": "*", "difference": "-"}
-    display_n = min(n_top_pairs, len(interaction_df))
-    print(f"\n상위 {display_n}개 Interaction Feature:")
-    print(f"  {'#':>3}  {'Interaction':>30}  {'MI':>10}  "
-          f"{'Best Single MI':>15}  {'Improvement':>12}")
-    print("-" * 80)
+    display_n = min(n_top_pairs, n_total)
+    print(f"\n상위 {display_n}개 Interaction (정렬: {sort_by}):")
+    print(f"  {'#':>3}  {'Interaction':>30}  "
+          f"{'MI':>9}  {'|r|':>9}  {'|ρ|':>9}  "
+          f"{'ΔMI':>10}  {'Δ|r|':>10}  {'Δ|ρ|':>10}")
+    print("-" * 105)
 
     for idx, row in interaction_df.head(display_n).iterrows():
         sym = op_symbols.get(row["operation"], row["operation"])
         formula = f"{row['feat_a']} {sym} {row['feat_b']}"
-        print(f"  {idx+1:>3}  {formula:>30}  {row['mi']:>10.6f}  "
-              f"{row['best_single_mi']:>15.6f}  "
-              f"{row['improvement']:>+12.6f}")
+        print(f"  {idx+1:>3}  {formula:>30}  "
+              f"{row['mi']:>9.5f}  "
+              f"{abs(row['pearson']):>9.5f}  "
+              f"{abs(row['spearman']):>9.5f}  "
+              f"{row['imp_mi']:>+10.5f}  "
+              f"{row['imp_pearson']:>+10.5f}  "
+              f"{row['imp_spearman']:>+10.5f}")
 
     # 연산별 통계
-    print(f"\n연산별 발견 수:")
+    print(f"\n연산별 발견 수 (개선된 interaction):")
     for op in ["ratio", "product", "difference"]:
         subset = interaction_df[interaction_df["operation"] == op]
         if len(subset) > 0:
-            print(f"  {op:>12}: {len(subset):>4}개  "
-                  f"(최대 MI = {subset['mi'].max():.6f})")
+            print(f"  {op:>12}: {len(subset):>6,}개  "
+                  f"max MI={subset['mi'].max():.5f}, "
+                  f"max |r|={subset['pearson'].abs().max():.5f}, "
+                  f"max |ρ|={subset['spearman'].abs().max():.5f}")
 
     return interaction_df
 
@@ -235,10 +329,12 @@ def _compute_interaction_vals(a, b, op, epsilon=1e-8):
     return vals
 
 
-def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
+def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6,
+                          n_neighbors=DEFAULT_MI_K):
     """
-    상위 N개 interaction feature vs health scatter plot + MI 비교
-    전체 / Y>0 / Y>0+clip99 세 조건에서 MI를 비교 출력
+    상위 N개 interaction feature vs health scatter plot + 3-metric 비교
+
+    전체 / Y>0 / Y>0+clip99 세 조건에서 MI / |r| / |ρ| 를 모두 비교 출력.
 
     Parameters
     ----------
@@ -252,6 +348,8 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
         pairwise_interaction_corr() 반환값
     n : int
         시각화할 상위 interaction 수 (기본 6)
+    n_neighbors : int
+        Y>0 / clip99 MI 재계산 시 사용하는 KSG k 파라미터 (기본 15)
     """
     if interaction_df.empty:
         print("시각화할 interaction이 없습니다.")
@@ -287,6 +385,8 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     for i, (_, row) in enumerate(interaction_df.head(display_n).iterrows()):
         feat_a, feat_b, op = row["feat_a"], row["feat_b"], row["operation"]
         mi_val = row["mi"]
+        r_val = row["pearson"]
+        rho_val = row["spearman"]
         sym = op_symbols.get(op, op)
         formula = f"{feat_a} {sym} {feat_b}"
 
@@ -301,7 +401,11 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
                         alpha=0.15, s=5, color="steelblue")
         axes[i].set_xlabel(formula, fontsize=10)
         axes[i].set_ylabel("health")
-        axes[i].set_title(f"{formula}\nMI = {mi_val:.5f}", fontsize=10)
+        axes[i].set_title(
+            f"{formula}\n"
+            f"MI={mi_val:.4f}  |r|={abs(r_val):.4f}  |ρ|={abs(rho_val):.4f}",
+            fontsize=9,
+        )
 
     for j in range(display_n, len(axes)):
         axes[j].set_visible(False)
@@ -333,14 +437,21 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
 
         mi_pos = mutual_info_regression(
             inter_vals[mask].reshape(-1, 1),
-            y_vals[mask], random_state=SEED, n_jobs=-1
+            y_vals[mask], n_neighbors=n_neighbors,
+            random_state=SEED, n_jobs=-1,
         )[0]
+        r_pos = np.corrcoef(inter_vals[mask], y_vals[mask])[0, 1]
+        rho_pos = spearmanr(inter_vals[mask], y_vals[mask])[0]
 
         axes2[i].scatter(inter_vals[mask], y_vals[mask],
                          alpha=0.2, s=8, color="coral")
         axes2[i].set_xlabel(formula, fontsize=10)
         axes2[i].set_ylabel("health")
-        axes2[i].set_title(f"{formula}\nMI(Y>0) = {mi_pos:.5f}", fontsize=10)
+        axes2[i].set_title(
+            f"{formula}\n"
+            f"MI={mi_pos:.4f}  |r|={abs(r_pos):.4f}  |ρ|={abs(rho_pos):.4f}",
+            fontsize=9,
+        )
 
     for j in range(display_n, len(axes2)):
         axes2[j].set_visible(False)
@@ -372,14 +483,21 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
 
         mi_clip = mutual_info_regression(
             inter_vals[mask].reshape(-1, 1),
-            y_vals[mask], random_state=SEED, n_jobs=-1
+            y_vals[mask], n_neighbors=n_neighbors,
+            random_state=SEED, n_jobs=-1,
         )[0]
+        r_clip = np.corrcoef(inter_vals[mask], y_vals[mask])[0, 1]
+        rho_clip = spearmanr(inter_vals[mask], y_vals[mask])[0]
 
         axes3[i].scatter(inter_vals[mask], y_vals[mask],
                          alpha=0.2, s=8, color="mediumseagreen")
         axes3[i].set_xlabel(formula, fontsize=10)
         axes3[i].set_ylabel("health")
-        axes3[i].set_title(f"{formula}\nMI(clip99) = {mi_clip:.5f}", fontsize=10)
+        axes3[i].set_title(
+            f"{formula}\n"
+            f"MI={mi_clip:.4f}  |r|={abs(r_clip):.4f}  |ρ|={abs(rho_clip):.4f}",
+            fontsize=9,
+        )
 
     for j in range(display_n, len(axes3)):
         axes3[j].set_visible(False)
@@ -390,40 +508,73 @@ def plot_top_interactions(xs_dict, ys_train, feat_cols, interaction_df, n=6):
     plt.tight_layout()
     plt.show()
 
-    # --- 전체 vs Y>0 vs clip99 MI 비교 테이블 ---
-    print(f"\n{'='*75}")
-    print(f"전체 vs Y>0 vs Y>0+clip99 MI 비교")
+    # --- 전체 vs Y>0 vs clip99 × MI/|r|/|ρ| 비교 테이블 ---
+    # 한 줄에 9개 metric은 너무 길어서, metric별로 3개 표를 분리해서 출력
+    print(f"\n{'='*90}")
+    print(f"전체 vs Y>0 vs Y>0+clip99 비교 (3 metrics)")
     print(f"  (전체: {len(merged):,}, Y>0: {pos_mask.sum():,}, "
-          f"Y>0+clip99: {clip_mask.sum():,}, 상위1% 기준: {upper:.4f})")
-    print(f"{'='*75}")
-    print(f"  {'Interaction':>30}  {'MI(전체)':>10}  {'MI(Y>0)':>10}  {'MI(clip99)':>10}")
-    print("-" * 70)
+          f"Y>0+clip99: {clip_mask.sum():,}, 상위1% 기준: {upper:.4f}, "
+          f"MI k={n_neighbors})")
+    print(f"{'='*90}")
 
+    # 각 interaction별로 9 metric 사전 계산 후 캐시
+    cache = []
     for _, row in interaction_df.head(display_n).iterrows():
         feat_a, feat_b, op = row["feat_a"], row["feat_b"], row["operation"]
         sym = op_symbols.get(op, op)
         formula = f"{feat_a} {sym} {feat_b}"
-        mi_all = row["mi"]
 
-        # Y>0 MI
+        # 전체 (df에 이미 있음)
+        mi_a = row["mi"]
+        r_a = abs(row["pearson"])
+        rho_a = abs(row["spearman"])
+
+        # Y>0
         iv_p = _compute_interaction_vals(
             merged_pos[feat_a].values, merged_pos[feat_b].values, op
         )
+        tp = target_pos.values
         mi_p = mutual_info_regression(
-            iv_p.reshape(-1, 1), target_pos.values,
-            random_state=SEED, n_jobs=-1
+            iv_p.reshape(-1, 1), tp, n_neighbors=n_neighbors,
+            random_state=SEED, n_jobs=-1,
         )[0]
+        r_p = abs(np.corrcoef(iv_p, tp)[0, 1])
+        rho_p = abs(spearmanr(iv_p, tp)[0])
 
-        # clip99 MI
+        # clip99
         iv_c = _compute_interaction_vals(
             merged_clip[feat_a].values, merged_clip[feat_b].values, op
         )
+        tc = target_clip.values
         mi_c = mutual_info_regression(
-            iv_c.reshape(-1, 1), target_clip.values,
-            random_state=SEED, n_jobs=-1
+            iv_c.reshape(-1, 1), tc, n_neighbors=n_neighbors,
+            random_state=SEED, n_jobs=-1,
         )[0]
+        r_c = abs(np.corrcoef(iv_c, tc)[0, 1])
+        rho_c = abs(spearmanr(iv_c, tc)[0])
 
-        print(f"  {formula:>30}  {mi_all:>10.5f}  {mi_p:>10.5f}  {mi_c:>10.5f}")
+        cache.append({
+            "formula": formula,
+            "mi": (mi_a, mi_p, mi_c),
+            "r": (r_a, r_p, r_c),
+            "rho": (rho_a, rho_p, rho_c),
+        })
+
+    def _print_metric_table(name, key, fmt=".5f"):
+        print(f"\n[{name}]  전체 → Y>0 → clip99")
+        print(f"  {'Interaction':>30}  {'전체':>10}  {'Y>0':>10}  {'clip99':>10}  {'Δ(Y>0)':>10}  {'Δ(clip99)':>10}")
+        print("-" * 90)
+        for c in cache:
+            v_all, v_pos, v_clip = c[key]
+            d_pos = v_pos - v_all
+            d_clip = v_clip - v_all
+            print(f"  {c['formula']:>30}  "
+                  f"{v_all:>10{fmt}}  {v_pos:>10{fmt}}  {v_clip:>10{fmt}}  "
+                  f"{d_pos:>+10{fmt}}  {d_clip:>+10{fmt}}")
+
+    _print_metric_table("MI",         "mi")
+    _print_metric_table("|Pearson r|", "r")
+    _print_metric_table("|Spearman ρ|", "rho")
 
 
 def shallow_tree_analysis(xs_dict, ys_train, feat_cols,

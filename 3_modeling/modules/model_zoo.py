@@ -60,7 +60,10 @@ AVAILABLE_MODELS = list(MODEL_REGISTRY.keys())
 
 
 def _detect_device():
-    """GPU 사용 가능 여부 감지"""
+    """Colab에서만 GPU 자동 감지, 로컬은 항상 CPU"""
+    from utils.config import ENV
+    if ENV != "colab":
+        return "cpu"
     try:
         import torch
         if torch.cuda.is_available():
@@ -125,14 +128,17 @@ def get_default_params(name, task, device=None):
             verbosity=0,
         )
     elif name == "catboost":
+        # bootstrap_type=Bernoulli: 기본 Bayesian은 subsample 미지원
+        # task_type='CPU' 강제: Colab T4 GPU에서 LGBM과 GPU 메모리 경합으로 OOM 발생하여 CPU로 고정
         params = dict(
             iterations=1000,
             learning_rate=0.05,
             depth=6,
             min_data_in_leaf=20,
+            bootstrap_type="Bernoulli",
             subsample=0.8,
             colsample_bylevel=0.8,
-            task_type="GPU" if device == "gpu" else "CPU",
+            task_type="CPU",
             random_seed=SEED,
             verbose=0,
         )
