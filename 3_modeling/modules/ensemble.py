@@ -401,7 +401,7 @@ def blend_weights_optuna(P_oof, y_train, n_trials=200):
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction="minimize",
-                                sampler=optuna.samplers.TPESampler(seed=SEED))
+                                sampler=optuna.samplers.TPESampler())  # 시드 제거: 매 실행마다 다른 trial 시퀀스
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
     raw = np.array([study.best_params[f"w_{i}"] for i in range(n_models)])

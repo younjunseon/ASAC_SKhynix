@@ -8,17 +8,43 @@ pipeline_config로 모든 스위치를 제어한다:
 - reg_level / reg_optuna
 
 optuna=OFF인 단계는 1번만 실행하고 캐싱하여 trial당 시간을 절약한다.
+
+확장 (LGBM-only baseline):
+- run_e2e_optimization_with_pp / rerun_best_trial_with_pp
+  → 전처리(cleaning + outlier + 집계 preset)까지 Optuna trial 안에서
+    동시 탐색. 같은 전처리 파라미터 조합은 LRU 캐시로 재사용.
 """
+import hashlib
+import json
+import sys
 import warnings
+from collections import OrderedDict
+
 import numpy as np
 import pandas as pd
 import optuna
 from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
 
-from utils.config import SEED, TARGET_COL, KEY_COL, POSITION_COL
+from utils.config import (
+    SEED, TARGET_COL, KEY_COL, POSITION_COL, PROJECT_ROOT,
+)
 from utils.evaluate import rmse, postprocess
+
+# ── run_cleaning / run_outlier_treatment 지연 import 준비 ──
+# 2_preprocessing은 python package가 아니므로 sys.path에 경로를 추가한 뒤
+# 함수 호출 시점에 import 한다 (모듈 로드 시 불필요한 의존성을 피함).
+import os as _os
+_PP_PATH = _os.path.join(PROJECT_ROOT, "2_preprocessing")
+if _PP_PATH not in sys.path:
+    sys.path.insert(0, _PP_PATH)
 from .model_zoo import create_model, fit_model, supports_early_stopping, get_default_params, DEVICE
-from .search_space import SEARCH_SPACES
+from .search_space import (
+    SEARCH_SPACES,
+    preprocessing_space,
+    split_pp_params,
+    extract_pp_params_from_best,
+    AGG_PRESETS,
+)
 from .aggregate import aggregate_die_to_unit
 from .feature_select import select_top_k, remove_zero_variance
 
@@ -749,7 +775,7 @@ def run_e2e_optimization(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
         direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=SEED),
+        sampler=optuna.samplers.TPESampler(),  # 시드 제거: 매 실행마다 다른 trial 시퀀스
     )
     study.optimize(
         objective,
@@ -976,3 +1002,551 @@ def _build_params_from_best(best_params, prefix, model_name, fixed):
 
     params.update(fixed)
     return params
+
+
+# ═════════════════════════════════════════════════════════════
+# LGBM-only baseline: 전처리 통합 HPO
+# ═════════════════════════════════════════════════════════════
+#
+# run_e2e_optimization_with_pp / rerun_best_trial_with_pp
+#
+# - raw 데이터(xs, xs_dict, ys, feat_cols)를 인자로 받아서
+#   매 trial마다 (cleaning + outlier + die→unit 집계) 실행
+# - 전처리 결과는 (cleaning_params, outlier_params) hash로 LRU 캐시
+# - 기존 _run_clf_oof / _run_reg_oof / _prepare_unit_data /
+#   _die_pred_to_unit / _build_params_from_best 그대로 재사용
+# ═════════════════════════════════════════════════════════════
+
+
+def _pp_hash(pp_params):
+    """전처리 파라미터 dict → 고정 hash 키 (순서 무관)"""
+    s = json.dumps(pp_params, sort_keys=True, default=str)
+    return hashlib.md5(s.encode()).hexdigest()[:12]
+
+
+def _lru_put(cache, key, value, max_size):
+    """OrderedDict 기반 LRU 삽입"""
+    if key in cache:
+        cache.move_to_end(key)
+        return
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > max_size:
+        cache.popitem(last=False)
+
+
+def _lru_get(cache, key):
+    """OrderedDict 기반 LRU 조회"""
+    if key not in cache:
+        return None
+    cache.move_to_end(key)
+    return cache[key]
+
+
+def _build_pos_data(xs_train, xs_val, xs_test, ys, label_col,
+                    use_sampling=False, sample_frac=1.0, silent=True):
+    """
+    cleaning/outlier가 끝난 xs_*를 받아서:
+      1) ys와 merge (die-level)
+      2) label_col (0 vs >0) 생성
+      3) (옵션) unit 기준 샘플링
+      4) position별 분리
+
+    Returns
+    -------
+    pos_data : dict
+        {position: {"train": df, "val": df, "test": df}}
+    """
+    die_train = xs_train.merge(ys["train"], on=KEY_COL, how="left")
+    die_val = xs_val.merge(ys["validation"], on=KEY_COL, how="left")
+    die_test = xs_test.merge(ys["test"], on=KEY_COL, how="left")
+
+    if die_train[TARGET_COL].isna().any():
+        raise ValueError("train health NaN — merge 실패")
+    if die_val[TARGET_COL].isna().any():
+        raise ValueError("val health NaN — merge 실패")
+    if die_test[TARGET_COL].isna().any():
+        raise ValueError("test health NaN — merge 실패")
+
+    if use_sampling and sample_frac < 1.0:
+        all_units = die_train[KEY_COL].drop_duplicates()
+        sampled = all_units.sample(frac=sample_frac, random_state=SEED)
+        die_train = die_train[die_train[KEY_COL].isin(sampled)].reset_index(drop=True)
+
+    for df in (die_train, die_val, die_test):
+        df[label_col] = (df[TARGET_COL] > 0).astype(int)
+
+    positions = sorted(die_train[POSITION_COL].unique())
+    pos_data = {}
+    for pos in positions:
+        pos_data[pos] = {
+            "train": die_train[die_train[POSITION_COL] == pos].reset_index(drop=True),
+            "val":   die_val[die_val[POSITION_COL] == pos].reset_index(drop=True),
+            "test":  die_test[die_test[POSITION_COL] == pos].reset_index(drop=True),
+        }
+
+    if not silent:
+        print(f"[_build_pos_data] positions={positions}, "
+              f"train_units={die_train[KEY_COL].nunique()}")
+
+    return pos_data
+
+
+def _run_preprocessing(xs, xs_dict, ys, feat_cols,
+                       cleaning_args, outlier_args,
+                       label_col, exclude_cols,
+                       use_sampling, sample_frac):
+    """
+    cleaning + outlier + (옵션) EXCLUDE_COLS 필터 + pos_data 빌드 1회 실행.
+
+    Returns
+    -------
+    pos_data, feat_cols_clean
+    """
+    # 지연 import (모듈 로드 시점엔 불필요)
+    from cleaning import run_cleaning  # noqa: E402
+    from outlier import run_outlier_treatment  # noqa: E402
+
+    ys_train = ys["train"]
+
+    # --- 1) cleaning ---
+    xs_train, xs_val, xs_test, clean_cols, _ = run_cleaning(
+        xs, feat_cols, xs_dict,
+        ys_train=ys_train,
+        **cleaning_args,
+    )
+
+    # --- 2) outlier ---
+    xs_train, xs_val, xs_test, _ = run_outlier_treatment(
+        xs_train, xs_val, xs_test, clean_cols,
+        **outlier_args,
+    )
+
+    # --- 3) exclude_cols 필터 ---
+    if exclude_cols:
+        clean_cols = [c for c in clean_cols if c not in set(exclude_cols)]
+
+    # --- 4) pos_data 빌드 ---
+    pos_data = _build_pos_data(
+        xs_train, xs_val, xs_test, ys, label_col,
+        use_sampling=use_sampling, sample_frac=sample_frac,
+        silent=True,
+    )
+
+    return pos_data, clean_cols
+
+
+def _get_or_run_pp(cache, cache_key, xs, xs_dict, ys, feat_cols,
+                   cleaning_args, outlier_args,
+                   label_col, exclude_cols,
+                   use_sampling, sample_frac, max_size):
+    """
+    전처리 캐시 조회 + 없으면 실행 + 저장.
+    """
+    hit = _lru_get(cache, cache_key)
+    if hit is not None:
+        return hit
+
+    # 캐시 miss → 전처리 실행 (print silencing)
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pos_data, feat_cols_clean = _run_preprocessing(
+            xs, xs_dict, ys, feat_cols,
+            cleaning_args, outlier_args,
+            label_col, exclude_cols,
+            use_sampling, sample_frac,
+        )
+
+    value = {
+        "pos_data": pos_data,
+        "feat_cols": feat_cols_clean,
+        "n_feat": len(feat_cols_clean),
+    }
+    _lru_put(cache, cache_key, value, max_size)
+    return value
+
+
+# ═════════════════════════════════════════════════════════════
+# 전처리 통합 E2E Optimization
+# ═════════════════════════════════════════════════════════════
+def run_e2e_optimization_with_pp(
+    xs,
+    xs_dict,
+    ys,
+    feat_cols,
+    pipeline_config=None,
+    clf_model="lgbm",
+    reg_model="lgbm",
+    n_trials=30,
+    n_folds=3,
+    clf_early_stop=50,
+    reg_early_stop=50,
+    label_col="label_bin",
+    imbalance_method="scale_pos_weight",
+    top_k_range=(50, 500),
+    top_k_fixed=200,
+    clf_fixed=None,
+    reg_fixed=None,
+    use_sampling=False,
+    sample_frac=1.0,
+    exclude_cols=None,
+    pp_cache_size=10,
+):
+    """
+    전처리(cleaning/outlier/집계) + CLF + FS + REG 을 모두 포함한
+    단일 Optuna study.
+
+    1 trial = (전처리 파라미터 → cleaning → outlier → pos_data 빌드
+              → CLF OOF → die→unit 집계 → FS → REG OOF → val RMSE)
+
+    동일 전처리 파라미터 조합은 LRU 캐시로 재사용 (pp_cache_size 상한).
+
+    Parameters
+    ----------
+    xs : DataFrame
+        원본 die-level 피처 (split 컬럼 포함)
+    xs_dict : dict
+        {"train": df, "validation": df, "test": df} — utils.data.split_xs 결과
+    ys : dict
+        {"train": df, "validation": df, "test": df} — utils.data.load_all의 ys
+    feat_cols : list
+        die-level 원본 피처 컬럼 (X0~X1086)
+    pipeline_config : dict
+        기존 e2e와 동일한 스위치
+    clf_model, reg_model : str
+        기본 'lgbm'. baseline은 둘 다 lgbm 고정 권장
+    n_trials, n_folds : int
+    clf_early_stop, reg_early_stop : int
+    label_col, imbalance_method : str
+    top_k_range, top_k_fixed : FS 탐색 범위 / 고정 값
+    clf_fixed, reg_fixed : dict, optional
+        탐색에서 제외하고 고정할 파라미터
+    use_sampling, sample_frac : bool, float
+        unit 기준 샘플링 (빠른 탐색용)
+    exclude_cols : list, optional
+        웨이퍼맵 필터 등에서 사전 제외할 feature
+    pp_cache_size : int
+        전처리 LRU 캐시 상한 (default 10)
+
+    Returns
+    -------
+    dict : best_params, best_value, study, pp_cache, pipeline_config
+    """
+    cfg = _merge_config(pipeline_config)
+    clf_fixed = clf_fixed or {}
+    reg_fixed = reg_fixed or {}
+    clf_prefix = "clf_"
+    reg_prefix = "reg_"
+
+    # input_level='unit' 모드는 지원 안 함 (전처리부터 돌리므로 die 고정)
+    if cfg["input_level"] != "die":
+        raise ValueError(
+            "run_e2e_optimization_with_pp는 input_level='die'만 지원."
+        )
+
+    # ── 전처리 LRU 캐시 ──
+    pp_cache = OrderedDict()
+
+    # ── Optuna objective ──
+    def objective(trial):
+        # ── ⓪ 전처리 (캐싱) ──
+        pp_params = preprocessing_space(trial)
+        cleaning_args, outlier_args, agg_funcs = split_pp_params(pp_params)
+        cache_key = _pp_hash(pp_params)
+
+        pp_value = _get_or_run_pp(
+            pp_cache, cache_key, xs, xs_dict, ys, feat_cols,
+            cleaning_args, outlier_args,
+            label_col, exclude_cols,
+            use_sampling, sample_frac, pp_cache_size,
+        )
+        pos_data = pp_value["pos_data"]
+        feat_cols_clean = pp_value["feat_cols"]
+
+        if len(feat_cols_clean) < 10:
+            return float("inf")
+
+        # ── ① CLF OOF ──
+        if cfg["run_clf"]:
+            if cfg["clf_optuna"]:
+                clf_params = SEARCH_SPACES[clf_model](trial, prefix=clf_prefix)
+                clf_params.update(clf_fixed)
+            else:
+                clf_params = get_default_params(clf_model, "clf")
+                clf_params.update(clf_fixed)
+
+            clf_result = _run_clf_oof(
+                pos_data, feat_cols_clean, clf_params, clf_model,
+                n_folds, clf_early_stop, label_col, imbalance_method,
+                clf_output=cfg["clf_output"],
+            )
+        else:
+            clf_result = None
+
+        # ── ② die→unit 집계 ──
+        unit_data, unit_feat_cols = _prepare_unit_data(
+            pos_data, feat_cols_clean, clf_result, cfg, agg_funcs,
+        )
+
+        # ── ③ FS ──
+        if cfg["run_fs"]:
+            if cfg["fs_optuna"]:
+                top_k = trial.suggest_int("top_k", top_k_range[0], top_k_range[1])
+            else:
+                top_k = top_k_fixed
+
+            X_tr = unit_data["train"][unit_feat_cols].values
+            y_tr = unit_data["train"][TARGET_COL].values
+            nz_cols, nz_mask = remove_zero_variance(X_tr, unit_feat_cols)
+            X_tr_nz = X_tr[:, nz_mask]
+            selected_cols, _ = select_top_k(X_tr_nz, y_tr, nz_cols, top_k)
+
+            if len(selected_cols) < 10:
+                return float("inf")
+        else:
+            selected_cols = unit_feat_cols
+
+        # ── ④ REG OOF ──
+        if cfg["reg_optuna"]:
+            reg_params = SEARCH_SPACES[reg_model](trial, prefix=reg_prefix)
+            reg_params.update(reg_fixed)
+        else:
+            reg_params = get_default_params(reg_model, "reg")
+            reg_params.update(reg_fixed)
+
+        reg_result = _run_reg_oof(
+            unit_data, selected_cols, reg_params, reg_model,
+            n_folds, reg_early_stop,
+            use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+        )
+
+        # ── ⑤ RMSE ──
+        if cfg["reg_level"] == "position":
+            reg_result, _ = _die_pred_to_unit(unit_data, reg_result)
+            y_val = (
+                unit_data["val"]
+                .groupby(KEY_COL, sort=False)[TARGET_COL]
+                .first()
+                .values
+            )
+        else:
+            y_val = unit_data["val"][TARGET_COL].values
+
+        val_rmse_score = rmse(y_val, reg_result["val_pred"])
+
+        trial.set_user_attr("train_rmse", reg_result["train_rmse"])
+        trial.set_user_attr("val_rmse", val_rmse_score)
+        trial.set_user_attr("n_feat_clean", len(feat_cols_clean))
+        trial.set_user_attr("n_feat_selected", len(selected_cols))
+        trial.set_user_attr("agg_funcs", agg_funcs)
+
+        return val_rmse_score
+
+    # ── Study 실행 ──
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(),  # 시드 제거: 매 실행마다 다른 trial 시퀀스
+    )
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        show_progress_bar=True,
+        gc_after_trial=True,
+    )
+
+    # ── 결과 요약 ──
+    best = study.best_trial
+    print(f"\n{'=' * 60}")
+    print(f"E2E + Preprocessing HPO 완료 ({n_trials} trials)")
+    print(f"PP cache: {len(pp_cache)}/{pp_cache_size} entries (unique combos)")
+    print(f"Best Val RMSE : {best.value:.6f}")
+    print(f"Train RMSE    : {best.user_attrs.get('train_rmse', float('nan')):.6f}")
+    print(f"N Features    : clean={best.user_attrs.get('n_feat_clean')}  "
+          f"selected={best.user_attrs.get('n_feat_selected')}")
+    print(f"Best agg_funcs: {best.user_attrs.get('agg_funcs')}")
+    if "top_k" in best.params:
+        print(f"Top-K         : {best.params['top_k']}")
+    print(f"{'=' * 60}")
+
+    return {
+        "best_params": best.params,
+        "best_value": best.value,
+        "best_trial": best,
+        "study": study,
+        "pp_cache": pp_cache,
+        "pipeline_config": cfg,
+    }
+
+
+# ═════════════════════════════════════════════════════════════
+# 전처리 통합 Best Trial 재실행
+# ═════════════════════════════════════════════════════════════
+def rerun_best_trial_with_pp(
+    xs,
+    xs_dict,
+    ys,
+    feat_cols,
+    best_params,
+    pipeline_config=None,
+    clf_model="lgbm",
+    reg_model="lgbm",
+    mode="single",
+    n_folds=5,
+    es_holdout=0.1,
+    clf_early_stop=100,
+    reg_early_stop=100,
+    label_col="label_bin",
+    imbalance_method="scale_pos_weight",
+    top_k_fixed=200,
+    clf_fixed=None,
+    reg_fixed=None,
+    use_sampling=False,
+    sample_frac=1.0,
+    exclude_cols=None,
+):
+    """
+    best_params에서 pp_*, clf_*, reg_*, top_k 를 복원하여
+    best 전처리 + best 모델로 최종 예측 재실행.
+
+    기본 흐름은 기존 rerun_best_trial과 동일하되,
+    맨 앞에 "best_pp_params → cleaning/outlier/pos_data" 단계가 추가됨.
+    """
+    if mode not in ("single", "kfold"):
+        raise ValueError(f"mode must be 'single' or 'kfold', got '{mode}'")
+    cfg = _merge_config(pipeline_config)
+    clf_fixed = clf_fixed or {}
+    reg_fixed = reg_fixed or {}
+    clf_prefix = "clf_"
+    reg_prefix = "reg_"
+
+    if cfg["input_level"] != "die":
+        raise ValueError(
+            "rerun_best_trial_with_pp는 input_level='die'만 지원."
+        )
+
+    # ── ⓪ 전처리 (best pp_params 복원) ──
+    pp_params = extract_pp_params_from_best(best_params)
+    cleaning_args, outlier_args, agg_funcs = split_pp_params(pp_params)
+
+    print(f"Rerun preprocessing: cleaning={len(cleaning_args)} args, "
+          f"outlier method={outlier_args.get('method')}, "
+          f"agg_funcs={agg_funcs}")
+    pos_data, feat_cols_clean = _run_preprocessing(
+        xs, xs_dict, ys, feat_cols,
+        cleaning_args, outlier_args,
+        label_col, exclude_cols,
+        use_sampling, sample_frac,
+    )
+    print(f"Rerun preprocessing 완료: feat_cols={len(feat_cols_clean)}")
+
+    # ── ① CLF ──
+    if cfg["run_clf"]:
+        if cfg["clf_optuna"]:
+            clf_params = _build_params_from_best(
+                best_params, clf_prefix, clf_model, clf_fixed
+            )
+        else:
+            clf_params = get_default_params(clf_model, "clf")
+            clf_params.update(clf_fixed)
+
+        if mode == "single":
+            print(f"Rerun CLF: {clf_model}, mode=single (es_holdout={es_holdout})")
+            clf_result = _run_clf_single(
+                pos_data, feat_cols_clean, clf_params, clf_model,
+                clf_early_stop, label_col, imbalance_method,
+                clf_output=cfg["clf_output"], es_holdout=es_holdout,
+            )
+        else:
+            print(f"Rerun CLF: {clf_model}, mode=kfold (folds={n_folds})")
+            clf_result = _run_clf_oof(
+                pos_data, feat_cols_clean, clf_params, clf_model,
+                n_folds, clf_early_stop, label_col, imbalance_method,
+                clf_output=cfg["clf_output"],
+            )
+    else:
+        clf_result = None
+
+    # ── ② 집계 ──
+    unit_data, unit_feat_cols = _prepare_unit_data(
+        pos_data, feat_cols_clean, clf_result, cfg, agg_funcs,
+    )
+
+    # ── ③ FS ──
+    if cfg["run_fs"]:
+        if cfg["fs_optuna"] and "top_k" in best_params:
+            top_k = best_params["top_k"]
+        else:
+            top_k = top_k_fixed
+
+        X_tr = unit_data["train"][unit_feat_cols].values
+        y_tr = unit_data["train"][TARGET_COL].values
+        nz_cols, nz_mask = remove_zero_variance(X_tr, unit_feat_cols)
+        X_tr_nz = X_tr[:, nz_mask]
+        selected_cols, all_importances = select_top_k(
+            X_tr_nz, y_tr, nz_cols, top_k,
+        )
+        imp_dict = dict(zip(nz_cols, all_importances))
+        sel_importances = {c: imp_dict[c] for c in selected_cols}
+    else:
+        selected_cols = unit_feat_cols
+        sel_importances = None
+
+    # ── ④ REG ──
+    if cfg["reg_optuna"]:
+        reg_params = _build_params_from_best(
+            best_params, reg_prefix, reg_model, reg_fixed
+        )
+    else:
+        reg_params = get_default_params(reg_model, "reg")
+        reg_params.update(reg_fixed)
+
+    if mode == "single":
+        print(f"Rerun REG: {reg_model}, features={len(selected_cols)}, mode=single (es_holdout={es_holdout})")
+        reg_result = _run_reg_single(
+            unit_data, selected_cols, reg_params, reg_model,
+            reg_early_stop,
+            use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            es_holdout=es_holdout,
+        )
+    else:
+        print(f"Rerun REG: {reg_model}, features={len(selected_cols)}, mode=kfold (folds={n_folds})")
+        reg_result = _run_reg_oof(
+            unit_data, selected_cols, reg_params, reg_model,
+            n_folds, reg_early_stop,
+            use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+        )
+
+    # position 모드: die → unit 집계
+    if cfg["reg_level"] == "position":
+        reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
+        y_val = agg_unit_data["val"][TARGET_COL].values
+        unit_data = agg_unit_data
+    else:
+        y_val = unit_data["val"][TARGET_COL].values
+
+    val_rmse_score = rmse(y_val, reg_result["val_pred"])
+    print(f"Rerun Val RMSE: {val_rmse_score:.6f}")
+
+    result = {
+        "unit_data": unit_data,
+        "selected_cols": selected_cols,
+        "feat_cols_clean": feat_cols_clean,
+        "val_pred": reg_result["val_pred"],
+        "test_pred": reg_result["test_pred"],
+        "val_rmse": val_rmse_score,
+        "clf_result": clf_result,
+        "importances": sel_importances,
+        "pipeline_config": cfg,
+        "best_pp_params": pp_params,
+        "cleaning_args": cleaning_args,
+        "outlier_args": outlier_args,
+        "agg_funcs": agg_funcs,
+    }
+    if mode == "kfold":
+        result["oof_pred"] = reg_result["oof_pred"]
+    else:
+        result["train_pred_insample"] = reg_result["train_pred_insample"]
+    return result

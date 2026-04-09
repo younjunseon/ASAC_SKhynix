@@ -1,7 +1,11 @@
 """
-Optuna Search Space 정의 — 모델별 하이퍼파라미터 탐색 공간
+Optuna Search Space 정의 — 모델별 하이퍼파라미터 + 전처리 탐색 공간
 
-기존 hpo.py에서 search space만 추출.
+- 모델별 하이퍼파라미터: lgbm_space, xgb_space, catboost_space, rf_space
+- 전처리/이상치/집계 통합: preprocessing_space (LGBM-only baseline용)
+
+preprocessing_space의 후보 list는 모듈 상수(PP_*_CANDIDATES)로 노출되어
+노트북에서 보고 바로 좁히거나 원소를 지워 탐색 공간을 축소할 수 있다.
 """
 from utils.config import SEED
 from .model_zoo import DEVICE
@@ -96,3 +100,166 @@ SEARCH_SPACES = {
     "rf": rf_space,
     "et": rf_space,
 }
+
+
+# ═════════════════════════════════════════════════════════════
+# 전처리 + 이상치 + 집계 통합 search space
+# ═════════════════════════════════════════════════════════════
+#
+# 아래 PP_*_CANDIDATES는 Optuna trial에서 선택될 후보 list.
+# 노트북에서 import 해서 확인하거나, 특정 후보만 남기고 싶을 때
+# 리스트 원소를 지우는 방식으로 탐색 공간을 축소할 수 있다.
+#
+# e.g. 노트북에서 범위 좁히기:
+#   from modules.search_space import PP_CLEAN_CANDIDATES
+#   PP_CLEAN_CANDIDATES['imputation_method'] = ['median']  # spatial/knn 제외
+#
+# ═════════════════════════════════════════════════════════════
+
+# ── 클리닝 후보 ───────────────────────────────────────────────
+PP_CLEAN_CANDIDATES = {
+    "const_threshold":     [1e-8, 1e-6, 1e-4],
+    "missing_threshold":   [0.25, 0.50, 0.75, 0.90],
+    "remove_duplicates":   [True, False],
+    "corr_threshold":      [0.90, 0.95, 0.99, None],
+    "corr_keep_by":        ["std", "target_corr"],
+    "add_indicator":       [True, False],
+    "indicator_threshold": [0.01, 0.05, 0.10],
+    "imputation_method":   ["median", "knn", "spatial"],
+    "knn_neighbors":       [3, 5, 10],
+    "spatial_max_dist":    [1.0, 2.0, 3.0],
+}
+
+# ── 이상치 후보 ───────────────────────────────────────────────
+PP_OUTLIER_CANDIDATES = {
+    "method":         ["winsorize", "iqr_clip", "grubbs", "lot_local", "none"],
+    "lower_pct":      [0.0, 0.005, 0.01],
+    "upper_pct":      [0.99, 0.995, 0.999, 1.0],
+    "iqr_multiplier": [1.5, 3.0, 5.0],
+}
+
+# ── 집계 후보 (presets) ────────────────────────────────────────
+# aggregate_die_to_unit이 네이티브 지원하는 조합만 등록.
+# (cv, range는 특별 처리. mean/std/min/max/median은 pandas groupby 지원)
+AGG_PRESETS = [
+    # 0: 현재 기본 7종
+    ["mean", "std", "cv", "range", "min", "max", "median"],
+    # 1: 핵심 3종 (빠른 탐색용)
+    ["mean", "std", "cv"],
+    # 2: 중심경향 + 편차 위주 (극값 제외)
+    ["mean", "std", "cv", "median", "range"],
+    # 3: 편차 중심 (mean 배제, 상관 약함 대응)
+    ["std", "cv", "range", "median"],
+]
+
+# ── 집계 preset 인덱스 후보 ───────────────────────────────────
+PP_AGG_PRESET_IDX_CANDIDATES = list(range(len(AGG_PRESETS)))
+
+
+# ── run_cleaning / run_outlier_treatment에 실제 전달할 인자 키 ──
+# (preprocessing_space 반환 dict에서 해당 함수로 분배할 때 사용)
+CLEANING_KEYS = [
+    "const_threshold",
+    "missing_threshold",
+    "remove_duplicates",
+    "corr_threshold",
+    "corr_keep_by",
+    "add_indicator",
+    "indicator_threshold",
+    "imputation_method",
+    "knn_neighbors",
+    "spatial_max_dist",
+]
+
+OUTLIER_KEYS = [
+    "method",
+    "lower_pct",
+    "upper_pct",
+    "iqr_multiplier",
+]
+
+
+def preprocessing_space(trial):
+    """
+    전처리 + 이상치 + 집계 통합 search space.
+
+    Returns
+    -------
+    dict
+        {
+            # cleaning (CLEANING_KEYS)
+            "const_threshold": ...,
+            ...
+            # outlier (OUTLIER_KEYS, key에 'outlier__' prefix)
+            "outlier__method": ...,
+            "outlier__lower_pct": ...,
+            ...
+            # 집계
+            "agg_preset_idx": int,
+        }
+
+    trial param 이름은 모두 'pp_' prefix로 통일 (clf_/reg_와 구분).
+    """
+    params = {}
+
+    # ── 클리닝 ──
+    for key, candidates in PP_CLEAN_CANDIDATES.items():
+        params[key] = trial.suggest_categorical(f"pp_{key}", candidates)
+
+    # ── 이상치 (key에 'outlier__' prefix 유지, run_outlier 호출 시 strip) ──
+    for key, candidates in PP_OUTLIER_CANDIDATES.items():
+        params[f"outlier__{key}"] = trial.suggest_categorical(
+            f"pp_outlier_{key}", candidates
+        )
+
+    # ── 집계 preset ──
+    params["agg_preset_idx"] = trial.suggest_categorical(
+        "pp_agg_preset_idx", PP_AGG_PRESET_IDX_CANDIDATES
+    )
+
+    return params
+
+
+def split_pp_params(pp_params):
+    """
+    preprocessing_space 반환 dict를 run_cleaning / run_outlier_treatment /
+    aggregate 함수의 인자로 분배.
+
+    Returns
+    -------
+    cleaning_args : dict — run_cleaning에 넘길 kwargs
+    outlier_args  : dict — run_outlier_treatment에 넘길 kwargs
+    agg_funcs     : list — aggregate_die_to_unit에 넘길 집계 함수 list
+    """
+    cleaning_args = {k: v for k, v in pp_params.items() if k in CLEANING_KEYS}
+
+    outlier_args = {}
+    for k, v in pp_params.items():
+        if k.startswith("outlier__"):
+            outlier_args[k[len("outlier__"):]] = v
+
+    agg_idx = pp_params.get("agg_preset_idx", 0)
+    agg_funcs = AGG_PRESETS[agg_idx]
+
+    return cleaning_args, outlier_args, agg_funcs
+
+
+def extract_pp_params_from_best(best_params):
+    """
+    Optuna study.best_params에서 'pp_' prefix 항목만 추출해
+    preprocessing_space가 반환하는 형식으로 복원.
+
+    trial param 이름 'pp_outlier_method' → dict key 'outlier__method' 로 변환.
+    trial param 'pp_agg_preset_idx' → dict key 'agg_preset_idx'.
+    """
+    out = {}
+    for k, v in best_params.items():
+        if not k.startswith("pp_"):
+            continue
+        inner = k[len("pp_"):]
+        if inner.startswith("outlier_"):
+            # pp_outlier_method → outlier__method
+            out[f"outlier__{inner[len('outlier_'):]}"] = v
+        else:
+            out[inner] = v
+    return out

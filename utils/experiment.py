@@ -253,10 +253,14 @@ def _calc_delta(df: pd.DataFrame, exp_id: str, val_rmse: float, test_rmse: float
         return None, None
 
     ref = match.iloc[0]
-    val_delta = val_rmse - ref["val_rmse"]
+    val_delta = (
+        val_rmse - ref["val_rmse"]
+        if pd.notna(val_rmse) and pd.notna(ref["val_rmse"])
+        else None
+    )
     test_delta = (
         test_rmse - ref["test_rmse"]
-        if test_rmse is not None and ref["test_rmse"] is not None
+        if pd.notna(test_rmse) and pd.notna(ref["test_rmse"])
         else None
     )
     return val_delta, test_delta
@@ -363,12 +367,12 @@ def log_experiment(
     print(f"실험 기록 완료: {exp_id}")
     print(f"  타입: {exp_type} | 베스트: {best_model}")
     print(f"  Val RMSE:  {val_rmse:.6f}", end="")
-    if val_delta is not None:
+    if pd.notna(val_delta):
         sign = "+" if val_delta >= 0 else ""
         print(f"  ({sign}{val_delta:.6f})", end="")
     print()
-    print(f"  Test RMSE: {test_rmse:.6f}" if test_rmse is not None else "  Test RMSE: N/A", end="")
-    if test_delta is not None:
+    print(f"  Test RMSE: {test_rmse:.6f}" if pd.notna(test_rmse) else "  Test RMSE: N/A", end="")
+    if pd.notna(test_delta):
         sign = "+" if test_delta >= 0 else ""
         print(f"  ({sign}{test_delta:.6f})", end="")
     print()
