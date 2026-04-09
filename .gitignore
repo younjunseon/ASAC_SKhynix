@@ -40,9 +40,10 @@ catboost_info/
 # 빌드 아티팩트
 code.zip
 
-# EDA: eda.ipynb + modules/*.py만 추적
+# EDA: eda.ipynb + eda_style.mplstyle + modules/*.py만 추적
 1_eda/*
 !1_eda/eda.ipynb
+!1_eda/eda_style.mplstyle
 !1_eda/modules/
 1_eda/modules/*
 !1_eda/modules/*.py
