@@ -402,20 +402,8 @@ def run_outlier_treatment(xs_train, xs_val, xs_test, feat_cols,
                          f"Use 'winsorize', 'iqr_clip', 'grubbs', "
                          f"'lot_local', or 'none'")
 
-    # 3. 처리 후 이상치 현황
-    stats_after = detect_outliers_iqr(xs_train, feat_cols)
-    report["after"] = stats_after
-
-    # 전후 비교
-    before_5pct = (stats_before["outlier_pct"] > 5).sum()
-    after_5pct = (stats_after["outlier_pct"] > 5).sum()
-    before_10pct = (stats_before["outlier_pct"] > 10).sum()
-    after_10pct = (stats_after["outlier_pct"] > 10).sum()
-
     print(f"\n{'=' * 60}")
-    print("이상치 처리 완료")
-    print(f"  이상치 >5%  feature: {before_5pct} → {after_5pct} ({before_5pct - after_5pct}개 감소)")
-    print(f"  이상치 >10% feature: {before_10pct} → {after_10pct} ({before_10pct - after_10pct}개 감소)")
+    print(f"이상치 처리 완료 (method={method})")
     print(f"  train: {xs_train.shape}")
     print("=" * 60)
 

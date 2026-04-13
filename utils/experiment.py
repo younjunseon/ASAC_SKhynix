@@ -133,12 +133,16 @@ def upload_to_drive(
     if not csv_gdrive_id and not db_gdrive_id:
         return
 
-    from google.colab import auth
-    from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
 
-    auth.authenticate_user()
-    service = build("drive", "v3")
+    # 인증 + service 객체를 한 번만 생성하고 캐싱
+    global _drive_service
+    if "_drive_service" not in globals() or _drive_service is None:
+        from google.colab import auth
+        from googleapiclient.discovery import build
+        auth.authenticate_user()
+        _drive_service = build("drive", "v3")
+    service = _drive_service
 
     if csv_gdrive_id and os.path.exists(CSV_PATH):
         media = MediaFileUpload(CSV_PATH, mimetype="text/csv")
@@ -318,6 +322,9 @@ def make_trial_upload_callback(db_path: str, db_gdrive_id: str):
         Optuna callback 함수 (study, trial) → None
     """
     def _callback(study, trial):
-        upload_to_drive(db_gdrive_id=db_gdrive_id, db_path=db_path)
+        try:
+            upload_to_drive(db_gdrive_id=db_gdrive_id, db_path=db_path)
+        except Exception as e:
+            print(f"  [upload skip] {type(e).__name__}: {e}")
 
     return _callback

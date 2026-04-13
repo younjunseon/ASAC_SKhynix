@@ -35,7 +35,9 @@ def remove_constant_features(xs, feat_cols, threshold=1e-6):
     keep_cols : list (남은 feature 컬럼)
     removed_cols : list (제거된 feature 컬럼)
     """
-    stds = xs[feat_cols].std()
+    stds = pd.Series(
+        np.nanstd(xs[feat_cols].values, axis=0, ddof=1), index=feat_cols
+    )
     removed = stds[stds <= threshold].index.tolist()
     keep = [c for c in feat_cols if c not in removed]
 
@@ -60,7 +62,9 @@ def remove_high_missing_features(xs, feat_cols, threshold=0.5):
     keep_cols : list
     removed_cols : list
     """
-    missing_pct = xs[feat_cols].isnull().mean()
+    missing_pct = pd.Series(
+        np.isnan(xs[feat_cols].values).mean(axis=0), index=feat_cols
+    )
     removed = missing_pct[missing_pct >= threshold].index.tolist()
     keep = [c for c in feat_cols if c not in removed]
 
@@ -71,7 +75,7 @@ def remove_high_missing_features(xs, feat_cols, threshold=0.5):
 
 def remove_duplicate_features(xs, feat_cols, sample_n=5000, seed=42):
     """
-    완전 중복 컬럼 쌍에서 하나씩 제거 (샘플 기반)
+    완전 중복 컬럼 쌍에서 하나씩 제거 (샘플 기반, 해시 사전 필터링)
 
     Parameters
     ----------
@@ -85,17 +89,32 @@ def remove_duplicate_features(xs, feat_cols, sample_n=5000, seed=42):
     keep_cols : list
     removed_cols : list
     """
+    from collections import defaultdict
+
     sample = xs[feat_cols].sample(n=min(sample_n, len(xs)), random_state=seed)
     removed = set()
 
-    for i in range(len(feat_cols)):
-        if feat_cols[i] in removed:
+    # 해시 기반 사전 필터링: 해시가 같은 컬럼끼리만 .equals() 비교
+    col_hashes = {}
+    for col in feat_cols:
+        h = pd.util.hash_pandas_object(sample[col], index=False)
+        col_hashes[col] = hash(h.values.tobytes())
+
+    hash_groups = defaultdict(list)
+    for col in feat_cols:  # feat_cols 순서 유지
+        hash_groups[col_hashes[col]].append(col)
+
+    for h, cols in hash_groups.items():
+        if len(cols) < 2:
             continue
-        for j in range(i + 1, len(feat_cols)):
-            if feat_cols[j] in removed:
+        for i in range(len(cols)):
+            if cols[i] in removed:
                 continue
-            if sample[feat_cols[i]].equals(sample[feat_cols[j]]):
-                removed.add(feat_cols[j])
+            for j in range(i + 1, len(cols)):
+                if cols[j] in removed:
+                    continue
+                if sample[cols[i]].equals(sample[cols[j]]):
+                    removed.add(cols[j])
 
     removed = list(removed)
     keep = [c for c in feat_cols if c not in removed]
@@ -210,23 +229,21 @@ def remove_high_corr_features(
             f"Unknown keep_by={keep_by!r}. Use 'std' or 'target_corr'"
         )
 
-    # ── 쌍 단위 greedy 제거 ──
+    # ── 쌍 단위 greedy 제거 (고상관 쌍만 사전 추출) ──
     removed = set()
-    n = len(feat_cols)
-    for i in range(n):
+    # |r| > threshold인 (i, j) 쌍만 추출 (i < j, 오름차순)
+    pairs = np.argwhere(corr_arr > threshold)
+    pairs = pairs[pairs[:, 0] < pairs[:, 1]]  # 상삼각만
+
+    for i, j in pairs:
         col_i = feat_cols[i]
-        if col_i in removed:
+        col_j = feat_cols[j]
+        if col_i in removed or col_j in removed:
             continue
-        for j in range(i + 1, n):
-            col_j = feat_cols[j]
-            if col_j in removed:
-                continue
-            if corr_arr[i, j] > threshold:
-                if scores_dict[col_i] >= scores_dict[col_j]:
-                    removed.add(col_j)
-                else:
-                    removed.add(col_i)
-                    break  # col_i 제거됐으므로 나머지 j 스킵
+        if scores_dict[col_i] >= scores_dict[col_j]:
+            removed.add(col_j)
+        else:
+            removed.add(col_i)
 
     removed = list(removed)
     keep = [c for c in feat_cols if c not in removed]
@@ -280,55 +297,69 @@ def impute_spatial(xs, feat_cols, max_dist=2.0):
 
     # ── 1단계: 같은 lot/wafer 내 거리 기반 공간 보간 ──
     # 원본 snapshot: 이웃 값은 항상 보간 전 원본에서만 참조
-    original = xs[feat_cols].copy()
+    # numpy 배열로 작업하여 pandas loc 오버헤드 제거
+    original_arr = xs[feat_cols].values.copy()   # (N, F) — 이웃 참조용 (불변)
+    result_arr = original_arr.copy()              # 보간 결과 기록용
+
+    # DataFrame index → 정수 위치 매핑
+    idx_to_pos = pd.Series(range(len(xs)), index=xs.index)
+    die_x_all = xs['_die_x'].values.astype(float)
+    die_y_all = xs['_die_y'].values.astype(float)
 
     filled_spatial = 0
     for lw, group in xs.groupby('_lot_wafer'):
-        # 이 lot/wafer에 결측이 있는 행만 처리
-        na_mask = group[feat_cols].isnull()
-        if not na_mask.any().any():
+        gpos = idx_to_pos.loc[group.index].values  # 정수 위치 배열
+        g_orig = original_arr[gpos]                  # (G, F)
+        g_na = np.isnan(g_orig)
+
+        if not g_na.any():
             continue
 
-        na_row_idx = na_mask.any(axis=1)
-        # 이웃 참조용 원본 (보간 전 값만 사용)
-        group_original = original.loc[group.index]
+        # 그룹 내 pairwise 거리 행렬 (한 번만 계산)
+        gx = die_x_all[gpos]
+        gy = die_y_all[gpos]
+        dx = gx[:, None] - gx[None, :]
+        dy = gy[:, None] - gy[None, :]
+        dist_mat = np.sqrt(dx**2 + dy**2)        # (G, G)
+        np.fill_diagonal(dist_mat, np.inf)        # 자기 자신 제외
 
-        for i in group.index[na_row_idx]:
-            row_na_cols = na_mask.columns[na_mask.loc[i]]
-            if len(row_na_cols) == 0:
+        na_rows = np.where(g_na.any(axis=1))[0]
+
+        for li in na_rows:
+            row_na = g_na[li]                      # (F,) bool
+            nan_cols = np.where(row_na)[0]
+            if len(nan_cols) == 0:
                 continue
 
-            # 이 die의 좌표
-            xi, yi = xs.loc[i, '_die_x'], xs.loc[i, '_die_y']
-
-            # 같은 lot/wafer 내 다른 die들과의 거리
-            other_idx = group.index.drop(i)
-            if len(other_idx) == 0:
+            dists = dist_mat[li]                   # (G,)
+            nbr_mask = dists <= max_dist
+            if not nbr_mask.any():
                 continue
 
-            dx = xs.loc[other_idx, '_die_x'].values - xi
-            dy = xs.loc[other_idx, '_die_y'].values - yi
-            dists = np.sqrt(dx**2 + dy**2)
+            nbr_idx = np.where(nbr_mask)[0]
+            weights = 1.0 / np.maximum(dists[nbr_idx], 1e-6)  # (K,)
 
-            # max_dist 이내 이웃만
-            neighbor_mask = dists <= max_dist
-            if not neighbor_mask.any():
+            # 이웃의 원본 값 (NaN 열만): (K, C)
+            nbr_vals = g_orig[nbr_idx][:, nan_cols]
+            valid = ~np.isnan(nbr_vals)            # (K, C)
+
+            # 가중 합: weights 브로드캐스트, invalid → 0
+            w_valid = weights[:, None] * valid     # (K, C)
+            w_sum = w_valid.sum(axis=0)            # (C,)
+            has_valid = w_sum > 0
+
+            if not has_valid.any():
                 continue
 
-            neighbor_idx = other_idx[neighbor_mask]
-            neighbor_dists = dists[neighbor_mask]
+            weighted_sum = (weights[:, None] * np.where(valid, nbr_vals, 0.0)).sum(axis=0)
+            avg = weighted_sum / w_sum             # (C,)
 
-            # 거리 가중치 (역거리, 거리=0이면 가중치 매우 큼)
-            weights = 1.0 / np.maximum(neighbor_dists, 1e-6)
+            fill_cols = nan_cols[has_valid]
+            result_arr[gpos[li], fill_cols] = avg[has_valid]
+            filled_spatial += int(has_valid.sum())
 
-            for col in row_na_cols:
-                # 원본에서만 이웃 값 참조 (보간된 값 사용 안 함)
-                vals = group_original.loc[neighbor_idx, col].values
-                valid = ~np.isnan(vals)
-                if valid.any():
-                    w = weights[valid]
-                    xs.loc[i, col] = np.average(vals[valid], weights=w)
-                    filled_spatial += 1
+    # numpy 결과를 DataFrame에 반영
+    xs[feat_cols] = result_arr
 
     na_after_spatial = xs[feat_cols].isnull().sum().sum()
     print(f"  1단계 (공간 보간, dist<={max_dist}): {filled_spatial:,}개 채움"

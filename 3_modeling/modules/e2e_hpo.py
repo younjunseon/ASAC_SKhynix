@@ -25,7 +25,7 @@ import os
 import numpy as np
 import pandas as pd
 import optuna
-from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
+from sklearn.model_selection import StratifiedKFold, KFold, GroupKFold, train_test_split
 from sklearn.metrics import (
     roc_auc_score, average_precision_score,
     f1_score, recall_score, precision_score,
@@ -362,6 +362,7 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
     """
     X_train = unit_data["train"][feat_cols].values
     y_train = unit_data["train"][TARGET_COL].values
+    groups = unit_data["train"][KEY_COL].values if KEY_COL in unit_data["train"].columns else None
     X_val = unit_data["val"][feat_cols].values
     X_test = unit_data["test"][feat_cols].values
 
@@ -377,12 +378,17 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
     pos_mask_all = y_train > 0
     fallback_val = float(y_train[pos_mask_all].mean()) if pos_mask_all.any() else 0.0
 
-    kf = KFold(n_splits=n_folds, shuffle=True, random_state=SEED)
+    if groups is not None and len(np.unique(groups)) >= n_folds:
+        kf = GroupKFold(n_splits=n_folds)
+        split_iter = kf.split(X_train, groups=groups)
+    else:
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=SEED)
+        split_iter = kf.split(X_train)
     oof_reg = np.full(len(X_train), fallback_val, dtype=float)  # 0 대신 fallback 초기화
     fold_models = []
     skipped_folds = 0
 
-    for tr_idx, va_idx in kf.split(X_train):
+    for tr_idx, va_idx in split_iter:
         # ─── 1단계: X_fit, y_fit 결정 ───
         if use_clf and not clf_filter:
             # two-stage: Y>0인 샘플만 학습
@@ -833,22 +839,25 @@ def run_e2e_optimization(
         if cfg["reg_level"] == "position":
             reg_result, _ = _die_pred_to_unit(unit_data, reg_result)
 
-        y_val = unit_data["val"][TARGET_COL].values
-        if cfg["reg_level"] == "position":
-            # unit-level y (중복 제거)
-            y_val = (
-                unit_data["val"]
-                .groupby(KEY_COL, sort=False)[TARGET_COL]
-                .first()
-                .values
-            )
-        val_rmse_score = rmse(y_val, reg_result["val_pred"])
-
-        trial.set_user_attr("train_rmse", reg_result["train_rmse"])
-        trial.set_user_attr("val_rmse", val_rmse_score)
+        oof_rmse_score = reg_result["train_rmse"]
+        trial.set_user_attr("train_rmse", oof_rmse_score)
         trial.set_user_attr("n_features", len(selected_cols))
 
-        return val_rmse_score
+        # val RMSE는 참고용으로만 기록 (Y가 있을 때)
+        try:
+            y_val = unit_data["val"][TARGET_COL].values
+            if cfg["reg_level"] == "position":
+                y_val = (
+                    unit_data["val"]
+                    .groupby(KEY_COL, sort=False)[TARGET_COL]
+                    .first()
+                    .values
+                )
+            trial.set_user_attr("val_rmse", rmse(y_val, reg_result["val_pred"]))
+        except Exception:
+            pass
+
+        return oof_rmse_score
 
     # ─── Study 실행 ─────────────────────────────────────────
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -870,8 +879,10 @@ def run_e2e_optimization(
     print(f"\n{'=' * 60}")
     print(f"E2E HPO 완료 ({n_trials} trials)")
     print(f"Optuna ON: {', '.join(active)}")
-    print(f"Best Val RMSE : {best.value:.6f}")
-    print(f"Train RMSE    : {best.user_attrs['train_rmse']:.6f}")
+    print(f"Best OOF RMSE : {best.value:.6f}")
+    val_rmse_ref = best.user_attrs.get('val_rmse')
+    if val_rmse_ref is not None:
+        print(f"Val RMSE (ref): {val_rmse_ref:.6f}")
     print(f"N Features    : {best.user_attrs['n_features']}")
     if "top_k" in best.params:
         print(f"Top-K         : {best.params['top_k']}")
@@ -1016,24 +1027,42 @@ def rerun_best_trial(
     # position 모드: die → unit 집계
     if cfg["reg_level"] == "position":
         reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
-        y_val = agg_unit_data["val"][TARGET_COL].values
         # CSV용으로 unit_data를 unit-level로 교체
         unit_data = agg_unit_data
-    else:
-        y_val = unit_data["val"][TARGET_COL].values
 
-    val_rmse_score = rmse(y_val, reg_result["val_pred"])
-    print(f"Rerun Val RMSE: {val_rmse_score:.6f}")
+    oof_rmse_score = reg_result["train_rmse"]
+    print(f"Rerun OOF RMSE: {oof_rmse_score:.6f}")
+
+    # val RMSE는 참고용
+    val_rmse_score = None
+    try:
+        if cfg["reg_level"] == "position":
+            y_val = unit_data["val"].groupby(KEY_COL, sort=False)[TARGET_COL].first().values
+        else:
+            y_val = unit_data["val"][TARGET_COL].values
+        val_rmse_score = rmse(y_val, reg_result["val_pred"])
+        print(f"Rerun Val RMSE: {val_rmse_score:.6f}  (참고용)")
+    except Exception:
+        pass
+
+    # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
+    if mode == "kfold":
+        reg_models = reg_result.get("fold_models", [])
+    else:
+        _single_model = reg_result.get("model")
+        reg_models = [_single_model] if _single_model is not None else []
 
     result = {
         "unit_data": unit_data,
         "selected_cols": selected_cols,
         "val_pred": reg_result["val_pred"],
         "test_pred": reg_result["test_pred"],
+        "oof_rmse": oof_rmse_score,
         "val_rmse": val_rmse_score,
         "clf_result": clf_result,
         "importances": sel_importances,
         "pipeline_config": cfg,
+        "reg_models": reg_models,
     }
     # mode='kfold'만 진짜 OOF. single은 in-sample이므로 별도 키로 분리.
     if mode == "kfold":
@@ -1142,10 +1171,13 @@ def _build_pos_data(xs_train, xs_val, xs_test, ys, label_col,
 
     if die_train[TARGET_COL].isna().any():
         raise ValueError("train health NaN — merge 실패")
-    if die_val[TARGET_COL].isna().any():
-        raise ValueError("val health NaN — merge 실패")
-    if die_test[TARGET_COL].isna().any():
-        raise ValueError("test health NaN — merge 실패")
+    # val/test Y는 비공개일 수 있으므로 있을 때만 검증
+    if TARGET_COL in die_val.columns and die_val[TARGET_COL].notna().any():
+        if die_val[TARGET_COL].isna().any():
+            raise ValueError("val health NaN — merge 실패")
+    if TARGET_COL in die_test.columns and die_test[TARGET_COL].notna().any():
+        if die_test[TARGET_COL].isna().any():
+            raise ValueError("test health NaN — merge 실패")
 
     if use_sampling and sample_frac < 1.0:
         all_units = die_train[KEY_COL].drop_duplicates()
@@ -1412,19 +1444,9 @@ def run_e2e_optimization_with_pp(
         # ── ⑤ RMSE ──
         if cfg["reg_level"] == "position":
             reg_result, _ = _die_pred_to_unit(unit_data, reg_result)
-            y_val = (
-                unit_data["val"]
-                .groupby(KEY_COL, sort=False)[TARGET_COL]
-                .first()
-                .values
-            )
-        else:
-            y_val = unit_data["val"][TARGET_COL].values
 
-        val_rmse_score = rmse(y_val, reg_result["val_pred"])
-
-        trial.set_user_attr("train_rmse", reg_result["train_rmse"])
-        trial.set_user_attr("val_rmse", val_rmse_score)
+        oof_rmse_score = reg_result["train_rmse"]
+        trial.set_user_attr("train_rmse", oof_rmse_score)
         trial.set_user_attr("n_feat_clean", len(feat_cols_clean))
         trial.set_user_attr("n_feat_selected", len(selected_cols))
         trial.set_user_attr("agg_funcs", agg_funcs)
@@ -1433,12 +1455,31 @@ def run_e2e_optimization_with_pp(
         trial.set_user_attr("cleaning_args", cleaning_args)
         trial.set_user_attr("outlier_args", outlier_args)
         trial.set_user_attr("selected_cols", list(selected_cols))
-        # CLF 성능 지표
-        if clf_result is not None:
-            for k, v in _compute_clf_metrics(clf_result, pos_data, label_col).items():
-                trial.set_user_attr(k, v)
 
-        return val_rmse_score
+        # val RMSE는 참고용으로만 기록 (Y가 있을 때)
+        try:
+            if cfg["reg_level"] == "position":
+                y_val = (
+                    unit_data["val"]
+                    .groupby(KEY_COL, sort=False)[TARGET_COL]
+                    .first()
+                    .values
+                )
+            else:
+                y_val = unit_data["val"][TARGET_COL].values
+            trial.set_user_attr("val_rmse", rmse(y_val, reg_result["val_pred"]))
+        except Exception:
+            pass
+
+        # CLF 성능 지표 (참고용)
+        if clf_result is not None:
+            try:
+                for k, v in _compute_clf_metrics(clf_result, pos_data, label_col).items():
+                    trial.set_user_attr(k, v)
+            except Exception:
+                pass
+
+        return oof_rmse_score
 
     # ── Study 실행 ──
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1513,8 +1554,10 @@ def run_e2e_optimization_with_pp(
         print(f"Total trials  : {len(all_completed)} "
               f"(기존 {n_existing} + 신규 {len(all_completed) - n_existing})")
     print(f"PP cache      : {len(pp_cache)}/{pp_cache_size} entries (unique combos)")
-    print(f"Best Val RMSE : {best.value:.6f}")
-    print(f"Train RMSE    : {best.user_attrs.get('train_rmse', float('nan')):.6f}")
+    print(f"Best OOF RMSE : {best.value:.6f}")
+    val_rmse_ref = best.user_attrs.get('val_rmse')
+    if val_rmse_ref is not None:
+        print(f"Val RMSE (ref): {val_rmse_ref:.6f}")
     print(f"N Features    : clean={best.user_attrs.get('n_feat_clean')}  "
           f"selected={best.user_attrs.get('n_feat_selected')}")
     print(f"Best agg_funcs: {best.user_attrs.get('agg_funcs')}")
@@ -1675,13 +1718,22 @@ def rerun_best_trial_with_pp(
     # position 모드: die → unit 집계
     if cfg["reg_level"] == "position":
         reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
-        y_val = agg_unit_data["val"][TARGET_COL].values
         unit_data = agg_unit_data
-    else:
-        y_val = unit_data["val"][TARGET_COL].values
 
-    val_rmse_score = rmse(y_val, reg_result["val_pred"])
-    print(f"Rerun Val RMSE: {val_rmse_score:.6f}")
+    oof_rmse_score = reg_result["train_rmse"]
+    print(f"Rerun OOF RMSE: {oof_rmse_score:.6f}")
+
+    # val RMSE는 참고용
+    val_rmse_score = None
+    try:
+        if cfg["reg_level"] == "position":
+            y_val = unit_data["val"].groupby(KEY_COL, sort=False)[TARGET_COL].first().values
+        else:
+            y_val = unit_data["val"][TARGET_COL].values
+        val_rmse_score = rmse(y_val, reg_result["val_pred"])
+        print(f"Rerun Val RMSE: {val_rmse_score:.6f}  (참고용)")
+    except Exception:
+        pass
 
     # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
     if mode == "kfold":
@@ -1696,6 +1748,7 @@ def rerun_best_trial_with_pp(
         "feat_cols_clean": feat_cols_clean,
         "val_pred": reg_result["val_pred"],
         "test_pred": reg_result["test_pred"],
+        "oof_rmse": oof_rmse_score,
         "val_rmse": val_rmse_score,
         "clf_result": clf_result,
         "importances": sel_importances,
