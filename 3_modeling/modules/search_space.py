@@ -142,14 +142,14 @@ PP_OUTLIER_CANDIDATES = {
 # aggregate_die_to_unit이 네이티브 지원하는 조합만 등록.
 # (cv, range는 특별 처리. mean/std/min/max/median은 pandas groupby 지원)
 AGG_PRESETS = [
-    # 0: 현재 기본 7종
-    ["mean", "std", "cv", "range", "min", "max", "median"],
-    # 1: 핵심 3종 (빠른 탐색용)
-    ["mean", "std", "cv"],
+    # 0: 현재 기본 6종
+    ["mean", "std", "range", "min", "max", "median"],
+    # 1: 핵심 2종 (빠른 탐색용)
+    ["mean", "std"],
     # 2: 중심경향 + 편차 위주 (극값 제외)
-    ["mean", "std", "cv", "median", "range"],
+    ["mean", "std","median", "range"],
     # 3: 편차 중심 (mean 배제, 상관 약함 대응)
-    ["std", "cv", "range", "median"],
+    ["std", "range", "median"],
 ]
 
 # ── 집계 preset 인덱스 후보 ───────────────────────────────────

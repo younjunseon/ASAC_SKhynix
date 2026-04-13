@@ -1,0 +1,3 @@
+﻿실험번호,날짜,타입,베스트모델,val_rmse,test_rmse,val_증감,test_증감,피처수,메모,user,n_trials
+3-199-004,2026-04-10,baseline + HPO,e2e_single (lgbm),0.006331,0.008886,,,6900,"lgbm-only, preprocessing+hp joint optuna",jh,10
+3-199-005,2026-04-13,baseline + HPO,e2e_single (lgbm),0.005771,0.008451,,,695,"lgbm-only, preprocessing+hp joint optuna",jh,501

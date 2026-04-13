@@ -19,11 +19,17 @@ import json
 import sys
 import warnings
 from collections import OrderedDict
+from datetime import datetime
 
+import os
 import numpy as np
 import pandas as pd
 import optuna
 from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score,
+    f1_score, recall_score, precision_score,
+)
 
 from utils.config import (
     SEED, TARGET_COL, KEY_COL, POSITION_COL, PROJECT_ROOT,
@@ -282,6 +288,7 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
     else:
         mask = np.ones(len(y_train), dtype=bool)
 
+    reg = None  # fallback: 학습 실패 시 None
     if mask.sum() == 0:
         oof_reg = np.zeros(len(X_train))
         val_reg = np.zeros(len(X_val))
@@ -333,6 +340,7 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
         "test_pred": test_pred,
         "train_pred_insample": oof_pred,  # in-sample 예측 (OOF 아님, 진단/val/test만 안전)
         "train_rmse": rmse(y_train, oof_pred),
+        "model": reg,
     }
 
 
@@ -454,6 +462,7 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         "test_pred": test_pred,
         "oof_pred": oof_pred,
         "train_rmse": rmse(y_train, oof_pred),
+        "fold_models": fold_models,
     }
 
 
@@ -553,6 +562,76 @@ def _prepare_unit_data(pos_data, feat_cols, clf_result, cfg, agg_funcs):
             return aggregate_die_to_unit(
                 pos_data, feat_cols, dummy_clf, agg_funcs=agg_funcs,
             )
+
+
+# ═════════════════════════════════════════════════════════════
+# CLF 성능 지표 계산 (trial attrs용)
+# ═════════════════════════════════════════════════════════════
+def _compute_clf_metrics(clf_result, pos_data, label_col):
+    """
+    clf_result의 val/train proba와 pos_data의 실제 라벨로 분류 성능 지표 계산.
+
+    Returns
+    -------
+    dict : clf_val_auc, clf_val_ap, clf_train_oof_auc,
+           clf_val_f1, clf_val_recall, clf_val_precision
+    """
+    positions = sorted(clf_result)
+    val_proba   = np.concatenate([clf_result[p]["val_proba"]   for p in positions])
+    train_proba = np.concatenate([clf_result[p]["train_proba"] for p in positions])
+    y_val   = np.concatenate([pos_data[p]["val"][label_col].values   for p in positions])
+    y_train = np.concatenate([pos_data[p]["train"][label_col].values for p in positions])
+    val_bin = (val_proba >= 0.5).astype(int)
+    return {
+        "clf_val_auc":       float(roc_auc_score(y_val, val_proba)),
+        "clf_val_ap":        float(average_precision_score(y_val, val_proba)),
+        "clf_train_oof_auc": float(roc_auc_score(y_train, train_proba)),
+        "clf_val_f1":        float(f1_score(y_val, val_bin, zero_division=0)),
+        "clf_val_recall":    float(recall_score(y_val, val_bin, zero_division=0)),
+        "clf_val_precision": float(precision_score(y_val, val_bin, zero_division=0)),
+    }
+
+
+# ═════════════════════════════════════════════════════════════
+# 트라이얼별 CSV 콜백
+# ═════════════════════════════════════════════════════════════
+def _make_trial_csv_callback(csv_path, exp_id):
+    """
+    Optuna trial 완료마다 CSV에 한 줄 append하는 콜백.
+    컬럼: exp_id, trial_number, saved_at, reg/clf 성능 지표
+    """
+    _CSV_COLS = [
+        "exp_id", "trial_number", "saved_at",
+        "reg_val_rmse", "reg_train_rmse",
+        "n_feat_clean", "n_feat_selected",
+        "clf_val_auc", "clf_val_ap", "clf_train_oof_auc",
+        "clf_val_f1", "clf_val_recall", "clf_val_precision",
+    ]
+
+    def callback(study, trial):
+        if trial.state != optuna.trial.TrialState.COMPLETE:
+            return
+        attrs = trial.user_attrs
+        row = {
+            "exp_id":           exp_id or "",
+            "trial_number":     trial.number,
+            "saved_at":         attrs.get("saved_at", ""),
+            "reg_val_rmse":     attrs.get("val_rmse"),
+            "reg_train_rmse":   attrs.get("train_rmse"),
+            "n_feat_clean":     attrs.get("n_feat_clean"),
+            "n_feat_selected":  attrs.get("n_feat_selected"),
+            "clf_val_auc":      attrs.get("clf_val_auc"),
+            "clf_val_ap":       attrs.get("clf_val_ap"),
+            "clf_train_oof_auc": attrs.get("clf_train_oof_auc"),
+            "clf_val_f1":       attrs.get("clf_val_f1"),
+            "clf_val_recall":   attrs.get("clf_val_recall"),
+            "clf_val_precision": attrs.get("clf_val_precision"),
+        }
+        df_row = pd.DataFrame([row], columns=_CSV_COLS)
+        write_header = not os.path.exists(csv_path)
+        df_row.to_csv(csv_path, mode="a", header=write_header, index=False)
+
+    return callback
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1193,6 +1272,14 @@ def run_e2e_optimization_with_pp(
     sample_frac=1.0,
     exclude_cols=None,
     pp_cache_size=10,
+    # SQLite / warm start / CSV 로그
+    exp_id=None,
+    db_path=None,
+    csv_path=None,
+    study_user_attrs=None,
+    trial_callbacks=None,
+    warm_start_top_k=0,
+    warm_start_enabled=False,
 ):
     """
     전처리(cleaning/outlier/집계) + CLF + FS + REG 을 모두 포함한
@@ -1341,27 +1428,91 @@ def run_e2e_optimization_with_pp(
         trial.set_user_attr("n_feat_clean", len(feat_cols_clean))
         trial.set_user_attr("n_feat_selected", len(selected_cols))
         trial.set_user_attr("agg_funcs", agg_funcs)
+        trial.set_user_attr("saved_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
+        # 재현성 확보용: resolved 전처리 인자 + 선택된 컬럼 저장
+        trial.set_user_attr("cleaning_args", cleaning_args)
+        trial.set_user_attr("outlier_args", outlier_args)
+        trial.set_user_attr("selected_cols", list(selected_cols))
+        # CLF 성능 지표
+        if clf_result is not None:
+            for k, v in _compute_clf_metrics(clf_result, pos_data, label_col).items():
+                trial.set_user_attr(k, v)
 
         return val_rmse_score
 
     # ── Study 실행 ──
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    # SQLite storage (매 trial 자동 저장)
+    if db_path:
+        import os as _os_db
+        _os_db.makedirs(_os_db.path.dirname(db_path), exist_ok=True)
+        storage = f"sqlite:///{db_path}"
+    else:
+        storage = None
+    study_name = exp_id if db_path else None
+
     study = optuna.create_study(
+        study_name=study_name,
+        storage=storage,
         direction="minimize",
-        sampler=optuna.samplers.TPESampler(),  # 시드 제거: 매 실행마다 다른 trial 시퀀스
+        sampler=optuna.samplers.TPESampler(),
+        load_if_exists=True,
     )
+
+    # study-level user attrs
+    if study_user_attrs:
+        for k, v in study_user_attrs.items():
+            study.set_user_attr(k, v)
+
+    # warm start: 기존 완료 trial 상위 K개 enqueue
+    if warm_start_enabled and warm_start_top_k > 0:
+        completed = [
+            t for t in study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+        ]
+        if completed:
+            completed.sort(key=lambda t: t.value)
+            n_enqueue = min(warm_start_top_k, len(completed))
+            for t in completed[:n_enqueue]:
+                study.enqueue_trial(t.params)
+            print(f"[Warm Start] 기존 {len(completed)}개 완료 trial 중 "
+                  f"상위 {n_enqueue}개 enqueue")
+
+    n_existing = len([
+        t for t in study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE
+    ])
+
+    all_callbacks = list(trial_callbacks or [])
+    if csv_path:
+        os.makedirs(os.path.dirname(csv_path) if os.path.dirname(csv_path) else ".", exist_ok=True)
+        all_callbacks.append(_make_trial_csv_callback(csv_path, exp_id))
+
     study.optimize(
         objective,
         n_trials=n_trials,
         show_progress_bar=True,
         gc_after_trial=True,
+        callbacks=all_callbacks,
     )
 
     # ── 결과 요약 ──
+    all_completed = [
+        t for t in study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE
+    ]
     best = study.best_trial
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
     print(f"\n{'=' * 60}")
-    print(f"E2E + Preprocessing HPO 완료 ({n_trials} trials)")
-    print(f"PP cache: {len(pp_cache)}/{pp_cache_size} entries (unique combos)")
+    print(f"E2E + Preprocessing HPO 완료 ({n_trials} trials)  [{now_str}]")
+    if db_path:
+        print(f"Storage       : {db_path}")
+        print(f"Study         : {study_name}")
+        print(f"Total trials  : {len(all_completed)} "
+              f"(기존 {n_existing} + 신규 {len(all_completed) - n_existing})")
+    print(f"PP cache      : {len(pp_cache)}/{pp_cache_size} entries (unique combos)")
     print(f"Best Val RMSE : {best.value:.6f}")
     print(f"Train RMSE    : {best.user_attrs.get('train_rmse', float('nan')):.6f}")
     print(f"N Features    : clean={best.user_attrs.get('n_feat_clean')}  "
@@ -1369,6 +1520,8 @@ def run_e2e_optimization_with_pp(
     print(f"Best agg_funcs: {best.user_attrs.get('agg_funcs')}")
     if "top_k" in best.params:
         print(f"Top-K         : {best.params['top_k']}")
+    best_saved = best.user_attrs.get('saved_at', '?')
+    print(f"Best trial at : {best_saved}")
     print(f"{'=' * 60}")
 
     return {
@@ -1530,6 +1683,13 @@ def rerun_best_trial_with_pp(
     val_rmse_score = rmse(y_val, reg_result["val_pred"])
     print(f"Rerun Val RMSE: {val_rmse_score:.6f}")
 
+    # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
+    if mode == "kfold":
+        reg_models = reg_result.get("fold_models", [])
+    else:
+        _single_model = reg_result.get("model")
+        reg_models = [_single_model] if _single_model is not None else []
+
     result = {
         "unit_data": unit_data,
         "selected_cols": selected_cols,
@@ -1544,6 +1704,7 @@ def rerun_best_trial_with_pp(
         "cleaning_args": cleaning_args,
         "outlier_args": outlier_args,
         "agg_funcs": agg_funcs,
+        "reg_models": reg_models,
     }
     if mode == "kfold":
         result["oof_pred"] = reg_result["oof_pred"]

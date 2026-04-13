@@ -49,6 +49,7 @@ code.zip
 !1_eda/modules/*.py
 !1_eda/modules/__init__.py
 
-# 출력물 (xlsx, json)
+# 출력물 (xlsx, json, SQLite DB)
 4_output/**/*.xlsx
 4_output/**/*.json
+4_output/**/*.db
