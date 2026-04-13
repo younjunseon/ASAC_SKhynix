@@ -24,7 +24,7 @@ from utils.aggregate import aggregate_to_unit, pivot_by_position, merge_with_tar
 
 def run_aggregation(xs_train, xs_val, xs_test, feat_cols,
                     agg_funcs=None, use_position_pivot=False,
-                    save_csv=True, output_dir=None):
+                    save_csv=True, save_format="csv", output_dir=None):
     """
     전처리 완료된 die-level 데이터를 unit-level로 집계
 
@@ -38,7 +38,12 @@ def run_aggregation(xs_train, xs_val, xs_test, feat_cols,
     use_position_pivot : bool
         True면 position별 피벗도 추가
     save_csv : bool
-        True면 CSV로 저장
+        True면 집계 결과를 디스크에 저장 (플래그 이름은 하위호환).
+        실제 포맷은 save_format으로 선택.
+    save_format : {"csv", "parquet"}
+        저장 포맷. 기본 "csv" (하위호환).
+        "parquet"이면 pyarrow 엔진으로 저장. CSV 대비 파일 크기 ~1/5,
+        읽기/쓰기 5~10배 빠름.
     output_dir : str
         저장 경로. None이면 OUTPUT_DIR 사용
 
@@ -58,6 +63,13 @@ def run_aggregation(xs_train, xs_val, xs_test, feat_cols,
     print(f"  position_pivot: {use_position_pivot}")
     print("=" * 60)
 
+    # 입력 dtype 감지 (float32 다운캐스트 파이프라인 여부 판별)
+    in_dtype = None
+    try:
+        in_dtype = xs_train[feat_cols].dtypes.iloc[0]
+    except (AttributeError, IndexError):
+        pass
+
     # 각 split별 집계
     parts = {}
     for name, xs_split in [("train", xs_train), ("validation", xs_val), ("test", xs_test)]:
@@ -66,6 +78,13 @@ def run_aggregation(xs_train, xs_val, xs_test, feat_cols,
         if use_position_pivot:
             pos_df = pivot_by_position(xs_split, feat_cols)
             agg_df = agg_df.join(pos_df, how="left")
+
+        # groupby.agg는 보통 dtype 보존하지만 일부 버전에서 float64로 승격될 수 있어
+        # 입력이 float32면 결과도 float32로 강제 (메모리 일관성)
+        if in_dtype == np.float32 and not agg_df.empty:
+            float_cols = agg_df.select_dtypes(include=['float64']).columns
+            if len(float_cols) > 0:
+                agg_df[float_cols] = agg_df[float_cols].astype('float32')
 
         parts[name] = agg_df
 
@@ -80,18 +99,29 @@ def run_aggregation(xs_train, xs_val, xs_test, feat_cols,
     print(f"  test:  {unit_test.shape}")
     print(f"  feature 수: {len(unit_feat_cols)}")
 
-    # CSV 저장
+    # 디스크 저장
     if save_csv:
+        if save_format not in ("csv", "parquet"):
+            raise ValueError(
+                f"save_format must be 'csv' or 'parquet', got {save_format!r}"
+            )
+
         os.makedirs(output_dir, exist_ok=True)
+        ext = "csv" if save_format == "csv" else "parquet"
         files = {
-            "unit_train.csv": unit_train,
-            "unit_val.csv": unit_val,
-            "unit_test.csv": unit_test,
+            f"unit_train.{ext}": unit_train,
+            f"unit_val.{ext}":   unit_val,
+            f"unit_test.{ext}":  unit_test,
         }
         for fname, df in files.items():
-            df.to_csv(os.path.join(output_dir, fname))
+            path = os.path.join(output_dir, fname)
+            if save_format == "csv":
+                df.to_csv(path)
+            else:
+                # parquet은 index 보존이 명시적이어야 함
+                df.to_parquet(path, engine="pyarrow", index=True)
 
-        print(f"\n저장 완료 → {output_dir}/unit_*.csv")
+        print(f"\n저장 완료 → {output_dir}/unit_*.{ext}")
 
         # Colab: 브라우저로 다운로드
         from utils.config import ENV

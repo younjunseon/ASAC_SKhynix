@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 
 
-def parse_run_wf_xy(xs):
+def parse_run_wf_xy(xs, prefix="", inplace=False, verbose=True):
     """
     run_wf_xy 컬럼을 파싱하여 lot, wafer_no, die_x, die_y 생성
 
@@ -26,24 +26,39 @@ def parse_run_wf_xy(xs):
     Parameters
     ----------
     xs : DataFrame (die-level, run_wf_xy 컬럼 필요)
+    prefix : str
+        생성 컬럼의 접두사. 기본 "" → lot, wafer_no, die_x, die_y.
+        예: "_" → _lot, _wafer_no, _die_x, _die_y (임시 컬럼용)
+    inplace : bool
+        True면 xs에 직접 컬럼 추가 후 xs 반환 (copy 비용 절약).
+        False(기본)면 copy에 추가 후 반환 — 하위 호환
+    verbose : bool
+        True(기본)면 요약 print. 내부 호출 시 False로 억제 가능
 
     Returns
     -------
-    xs : DataFrame (lot, wafer_no, die_x, die_y 컬럼 추가된 복사본)
+    xs : DataFrame (prefix+lot/wafer_no/die_x/die_y 컬럼 추가)
     """
     from utils.config import DIE_KEY_COL
 
-    xs = xs.copy()
-    split = xs[DIE_KEY_COL].str.split("_", expand=True)
-    xs["lot"] = split[0]
-    xs["wafer_no"] = split[1]
-    xs["die_x"] = split[2].astype(int)
-    xs["die_y"] = split[3].astype(int)
+    if not inplace:
+        xs = xs.copy()
 
-    print(f"[run_wf_xy 파싱] lot: {xs['lot'].nunique()}개, "
-          f"wafer: {xs['wafer_no'].nunique()}개, "
-          f"die_x: {xs['die_x'].min()}~{xs['die_x'].max()}, "
-          f"die_y: {xs['die_y'].min()}~{xs['die_y'].max()}")
+    split = xs[DIE_KEY_COL].str.split("_", expand=True)
+    lot_c = f"{prefix}lot"
+    wf_c = f"{prefix}wafer_no"
+    dx_c = f"{prefix}die_x"
+    dy_c = f"{prefix}die_y"
+    xs[lot_c] = split[0]
+    xs[wf_c] = split[1]
+    xs[dx_c] = split[2].astype(int)
+    xs[dy_c] = split[3].astype(int)
+
+    if verbose:
+        print(f"[run_wf_xy 파싱] lot: {xs[lot_c].nunique()}개, "
+              f"wafer: {xs[wf_c].nunique()}개, "
+              f"die_x: {xs[dx_c].min()}~{xs[dx_c].max()}, "
+              f"die_y: {xs[dy_c].min()}~{xs[dy_c].max()}")
     return xs
 
 
@@ -78,6 +93,14 @@ def create_lot_stats_features(xs_train, xs_val, xs_test, feat_cols, agg_funcs=No
     lot_stats = xs_train.groupby("lot")[feat_cols].agg(agg_funcs)
     lot_stats.columns = [f"lot_{func}_{col}" for col, func in lot_stats.columns]
     lot_stat_cols = lot_stats.columns.tolist()
+
+    # 입력 feat_cols와 dtype 일치 (float32 파이프라인에서 merge 시 upcast 방지)
+    try:
+        in_dtype = xs_train[feat_cols].dtypes.iloc[0]
+        if in_dtype == np.float32:
+            lot_stats = lot_stats.astype('float32')
+    except (AttributeError, IndexError):
+        pass
 
     # 전체 train 평균 (unknown lot fallback)
     global_means = lot_stats.mean()

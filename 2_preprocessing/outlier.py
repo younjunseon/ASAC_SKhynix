@@ -51,6 +51,52 @@ def detect_outliers_iqr(xs, feat_cols, multiplier=1.5):
     return stats
 
 
+def _match_bounds_dtype(xs_train, feat_cols, lower, upper):
+    """
+    bounds(lower/upper Series)를 입력 feat_cols의 dtype에 맞춤.
+
+    pandas `quantile`은 입력 dtype과 무관하게 float64를 반환하므로,
+    float32 파이프라인에서 clip 결과가 float64로 승격되는 것을 방지한다.
+    """
+    try:
+        in_dtype = xs_train[feat_cols].dtypes.iloc[0]
+    except (AttributeError, IndexError):
+        return lower, upper
+    if in_dtype == np.float32:
+        if hasattr(lower, 'astype'):
+            lower = lower.astype('float32')
+        if hasattr(upper, 'astype'):
+            upper = upper.astype('float32')
+    return lower, upper
+
+
+def _apply_clip_to_splits(xs_train, xs_val, xs_test, feat_cols, lower, upper):
+    """
+    train/val/test 3개 split을 동일한 lower/upper 경계로 clip.
+
+    lower/upper는 Series(feat_cols 인덱스) 또는 scalar. train 기준으로
+    이미 계산되어 있어야 하며, 이 헬퍼는 copy → clip만 수행한다.
+    입력이 float32인 경우 bounds를 float32로 맞춰 dtype 일관성 유지.
+
+    Returns
+    -------
+    xs_train, xs_val, xs_test : DataFrame (클리핑된 복사본)
+    bounds : DataFrame (feature별 lower/upper 경계)
+    """
+    xs_train = xs_train.copy()
+    xs_val = xs_val.copy()
+    xs_test = xs_test.copy()
+
+    lower, upper = _match_bounds_dtype(xs_train, feat_cols, lower, upper)
+
+    xs_train[feat_cols] = xs_train[feat_cols].clip(lower, upper, axis=1)
+    xs_val[feat_cols] = xs_val[feat_cols].clip(lower, upper, axis=1)
+    xs_test[feat_cols] = xs_test[feat_cols].clip(lower, upper, axis=1)
+
+    bounds = pd.DataFrame({"lower": lower, "upper": upper})
+    return xs_train, xs_val, xs_test, bounds
+
+
 def winsorize(xs_train, xs_val, xs_test, feat_cols,
               lower_pct=0.01, upper_pct=0.99):
     """
@@ -73,15 +119,9 @@ def winsorize(xs_train, xs_val, xs_test, feat_cols,
     lower = xs_train[feat_cols].quantile(lower_pct)
     upper = xs_train[feat_cols].quantile(upper_pct)
 
-    xs_train = xs_train.copy()
-    xs_val = xs_val.copy()
-    xs_test = xs_test.copy()
-
-    xs_train[feat_cols] = xs_train[feat_cols].clip(lower, upper, axis=1)
-    xs_val[feat_cols] = xs_val[feat_cols].clip(lower, upper, axis=1)
-    xs_test[feat_cols] = xs_test[feat_cols].clip(lower, upper, axis=1)
-
-    bounds = pd.DataFrame({"lower": lower, "upper": upper})
+    xs_train, xs_val, xs_test, bounds = _apply_clip_to_splits(
+        xs_train, xs_val, xs_test, feat_cols, lower, upper
+    )
 
     print(f"[Winsorization] lower={lower_pct*100:.0f}%, upper={upper_pct*100:.0f}%")
     print(f"  적용 feature: {len(feat_cols)}개")
@@ -111,15 +151,9 @@ def iqr_clip(xs_train, xs_val, xs_test, feat_cols, multiplier=1.5):
     lower = Q1 - multiplier * IQR
     upper = Q3 + multiplier * IQR
 
-    xs_train = xs_train.copy()
-    xs_val = xs_val.copy()
-    xs_test = xs_test.copy()
-
-    xs_train[feat_cols] = xs_train[feat_cols].clip(lower, upper, axis=1)
-    xs_val[feat_cols] = xs_val[feat_cols].clip(lower, upper, axis=1)
-    xs_test[feat_cols] = xs_test[feat_cols].clip(lower, upper, axis=1)
-
-    bounds = pd.DataFrame({"lower": lower, "upper": upper})
+    xs_train, xs_val, xs_test, bounds = _apply_clip_to_splits(
+        xs_train, xs_val, xs_test, feat_cols, lower, upper
+    )
 
     print(f"[IQR Clip] multiplier={multiplier}")
     print(f"  적용 feature: {len(feat_cols)}개")
@@ -206,6 +240,8 @@ def grubbs_clip(xs_train, xs_val, xs_test, feat_cols,
     lower_s = pd.Series(lower_bounds)
     upper_s = pd.Series(upper_bounds)
 
+    lower_s, upper_s = _match_bounds_dtype(xs_train, feat_cols, lower_s, upper_s)
+
     xs_train[feat_cols] = xs_train[feat_cols].clip(lower_s, upper_s, axis=1)
     xs_val[feat_cols] = xs_val[feat_cols].clip(lower_s, upper_s, axis=1)
     xs_test[feat_cols] = xs_test[feat_cols].clip(lower_s, upper_s, axis=1)
@@ -223,7 +259,7 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
                    min_lot_size=10):
     """
     로트별 국소 기준 이상치 처리 (논문 5-3 근거, AEC DPAT 방식)
-    전역 기준 대신 로트(run_id)별로 분위수 경계를 세움
+    전역 기준 대신 로트(lot)별로 분위수 경계를 세움
 
     원리:
     - 반도체 공정은 로트마다 수준이 다름
@@ -235,7 +271,8 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
     xs_train, xs_val, xs_test : DataFrame
     feat_cols : list
     run_id_col : str
-        로트 구분 컬럼. run_wf_xy에서 파싱한 run_id 또는 run_wf_xy 자체
+        로트 구분 컬럼. "run_wf_xy"(기본)이면 parse_run_wf_xy로 파싱.
+        이미 로트 ID 컬럼이 있으면 그 컬럼명을 지정
     lower_pct, upper_pct : float
         로트별 분위수 경계 (기본 1%, 99%)
     min_lot_size : int
@@ -246,15 +283,19 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
     xs_train, xs_val, xs_test : DataFrame (처리된 복사본)
     report : dict (로트별/전역 처리 통계)
     """
+    from meta_features import parse_run_wf_xy
+
     xs_train = xs_train.copy()
     xs_val = xs_val.copy()
     xs_test = xs_test.copy()
 
-    # run_id 파싱: run_wf_xy에서 첫 번째 '_' 앞 부분 = 작업번호(로트)
+    # 로트 컬럼 준비
+    parsed_cols = None
     if run_id_col == "run_wf_xy" and "run_wf_xy" in xs_train.columns:
         for df in [xs_train, xs_val, xs_test]:
-            df["_lot_id"] = df["run_wf_xy"].str.split("_").str[0]
-        lot_col = "_lot_id"
+            parse_run_wf_xy(df, prefix="_", inplace=True, verbose=False)
+        lot_col = "_lot"
+        parsed_cols = ["_lot", "_wafer_no", "_die_x", "_die_y"]
     elif run_id_col in xs_train.columns:
         lot_col = run_id_col
     else:
@@ -263,37 +304,44 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
     # 전역 기준 (소량 로트 fallback용) — train 기준
     global_lower = xs_train[feat_cols].quantile(lower_pct)
     global_upper = xs_train[feat_cols].quantile(upper_pct)
+    global_lower, global_upper = _match_bounds_dtype(
+        xs_train, feat_cols, global_lower, global_upper
+    )
 
     # 로트별 처리 (train 기준으로 경계 산출)
     lot_sizes = xs_train[lot_col].value_counts()
     large_lots = lot_sizes[lot_sizes >= min_lot_size].index
-    small_lots = lot_sizes[lot_sizes < min_lot_size].index
+    large_lot_set = set(large_lots)
 
-    # 대형 로트: 로트별 분위수 경계
+    # 대형 로트의 경계를 한 번만 계산해 캐싱 (val/test에서 재사용)
+    lot_bounds = {}
     for lot in large_lots:
         mask_tr = xs_train[lot_col] == lot
         lot_lower = xs_train.loc[mask_tr, feat_cols].quantile(lower_pct)
         lot_upper = xs_train.loc[mask_tr, feat_cols].quantile(upper_pct)
+        lot_lower, lot_upper = _match_bounds_dtype(
+            xs_train, feat_cols, lot_lower, lot_upper
+        )
+        lot_bounds[lot] = (lot_lower, lot_upper)
 
         xs_train.loc[mask_tr, feat_cols] = (
             xs_train.loc[mask_tr, feat_cols].clip(lot_lower, lot_upper, axis=1)
         )
 
     # 소형 로트: 전역 기준 적용
+    small_lots = lot_sizes[lot_sizes < min_lot_size].index
     for lot in small_lots:
         mask_tr = xs_train[lot_col] == lot
         xs_train.loc[mask_tr, feat_cols] = (
             xs_train.loc[mask_tr, feat_cols].clip(global_lower, global_upper, axis=1)
         )
 
-    # val/test: 해당 로트가 train에 있으면 train 로트 기준, 없으면 전역 기준
+    # val/test: 캐시된 경계 재사용, 없으면 전역 기준
     for df in [xs_val, xs_test]:
         for lot in df[lot_col].unique():
             mask = df[lot_col] == lot
-            if lot in large_lots:
-                mask_tr = xs_train[lot_col] == lot
-                lot_lower = xs_train.loc[mask_tr, feat_cols].quantile(lower_pct)
-                lot_upper = xs_train.loc[mask_tr, feat_cols].quantile(upper_pct)
+            if lot in large_lot_set:
+                lot_lower, lot_upper = lot_bounds[lot]
                 df.loc[mask, feat_cols] = (
                     df.loc[mask, feat_cols].clip(lot_lower, lot_upper, axis=1)
                 )
@@ -303,9 +351,9 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
                 )
 
     # 임시 컬럼 제거
-    if "_lot_id" in xs_train.columns:
+    if parsed_cols is not None:
         for df in [xs_train, xs_val, xs_test]:
-            df.drop(columns=["_lot_id"], inplace=True)
+            df.drop(columns=parsed_cols, inplace=True)
 
     report = {
         "n_large_lots": len(large_lots),

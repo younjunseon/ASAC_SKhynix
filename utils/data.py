@@ -13,7 +13,7 @@ from utils.config import (
 _cache = {}
 
 
-def load_xs(force=False):
+def load_xs(force=False, downcast=True):
     """
     Xs(die-level) 데이터 로드. 한 번 로드 후 메모리 캐싱
 
@@ -21,6 +21,11 @@ def load_xs(force=False):
     ----------
     force : bool
         True면 캐시 무시하고 CSV에서 다시 로드
+    downcast : bool
+        True(기본)면 X* feature 컬럼을 float32로 다운캐스트.
+        메모리 사용량을 float64 대비 절반으로 줄인다.
+        메타 컬럼(ufs_serial, run_wf_xy, split, position)은 불변.
+        주의: 캐시 키가 고정이므로 downcast 값을 도중에 바꾸려면 force=True 필요.
 
     Returns
     -------
@@ -28,7 +33,11 @@ def load_xs(force=False):
         (174,980 × 1,091) die-level 데이터
     """
     if "xs" not in _cache or force:
-        _cache["xs"] = pd.read_csv(XS_PATH)
+        df = pd.read_csv(XS_PATH)
+        if downcast:
+            feat_cols = [c for c in df.columns if c.startswith("X")]
+            df[feat_cols] = df[feat_cols].astype("float32")
+        _cache["xs"] = df
     return _cache["xs"]
 
 

@@ -44,6 +44,25 @@ def _detect_device():
 DEVICE = _detect_device()
 
 
+def _coerce_xy(X_train, y_train, feat_cols):
+    """
+    feature_selection 함수들의 공통 입력 정규화.
+
+    - X_train이 DataFrame이면 feat_cols만 추출, 아니면 feat_cols를 열 이름으로 붙여 래핑
+    - y_train이 Series면 .values로, 아니면 np.array로 변환
+    """
+    if hasattr(X_train, "columns"):
+        X = X_train[feat_cols]
+    else:
+        X = pd.DataFrame(X_train, columns=feat_cols)
+
+    if hasattr(y_train, "values"):
+        y = y_train.values
+    else:
+        y = np.array(y_train)
+    return X, y
+
+
 def _default_lgbm_params(seed=SEED):
     """LightGBM 기본 파라미터 (GPU 자동 감지 포함)"""
     return dict(
@@ -89,8 +108,7 @@ def select_by_boruta(X_train, y_train, feat_cols,
     """
     from boruta import BorutaPy
 
-    X = X_train[feat_cols] if hasattr(X_train, 'columns') else pd.DataFrame(X_train, columns=feat_cols)
-    y = y_train.values if hasattr(y_train, 'values') else np.array(y_train)
+    X, y = _coerce_xy(X_train, y_train, feat_cols)
 
     # 서브샘플링 (속도)
     if sample_n and sample_n < len(X):
@@ -170,8 +188,7 @@ def select_by_lgbm_importance(X_train, y_train, feat_cols,
     if lgbm_params is None:
         lgbm_params = _default_lgbm_params(seed)
 
-    X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
-    y = y_train.values if hasattr(y_train, 'values') else y_train
+    X, y = _coerce_xy(X_train, y_train, feat_cols)
 
     model = lgb.LGBMRegressor(**lgbm_params, importance_type=importance_type)
     model.fit(X, y)
@@ -225,8 +242,7 @@ def select_by_null_importance(X_train, y_train, feat_cols,
     if lgbm_params is None:
         lgbm_params = _default_lgbm_params(seed)
 
-    X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
-    y = y_train.values if hasattr(y_train, 'values') else np.array(y_train)
+    X, y = _coerce_xy(X_train, y_train, feat_cols)
 
     # 1. Real importance
     model = lgb.LGBMRegressor(**lgbm_params)
@@ -298,8 +314,7 @@ def select_by_rfe(X_train, y_train, feat_cols,
     if lgbm_params is None:
         lgbm_params = _default_lgbm_params(seed)
 
-    X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
-    y = y_train.values if hasattr(y_train, 'values') else y_train
+    X, y = _coerce_xy(X_train, y_train, feat_cols)
 
     estimator = lgb.LGBMRegressor(**lgbm_params)
     n_select = min(n_features_to_select, len(feat_cols))
@@ -347,8 +362,7 @@ def select_by_permutation(X_train, y_train, feat_cols,
     if lgbm_params is None:
         lgbm_params = _default_lgbm_params(seed)
 
-    X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
-    y = y_train.values if hasattr(y_train, 'values') else y_train
+    X, y = _coerce_xy(X_train, y_train, feat_cols)
 
     model = lgb.LGBMRegressor(**lgbm_params)
     model.fit(X, y)
@@ -397,8 +411,7 @@ def select_by_mutual_info(X_train, y_train, feat_cols,
     """
     from sklearn.feature_selection import mutual_info_regression
 
-    X = X_train[feat_cols] if hasattr(X_train, 'columns') else X_train
-    y = y_train.values if hasattr(y_train, 'values') else y_train
+    X, y = _coerce_xy(X_train, y_train, feat_cols)
 
     # NaN 처리 (MI는 결측 허용 안 함)
     X_filled = X.fillna(0) if hasattr(X, 'fillna') else np.nan_to_num(X)

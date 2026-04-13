@@ -18,6 +18,7 @@ v2 대비 변경사항:
     # 선형 모델용 (Yeo-Johnson)
     xs, stats, tmap = scale(xs, feat_cols, train_mask, transform='power')
 """
+import numpy as np
 import pandas as pd
 from sklearn.preprocessing import PowerTransformer
 
@@ -86,7 +87,13 @@ def power_scale(xs, feat_cols, train_mask=None):
 
     pt = PowerTransformer(method='yeo-johnson', standardize=True)
     pt.fit(ref)
-    xs[feat_cols] = pt.transform(xs[feat_cols])
+    transformed = pt.transform(xs[feat_cols])
+    # PowerTransformer는 내부에서 float64로 승격 → 입력 dtype으로 복구해
+    # float32 다운캐스트된 파이프라인의 dtype 일관성 유지
+    in_dtype = xs[feat_cols].dtypes.iloc[0]
+    if in_dtype == np.float32:
+        transformed = transformed.astype('float32', copy=False)
+    xs[feat_cols] = transformed
 
     stats = pd.DataFrame({'lambda': pt.lambdas_}, index=feat_cols)
 

@@ -253,13 +253,13 @@ def remove_high_corr_features(
     return keep, removed
 
 
-def impute_spatial(xs, feat_cols, max_dist=2.0):
+def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
     """
     공간 보간 → lot 평균 → 전체 평균 순서로 결측치를 채우는 함수
 
     전략:
     1단계: 같은 lot/wafer 내 xy 좌표 기준 거리 가중 평균 (max_dist 이내 이웃)
-    2단계: 같은 lot(run_id) 내 평균
+    2단계: 같은 lot 내 평균
     3단계: train split의 컬럼 전체 평균
 
     Parameters
@@ -270,34 +270,38 @@ def impute_spatial(xs, feat_cols, max_dist=2.0):
         imputation 대상 feature 컬럼명 리스트
     max_dist : float
         공간 보간 시 이웃으로 간주할 최대 거리 (기본 2.0, 인접 die까지)
+    train_mask : Series[bool], optional
+        xs.index와 정렬된 boolean 마스크. True인 행만 이웃 후보·lot 평균
+        계산에 사용되어 data leakage를 차단한다.
+        None이면 전체 데이터를 사용 (하위 호환).
 
     Returns
     -------
     xs : DataFrame
-        결측이 채워진 DataFrame (inplace 수정)
+        결측이 채워진 DataFrame (임시 컬럼은 정리됨)
     report : dict
         각 단계별 채운 결측 수
     """
     from utils.config import DIE_KEY_COL, SPLIT_COL
+    from meta_features import parse_run_wf_xy
 
-    # run_wf_xy 파싱
-    split_cols = xs[DIE_KEY_COL].str.split('_', expand=True)
-    xs['_run_id'] = split_cols[0]
-    xs['_wafer_no'] = split_cols[1]
-    xs['_die_x'] = split_cols[2].astype(int)
-    xs['_die_y'] = split_cols[3].astype(int)
-    xs['_lot_wafer'] = xs['_run_id'] + '_' + xs['_wafer_no']
+    # run_wf_xy 파싱 (임시 컬럼: _lot, _wafer_no, _die_x, _die_y)
+    parse_run_wf_xy(xs, prefix="_", inplace=True, verbose=False)
+    xs['_lot_wafer'] = xs['_lot'] + '_' + xs['_wafer_no']
+    tmp_cols = ['_lot', '_wafer_no', '_die_x', '_die_y', '_lot_wafer']
 
     total_na_before = xs[feat_cols].isnull().sum().sum()
     print(f"[공간 보간 imputation] 총 결측: {total_na_before:,}")
+    if train_mask is not None:
+        n_train = int(train_mask.sum())
+        print(f"  train-only 모드: train {n_train:,} / 전체 {len(xs):,} 행")
 
     if total_na_before == 0:
-        xs.drop(columns=['_run_id', '_wafer_no', '_die_x', '_die_y', '_lot_wafer'], inplace=True)
+        xs.drop(columns=tmp_cols, inplace=True)
         return xs, {'spatial': 0, 'lot': 0, 'global': 0}
 
     # ── 1단계: 같은 lot/wafer 내 거리 기반 공간 보간 ──
     # 원본 snapshot: 이웃 값은 항상 보간 전 원본에서만 참조
-    # numpy 배열로 작업하여 pandas loc 오버헤드 제거
     original_arr = xs[feat_cols].values.copy()   # (N, F) — 이웃 참조용 (불변)
     result_arr = original_arr.copy()              # 보간 결과 기록용
 
@@ -306,6 +310,12 @@ def impute_spatial(xs, feat_cols, max_dist=2.0):
     die_x_all = xs['_die_x'].values.astype(float)
     die_y_all = xs['_die_y'].values.astype(float)
 
+    # train 마스크를 numpy bool 배열로 정렬 (None이면 전체 True)
+    if train_mask is not None:
+        is_train_all = train_mask.reindex(xs.index).fillna(False).values.astype(bool)
+    else:
+        is_train_all = np.ones(len(xs), dtype=bool)
+
     filled_spatial = 0
     for lw, group in xs.groupby('_lot_wafer'):
         gpos = idx_to_pos.loc[group.index].values  # 정수 위치 배열
@@ -313,6 +323,11 @@ def impute_spatial(xs, feat_cols, max_dist=2.0):
         g_na = np.isnan(g_orig)
 
         if not g_na.any():
+            continue
+
+        is_train_grp = is_train_all[gpos]            # (G,) bool
+        if not is_train_grp.any():
+            # 그룹에 train 이웃이 하나도 없음 → 공간 보간 불가, 다음 단계로
             continue
 
         # 그룹 내 pairwise 거리 행렬 (한 번만 계산)
@@ -332,7 +347,8 @@ def impute_spatial(xs, feat_cols, max_dist=2.0):
                 continue
 
             dists = dist_mat[li]                   # (G,)
-            nbr_mask = dists <= max_dist
+            # 이웃 = 거리 ≤ max_dist AND train 행
+            nbr_mask = (dists <= max_dist) & is_train_grp
             if not nbr_mask.any():
                 continue
 
@@ -365,14 +381,23 @@ def impute_spatial(xs, feat_cols, max_dist=2.0):
     print(f"  1단계 (공간 보간, dist<={max_dist}): {filled_spatial:,}개 채움"
           f" → 잔여: {na_after_spatial:,}")
 
-    # ── 2단계: 같은 lot(run_id) 평균으로 채움 ──
+    # ── 2단계: 같은 lot 평균으로 채움 (train 기준) ──
     if na_after_spatial > 0:
-        lot_means = xs.groupby('_run_id')[feat_cols].transform('mean')
+        if train_mask is not None:
+            train_lot_means = xs.loc[train_mask].groupby('_lot')[feat_cols].mean()
+        else:
+            train_lot_means = xs.groupby('_lot')[feat_cols].mean()
+
+        # lot 값 기준으로 각 행에 매핑 (train에 없는 lot은 NaN → 다음 단계에서 처리)
+        fill_df = train_lot_means.reindex(xs['_lot'].values)
+        fill_df.index = xs.index
+
         filled_before = xs[feat_cols].isnull().sum().sum()
-        xs[feat_cols] = xs[feat_cols].fillna(lot_means)
+        xs[feat_cols] = xs[feat_cols].fillna(fill_df)
         filled_lot = filled_before - xs[feat_cols].isnull().sum().sum()
         na_after_lot = xs[feat_cols].isnull().sum().sum()
-        print(f"  2단계 (lot 평균): {filled_lot:,}개 채움"
+        lot_label = "train 기준" if train_mask is not None else "전체 기준"
+        print(f"  2단계 (lot 평균, {lot_label}): {filled_lot:,}개 채움"
               f" → 잔여: {na_after_lot:,}")
     else:
         filled_lot = 0
@@ -391,7 +416,7 @@ def impute_spatial(xs, feat_cols, max_dist=2.0):
         filled_global = 0
 
     # 임시 컬럼 정리
-    xs.drop(columns=['_run_id', '_wafer_no', '_die_x', '_die_y', '_lot_wafer'], inplace=True)
+    xs.drop(columns=tmp_cols, inplace=True)
 
     report = {
         'total_before': total_na_before,
@@ -406,6 +431,31 @@ def impute_spatial(xs, feat_cols, max_dist=2.0):
           f"전체({filled_global:,}) → 잔여({report['remaining']:,})")
 
     return xs, report
+
+
+def _add_missing_indicators(xs_train, xs_val, xs_test, feat_cols,
+                            threshold=0.01):
+    """
+    train 결측률 기준으로 indicator 컬럼({feat}_missing)을 3개 split에 추가.
+
+    모든 DataFrame을 inplace 수정하고 생성된 indicator 컬럼명 리스트를 반환.
+    threshold 이상인 feature가 없으면 빈 리스트.
+    """
+    missing_pct = xs_train[feat_cols].isnull().mean()
+    indicator_feats = missing_pct[missing_pct >= threshold].index.tolist()
+
+    indicator_cols = []
+    for col in indicator_feats:
+        ind_col = f"{col}_missing"
+        xs_train[ind_col] = xs_train[col].isnull().astype(int)
+        xs_val[ind_col] = xs_val[col].isnull().astype(int)
+        xs_test[ind_col] = xs_test[col].isnull().astype(int)
+        indicator_cols.append(ind_col)
+
+    if indicator_cols:
+        print(f"[결측 indicator] {len(indicator_cols)}개 컬럼 추가 "
+              f"(결측률 >= {threshold*100:.0f}%)")
+    return indicator_cols
 
 
 def impute_missing(xs_train, xs_val, xs_test, feat_cols, add_indicator=False,
@@ -442,17 +492,9 @@ def impute_missing(xs_train, xs_val, xs_test, feat_cols, add_indicator=False,
     # 결측 indicator 컬럼 추가 (imputation 전에 생성해야 함)
     indicator_cols = []
     if add_indicator:
-        missing_pct = xs_train[feat_cols].isnull().mean()
-        indicator_feats = missing_pct[missing_pct >= indicator_threshold].index.tolist()
-        for col in indicator_feats:
-            ind_col = f"{col}_missing"
-            xs_train[ind_col] = xs_train[col].isnull().astype(int)
-            xs_val[ind_col] = xs_val[col].isnull().astype(int)
-            xs_test[ind_col] = xs_test[col].isnull().astype(int)
-            indicator_cols.append(ind_col)
-        if indicator_cols:
-            print(f"[결측 indicator] {len(indicator_cols)}개 컬럼 추가 "
-                  f"(결측률 >= {indicator_threshold*100:.0f}%)")
+        indicator_cols = _add_missing_indicators(
+            xs_train, xs_val, xs_test, feat_cols, threshold=indicator_threshold
+        )
 
     imputer_info = {"method": method}
 
@@ -494,7 +536,9 @@ def run_cleaning(xs, feat_cols, xs_dict,
                  indicator_threshold=0.01,
                  imputation_method="median",
                  knn_neighbors=5,
-                 spatial_max_dist=2.0):
+                 spatial_max_dist=2.0,
+                 post_impute_corr_threshold=None,
+                 post_impute_corr_keep_by="std"):
     """
     클리닝 파이프라인 전체 실행
 
@@ -533,6 +577,13 @@ def run_cleaning(xs, feat_cols, xs_dict,
         imputation_method="knn"일 때 이웃 수
     spatial_max_dist : float
         imputation_method="spatial"일 때 공간 보간의 이웃 최대 거리. 기본 2.0
+    post_impute_corr_threshold : float or None
+        imputation 이후 한 번 더 고상관 제거를 수행할 때의 임계값.
+        None이면 스킵. 권장: 0.99 (보수적). imputation으로 인해 인위적으로
+        상관이 높아진 컬럼만 추가 제거하는 목적.
+        대상은 일반 feature(current_cols)만이며 indicator 컬럼은 제외.
+    post_impute_corr_keep_by : {"std", "target_corr"}
+        2차 고상관 제거에서 남길 기준. 기본 "std"
 
     Returns
     -------
@@ -622,23 +673,19 @@ def run_cleaning(xs, feat_cols, xs_dict,
         # (impute_spatial은 indicator를 지원하지 않으므로 직접 처리)
         indicator_cols = []
         if add_indicator:
-            missing_pct = xs_train[current_cols].isnull().mean()
-            indicator_feats = missing_pct[missing_pct >= indicator_threshold].index.tolist()
-            for col in indicator_feats:
-                ind_col = f"{col}_missing"
-                xs_train[ind_col] = xs_train[col].isnull().astype(int)
-                xs_val[ind_col] = xs_val[col].isnull().astype(int)
-                xs_test[ind_col] = xs_test[col].isnull().astype(int)
-                indicator_cols.append(ind_col)
-            if indicator_cols:
-                print(f"[결측 indicator] {len(indicator_cols)}개 컬럼 추가 "
-                      f"(결측률 >= {indicator_threshold*100:.0f}%)")
+            indicator_cols = _add_missing_indicators(
+                xs_train, xs_val, xs_test, current_cols,
+                threshold=indicator_threshold,
+            )
 
-        # 3개 split을 합쳐서 같은 lot/wafer 이웃을 참조할 수 있게 함
-        # (3단계 train 전체 평균은 impute_spatial 내부에서 SPLIT_COL로 train만 사용)
+        # 3개 split을 합쳐서 같은 lot/wafer 이웃 탐색을 가능하게 하되,
+        # train_mask로 이웃 후보·lot 평균 계산을 train 행으로 제한 (leakage 차단)
         combined = pd.concat([xs_train, xs_val, xs_test], axis=0)
+        train_mask = combined[SPLIT_COL] == 'train'
         combined, spatial_report = impute_spatial(
-            combined, current_cols, max_dist=spatial_max_dist
+            combined, current_cols,
+            max_dist=spatial_max_dist,
+            train_mask=train_mask,
         )
 
         # 다시 split별로 분리
@@ -653,6 +700,27 @@ def run_cleaning(xs, feat_cols, xs_dict,
             f"Unknown imputation_method: {imputation_method!r}. "
             f"Use 'median', 'knn', or 'spatial'"
         )
+
+    # 6. (선택) imputation 이후 2차 고상관 제거
+    #    imputation으로 인해 인위적으로 상관이 높아진 컬럼만 잡도록
+    #    보수적인 threshold(권장 0.99) 사용. indicator 컬럼은 제외.
+    if post_impute_corr_threshold is not None:
+        before = len(current_cols)
+        print()
+        current_cols, removed = remove_high_corr_features(
+            xs_train, current_cols,
+            threshold=post_impute_corr_threshold,
+            keep_by=post_impute_corr_keep_by,
+            ys_train=ys_train,
+            winsorize_pct=corr_winsorize_pct,
+        )
+        _drop_from_all(removed)
+        report["high_corr_post_impute"] = removed
+        print(f"    [고상관 제거 2차 / imputation 후] threshold="
+              f"{post_impute_corr_threshold}")
+        print(f"    컬럼: {before} → {len(current_cols)} "
+              f"({before - len(current_cols)}개 제거)")
+        print(f"    DataFrame: {xs_train.shape}")
 
     # indicator 컬럼도 feature 목록에 추가
     all_feat_cols = current_cols + indicator_cols

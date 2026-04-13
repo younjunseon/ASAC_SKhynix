@@ -32,7 +32,7 @@ from sklearn.metrics import (
 )
 
 from utils.config import (
-    SEED, TARGET_COL, KEY_COL, POSITION_COL, PROJECT_ROOT,
+    SEED, TARGET_COL, KEY_COL, POSITION_COL, PROJECT_ROOT, ENV,
 )
 from utils.evaluate import rmse, postprocess
 
@@ -75,6 +75,9 @@ DEFAULT_CONFIG = dict(
     # 회귀
     reg_level="unit",           # 'unit' | 'position'
     reg_optuna=True,            # False → 기본 파라미터
+
+    # 후처리
+    zero_clip=False,            # True → 회귀 예측값 < threshold → 0 으로 clip
 )
 
 
@@ -269,9 +272,13 @@ def _run_clf_single(pos_data, feat_cols, clf_params, model_name,
 # ═════════════════════════════════════════════════════════════
 def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
                     early_stop, use_clf=True, clf_filter=False,
-                    es_holdout=0.1):
+                    clf_filter_threshold=0.5, es_holdout=0.1):
     """
     Unit-level 회귀 단일 학습 (KFold 없음, train 100% 사용)
+
+    clf_filter_threshold : float
+        clf_filter=True일 때 회귀 학습에서 제외할 proba 임계값
+        (clf_proba_mean <= threshold → 제외)
     """
     X_train = unit_data["train"][feat_cols].values
     y_train = unit_data["train"][TARGET_COL].values
@@ -284,7 +291,7 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
         mask = y_train > 0
     elif clf_filter and "clf_proba_mean" in unit_data["train"].columns:
         clf_pred = unit_data["train"]["clf_proba_mean"].values
-        mask = clf_pred > 0.5
+        mask = clf_pred > clf_filter_threshold
     else:
         mask = np.ones(len(y_train), dtype=bool)
 
@@ -348,7 +355,8 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
 # 경량 회귀 OOF (silent)
 # ═════════════════════════════════════════════════════════════
 def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
-                 n_folds, early_stop, use_clf=True, clf_filter=False):
+                 n_folds, early_stop, use_clf=True, clf_filter=False,
+                 clf_filter_threshold=0.5):
     """
     Unit-level 회귀 OOF
 
@@ -359,6 +367,9 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         False → 단순 회귀
     clf_filter : bool
         True → clf가 0으로 예측한 샘플을 학습에서 제외
+    clf_filter_threshold : float
+        clf_filter=True일 때 회귀 학습에서 제외할 proba 임계값
+        (clf_proba_mean <= threshold → 제외)
     """
     X_train = unit_data["train"][feat_cols].values
     y_train = unit_data["train"][TARGET_COL].values
@@ -369,7 +380,7 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
     # clf_filter: 분류기가 0으로 예측한 샘플 제외
     if clf_filter and "clf_proba_mean" in unit_data["train"].columns:
         clf_pred = unit_data["train"]["clf_proba_mean"].values
-        train_mask = clf_pred > 0.5  # binary: 1인 샘플만
+        train_mask = clf_pred > clf_filter_threshold  # threshold 초과만 학습
     else:
         train_mask = None
 
@@ -520,6 +531,53 @@ def _die_pred_to_unit(unit_data, reg_result):
 
 
 # ═════════════════════════════════════════════════════════════
+# 후처리: 예측값 zero-clip
+# ═════════════════════════════════════════════════════════════
+def _apply_zero_clip(reg_result, y_train, threshold):
+    """
+    회귀 예측값에서 threshold 미만을 0으로 치환하고 train_rmse 재계산.
+
+    train(oof or insample), val, test 예측 모두 동일 threshold 적용.
+
+    Parameters
+    ----------
+    reg_result : dict
+        _run_reg_oof / _run_reg_single / _die_pred_to_unit 의 결과
+    y_train : np.ndarray
+        train_rmse 재계산용 정답값 (level 일치 필요)
+    threshold : float
+        0.0 또는 음수면 no-op (clip 안 함)
+
+    Returns
+    -------
+    dict : 클립 적용된 새 reg_result (얕은 복사)
+    """
+    if threshold is None or threshold <= 0:
+        return reg_result
+
+    out = dict(reg_result)
+
+    # train 예측 키 자동 감지 (kfold='oof_pred', single='train_pred_insample')
+    if "oof_pred" in out:
+        train_key = "oof_pred"
+    elif "train_pred_insample" in out:
+        train_key = "train_pred_insample"
+    else:
+        train_key = None
+
+    if train_key is not None:
+        out[train_key] = np.where(out[train_key] < threshold, 0.0, out[train_key])
+        out["train_rmse"] = rmse(y_train, out[train_key])
+
+    if "val_pred" in out:
+        out["val_pred"] = np.where(out["val_pred"] < threshold, 0.0, out["val_pred"])
+    if "test_pred" in out:
+        out["test_pred"] = np.where(out["test_pred"] < threshold, 0.0, out["test_pred"])
+
+    return out
+
+
+# ═════════════════════════════════════════════════════════════
 # 집계 or position 피처 처리
 # ═════════════════════════════════════════════════════════════
 def _prepare_unit_data(pos_data, feat_cols, clf_result, cfg, agg_funcs):
@@ -641,6 +699,53 @@ def _make_trial_csv_callback(csv_path, exp_id):
 
 
 # ═════════════════════════════════════════════════════════════
+# Colab용: in-memory study ↔ SQLite 동기화
+# ═════════════════════════════════════════════════════════════
+def _sync_inmemory_to_sqlite(in_mem_storage, db_path, exp_id, verbose=True):
+    """
+    In-memory storage에 있는 study를 SQLite 파일로 통째로 덮어쓴다.
+    (delete_study + copy_study 방식 — 일관성 보장)
+    """
+    storage_url = f"sqlite:///{db_path}"
+    try:
+        try:
+            optuna.delete_study(study_name=exp_id, storage=storage_url)
+        except KeyError:
+            pass
+        except Exception:
+            pass
+        optuna.copy_study(
+            from_study_name=exp_id,
+            from_storage=in_mem_storage,
+            to_storage=storage_url,
+            to_study_name=exp_id,
+        )
+        if verbose:
+            n = len(optuna.load_study(study_name=exp_id, storage=storage_url).trials)
+            print(f"[DB Sync] {n} trials → {db_path}")
+    except Exception as e:
+        print(f"[DB Sync Warning] {e}")
+
+
+def _make_db_sync_callback(in_mem_storage, db_path, exp_id, sync_every=10):
+    """sync_every trial마다 in-memory → SQLite로 sync하는 콜백."""
+    state = {"last_synced": 0}
+
+    def callback(study, trial):
+        if trial.state != optuna.trial.TrialState.COMPLETE:
+            return
+        completed = sum(
+            1 for t in study.get_trials(deepcopy=False)
+            if t.state == optuna.trial.TrialState.COMPLETE
+        )
+        if completed - state["last_synced"] >= sync_every:
+            _sync_inmemory_to_sqlite(in_mem_storage, db_path, exp_id, verbose=True)
+            state["last_synced"] = completed
+
+    return callback
+
+
+# ═════════════════════════════════════════════════════════════
 # E2E Optimization (메인)
 # ═════════════════════════════════════════════════════════════
 def run_e2e_optimization(
@@ -658,6 +763,10 @@ def run_e2e_optimization(
     agg_funcs=None,
     top_k_range=(50, 500),
     top_k_fixed=200,
+    clf_filter_threshold_range=(0.05, 0.5),
+    clf_filter_threshold_fixed=0.5,
+    zero_clip_threshold_range=(0.0, 0.02),
+    zero_clip_threshold_fixed=0.0,
     clf_fixed=None,
     reg_fixed=None,
     unit_data_input=None,
@@ -684,6 +793,16 @@ def run_e2e_optimization(
         fs_optuna=True일 때 탐색 범위
     top_k_fixed : int
         fs_optuna=False일 때 고정 top_k
+    clf_filter_threshold_range : tuple
+        clf_filter=True일 때 threshold 탐색 범위 (Optuna)
+    clf_filter_threshold_fixed : float
+        clf_filter=True이지만 탐색을 끄고 고정 임계값을 쓸 때 사용
+        (현재는 reg_optuna=False & clf_filter=True 조합의 폴백 값으로 사용)
+    zero_clip_threshold_range : tuple
+        zero_clip=True일 때 threshold 탐색 범위 (Optuna)
+        예측값 < threshold → 0 으로 치환
+    zero_clip_threshold_fixed : float
+        zero_clip=True이지만 탐색을 끄고 고정값을 쓸 때 사용 (no-optuna 폴백)
     clf_fixed, reg_fixed : dict, optional
     unit_data_input : dict, optional
         input_level='unit'일 때 외부에서 주입
@@ -757,12 +876,22 @@ def run_e2e_optimization(
             cached["unit_data"], sel, default_reg, reg_model,
             n_folds, reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            clf_filter_threshold=clf_filter_threshold_fixed,
         )
         if cfg["reg_level"] == "position":
             reg_result, agg_ud = _die_pred_to_unit(cached["unit_data"], reg_result)
+            y_train_for_clip = agg_ud["train"][TARGET_COL].values
             y_val = agg_ud["val"][TARGET_COL].values
         else:
+            y_train_for_clip = cached["unit_data"]["train"][TARGET_COL].values
             y_val = cached["unit_data"]["val"][TARGET_COL].values
+
+        # zero_clip: no-optuna 경로 → 고정값 사용
+        if cfg["zero_clip"]:
+            reg_result = _apply_zero_clip(
+                reg_result, y_train_for_clip, zero_clip_threshold_fixed
+            )
+
         val_rmse_score = rmse(y_val, reg_result["val_pred"])
         print(f"Val RMSE: {val_rmse_score:.6f}")
 
@@ -829,15 +958,42 @@ def run_e2e_optimization(
             reg_params = get_default_params(reg_model, "reg")
             reg_params.update(reg_fixed)
 
+        # clf_filter_threshold: clf_filter=True일 때만 탐색
+        if cfg["clf_filter"]:
+            clf_filter_threshold = trial.suggest_float(
+                "clf_filter_threshold",
+                clf_filter_threshold_range[0],
+                clf_filter_threshold_range[1],
+                step=0.05,
+            )
+        else:
+            clf_filter_threshold = clf_filter_threshold_fixed
+
         reg_result = _run_reg_oof(
             unit_data, selected_cols, reg_params, reg_model,
             n_folds, reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            clf_filter_threshold=clf_filter_threshold,
         )
 
         # ── ⑤ RMSE ──
         if cfg["reg_level"] == "position":
-            reg_result, _ = _die_pred_to_unit(unit_data, reg_result)
+            reg_result, agg_ud_for_clip = _die_pred_to_unit(unit_data, reg_result)
+            y_train_for_clip = agg_ud_for_clip["train"][TARGET_COL].values
+        else:
+            y_train_for_clip = unit_data["train"][TARGET_COL].values
+
+        # zero_clip: zero_clip=True일 때만 탐색
+        if cfg["zero_clip"]:
+            zero_clip_threshold = trial.suggest_float(
+                "zero_clip_threshold",
+                zero_clip_threshold_range[0],
+                zero_clip_threshold_range[1],
+                step=0.001,
+            )
+            reg_result = _apply_zero_clip(
+                reg_result, y_train_for_clip, zero_clip_threshold
+            )
 
         oof_rmse_score = reg_result["train_rmse"]
         trial.set_user_attr("train_rmse", oof_rmse_score)
@@ -886,6 +1042,10 @@ def run_e2e_optimization(
     print(f"N Features    : {best.user_attrs['n_features']}")
     if "top_k" in best.params:
         print(f"Top-K         : {best.params['top_k']}")
+    if "clf_filter_threshold" in best.params:
+        print(f"CLF filter th : {best.params['clf_filter_threshold']:.3f}")
+    if "zero_clip_threshold" in best.params:
+        print(f"Zero clip th  : {best.params['zero_clip_threshold']:.4f}")
     print(f"{'=' * 60}")
 
     return {
@@ -917,6 +1077,8 @@ def rerun_best_trial(
     imbalance_method="scale_pos_weight",
     agg_funcs=None,
     top_k_fixed=200,
+    clf_filter_threshold_fixed=0.5,
+    zero_clip_threshold_fixed=0.0,
     clf_fixed=None,
     reg_fixed=None,
     unit_data_input=None,
@@ -1008,12 +1170,20 @@ def rerun_best_trial(
         reg_params = get_default_params(reg_model, "reg")
         reg_params.update(reg_fixed)
 
+    # clf_filter_threshold 복원: best_params에 있으면 우선, 없으면 fixed
+    clf_filter_threshold = best_params.get(
+        "clf_filter_threshold", clf_filter_threshold_fixed
+    )
+    if cfg["clf_filter"]:
+        print(f"Rerun clf_filter_threshold: {clf_filter_threshold}")
+
     if mode == "single":
         print(f"Rerun REG: {reg_model}, features={len(selected_cols)}, mode=single (es_holdout={es_holdout})")
         reg_result = _run_reg_single(
             unit_data, selected_cols, reg_params, reg_model,
             reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            clf_filter_threshold=clf_filter_threshold,
             es_holdout=es_holdout,
         )
     else:
@@ -1022,6 +1192,7 @@ def rerun_best_trial(
             unit_data, selected_cols, reg_params, reg_model,
             n_folds, reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            clf_filter_threshold=clf_filter_threshold,
         )
 
     # position 모드: die → unit 집계
@@ -1029,6 +1200,17 @@ def rerun_best_trial(
         reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
         # CSV용으로 unit_data를 unit-level로 교체
         unit_data = agg_unit_data
+
+    # zero_clip: best_params에 있으면 우선, 없으면 fixed
+    if cfg["zero_clip"]:
+        zero_clip_threshold = best_params.get(
+            "zero_clip_threshold", zero_clip_threshold_fixed
+        )
+        print(f"Rerun zero_clip_threshold: {zero_clip_threshold}")
+        y_train_for_clip = unit_data["train"][TARGET_COL].values
+        reg_result = _apply_zero_clip(
+            reg_result, y_train_for_clip, zero_clip_threshold
+        )
 
     oof_rmse_score = reg_result["train_rmse"]
     print(f"Rerun OOF RMSE: {oof_rmse_score:.6f}")
@@ -1298,6 +1480,10 @@ def run_e2e_optimization_with_pp(
     imbalance_method="scale_pos_weight",
     top_k_range=(50, 500),
     top_k_fixed=200,
+    clf_filter_threshold_range=(0.05, 0.5),
+    clf_filter_threshold_fixed=0.5,
+    zero_clip_threshold_range=(0.0, 0.02),
+    zero_clip_threshold_fixed=0.0,
     clf_fixed=None,
     reg_fixed=None,
     use_sampling=False,
@@ -1340,6 +1526,14 @@ def run_e2e_optimization_with_pp(
     clf_early_stop, reg_early_stop : int
     label_col, imbalance_method : str
     top_k_range, top_k_fixed : FS 탐색 범위 / 고정 값
+    clf_filter_threshold_range : tuple
+        clf_filter=True일 때 threshold 탐색 범위 (Optuna)
+    clf_filter_threshold_fixed : float
+        clf_filter=False일 때 무시. 폴백용 고정값
+    zero_clip_threshold_range : tuple
+        zero_clip=True일 때 후처리 threshold 탐색 범위
+    zero_clip_threshold_fixed : float
+        zero_clip=True이지만 탐색을 끄고 고정값을 쓸 때 사용
     clf_fixed, reg_fixed : dict, optional
         탐색에서 제외하고 고정할 파라미터
     use_sampling, sample_frac : bool, float
@@ -1435,15 +1629,42 @@ def run_e2e_optimization_with_pp(
             reg_params = get_default_params(reg_model, "reg")
             reg_params.update(reg_fixed)
 
+        # clf_filter_threshold: clf_filter=True일 때만 탐색
+        if cfg["clf_filter"]:
+            clf_filter_threshold = trial.suggest_float(
+                "clf_filter_threshold",
+                clf_filter_threshold_range[0],
+                clf_filter_threshold_range[1],
+                step=0.05,
+            )
+        else:
+            clf_filter_threshold = clf_filter_threshold_fixed
+
         reg_result = _run_reg_oof(
             unit_data, selected_cols, reg_params, reg_model,
             n_folds, reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            clf_filter_threshold=clf_filter_threshold,
         )
 
         # ── ⑤ RMSE ──
         if cfg["reg_level"] == "position":
-            reg_result, _ = _die_pred_to_unit(unit_data, reg_result)
+            reg_result, agg_ud_for_clip = _die_pred_to_unit(unit_data, reg_result)
+            y_train_for_clip = agg_ud_for_clip["train"][TARGET_COL].values
+        else:
+            y_train_for_clip = unit_data["train"][TARGET_COL].values
+
+        # zero_clip: zero_clip=True일 때만 탐색
+        if cfg["zero_clip"]:
+            zero_clip_threshold = trial.suggest_float(
+                "zero_clip_threshold",
+                zero_clip_threshold_range[0],
+                zero_clip_threshold_range[1],
+                step=0.001,
+            )
+            reg_result = _apply_zero_clip(
+                reg_result, y_train_for_clip, zero_clip_threshold
+            )
 
         oof_rmse_score = reg_result["train_rmse"]
         trial.set_user_attr("train_rmse", oof_rmse_score)
@@ -1484,11 +1705,37 @@ def run_e2e_optimization_with_pp(
     # ── Study 실행 ──
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    # SQLite storage (매 trial 자동 저장)
+    # Storage: Local은 매 trial 자동 SQLite 저장, Colab은 10 trial마다 sync
+    db_sync_callback = None
+    inmem_storage_ref = None
     if db_path:
         import os as _os_db
-        _os_db.makedirs(_os_db.path.dirname(db_path), exist_ok=True)
-        storage = f"sqlite:///{db_path}"
+        _db_dir = _os_db.path.dirname(db_path)
+        if _db_dir:
+            _os_db.makedirs(_db_dir, exist_ok=True)
+
+        if ENV == "colab" and exp_id:
+            # in-memory에서 학습 → 10 trial마다 SQLite로 sync (Drive I/O 비용 절감)
+            inmem_storage_ref = optuna.storages.InMemoryStorage()
+            storage = inmem_storage_ref
+            # 기존 SQLite가 있으면 in-memory로 미리 로드 (warm start 데이터 보존)
+            if _os_db.path.exists(db_path):
+                _disk_url = f"sqlite:///{db_path}"
+                try:
+                    optuna.copy_study(
+                        from_study_name=exp_id,
+                        from_storage=_disk_url,
+                        to_storage=inmem_storage_ref,
+                        to_study_name=exp_id,
+                    )
+                    print(f"[Colab] 기존 DB에서 trial 로드 완료: {db_path}")
+                except (KeyError, Exception) as _e:
+                    pass
+            db_sync_callback = _make_db_sync_callback(
+                inmem_storage_ref, db_path, exp_id, sync_every=10
+            )
+        else:
+            storage = f"sqlite:///{db_path}"
     else:
         storage = None
     study_name = exp_id if db_path else None
@@ -1529,6 +1776,8 @@ def run_e2e_optimization_with_pp(
     if csv_path:
         os.makedirs(os.path.dirname(csv_path) if os.path.dirname(csv_path) else ".", exist_ok=True)
         all_callbacks.append(_make_trial_csv_callback(csv_path, exp_id))
+    if db_sync_callback is not None:
+        all_callbacks.append(db_sync_callback)
 
     study.optimize(
         objective,
@@ -1537,6 +1786,10 @@ def run_e2e_optimization_with_pp(
         gc_after_trial=True,
         callbacks=all_callbacks,
     )
+
+    # Colab: 마지막 sync 이후 잔여 trial을 디스크로 최종 동기화
+    if inmem_storage_ref is not None and db_path and exp_id:
+        _sync_inmemory_to_sqlite(inmem_storage_ref, db_path, exp_id, verbose=True)
 
     # ── 결과 요약 ──
     all_completed = [
@@ -1563,6 +1816,10 @@ def run_e2e_optimization_with_pp(
     print(f"Best agg_funcs: {best.user_attrs.get('agg_funcs')}")
     if "top_k" in best.params:
         print(f"Top-K         : {best.params['top_k']}")
+    if "clf_filter_threshold" in best.params:
+        print(f"CLF filter th : {best.params['clf_filter_threshold']:.3f}")
+    if "zero_clip_threshold" in best.params:
+        print(f"Zero clip th  : {best.params['zero_clip_threshold']:.4f}")
     best_saved = best.user_attrs.get('saved_at', '?')
     print(f"Best trial at : {best_saved}")
     print(f"{'=' * 60}")
@@ -1597,6 +1854,8 @@ def rerun_best_trial_with_pp(
     label_col="label_bin",
     imbalance_method="scale_pos_weight",
     top_k_fixed=200,
+    clf_filter_threshold_fixed=0.5,
+    zero_clip_threshold_fixed=0.0,
     clf_fixed=None,
     reg_fixed=None,
     use_sampling=False,
@@ -1699,12 +1958,20 @@ def rerun_best_trial_with_pp(
         reg_params = get_default_params(reg_model, "reg")
         reg_params.update(reg_fixed)
 
+    # clf_filter_threshold 복원: best_params에 있으면 우선, 없으면 fixed
+    clf_filter_threshold = best_params.get(
+        "clf_filter_threshold", clf_filter_threshold_fixed
+    )
+    if cfg["clf_filter"]:
+        print(f"Rerun clf_filter_threshold: {clf_filter_threshold}")
+
     if mode == "single":
         print(f"Rerun REG: {reg_model}, features={len(selected_cols)}, mode=single (es_holdout={es_holdout})")
         reg_result = _run_reg_single(
             unit_data, selected_cols, reg_params, reg_model,
             reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            clf_filter_threshold=clf_filter_threshold,
             es_holdout=es_holdout,
         )
     else:
@@ -1713,12 +1980,24 @@ def rerun_best_trial_with_pp(
             unit_data, selected_cols, reg_params, reg_model,
             n_folds, reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
+            clf_filter_threshold=clf_filter_threshold,
         )
 
     # position 모드: die → unit 집계
     if cfg["reg_level"] == "position":
         reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
         unit_data = agg_unit_data
+
+    # zero_clip: best_params에 있으면 우선, 없으면 fixed
+    if cfg["zero_clip"]:
+        zero_clip_threshold = best_params.get(
+            "zero_clip_threshold", zero_clip_threshold_fixed
+        )
+        print(f"Rerun zero_clip_threshold: {zero_clip_threshold}")
+        y_train_for_clip = unit_data["train"][TARGET_COL].values
+        reg_result = _apply_zero_clip(
+            reg_result, y_train_for_clip, zero_clip_threshold
+        )
 
     oof_rmse_score = reg_result["train_rmse"]
     print(f"Rerun OOF RMSE: {oof_rmse_score:.6f}")

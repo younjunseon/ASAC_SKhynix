@@ -12,19 +12,69 @@ from .model_zoo import DEVICE
 
 
 def lgbm_space(trial, prefix=""):
-    """LightGBM 탐색 공간"""
+    """LightGBM 탐색 공간 — prefix에 따라 clf/reg 다른 범위 사용
+
+    범위는 study `3-199-005` (LGBM Two-Stage, 501 trials, best RMSE=0.005658)
+    상위 100 trial 분포 기반으로 재조정. clf/reg가 정반대 영역을 선호하므로
+    prefix로 분기. 양봉(bimodal)인 영역은 보존.
+    """
     p = prefix
+
+    if p == "clf_":
+        # Stage1 분류기: 깊고 큰 트리 + 약한 정규화 선호
+        # (top100: n_est 2135~2954, num_leaves 187~256, max_depth 10~12)
+        return dict(
+            n_estimators=trial.suggest_int(f"{p}n_estimators", 1500, 3000),
+            learning_rate=trial.suggest_float(f"{p}learning_rate", 0.008, 0.05, log=True),
+            num_leaves=trial.suggest_int(f"{p}num_leaves", 128, 320),
+            max_depth=trial.suggest_int(f"{p}max_depth", 8, 14),
+            min_child_samples=trial.suggest_int(f"{p}min_child_samples", 5, 50),
+            subsample=trial.suggest_float(f"{p}subsample", 0.75, 1.0),
+            colsample_bytree=trial.suggest_float(f"{p}colsample_bytree", 0.7, 1.0),
+            reg_alpha=trial.suggest_float(f"{p}reg_alpha", 1e-6, 1e-2, log=True),
+            reg_lambda=trial.suggest_float(f"{p}reg_lambda", 1e-4, 1.0, log=True),
+            min_split_gain=trial.suggest_float(f"{p}min_split_gain", 1e-4, 0.2, log=True),
+            path_smooth=trial.suggest_float(f"{p}path_smooth", 0.0, 25.0),
+            random_state=SEED,
+            n_jobs=-1,
+            verbose=-1,
+            device=DEVICE,
+        )
+
+    if p == "reg_":
+        # Stage2 회귀기: 더 큰 num_leaves + 강한 정규화(reg_alpha) 선호
+        # 상한 포화 → 확장: num_leaves 256→384, reg_alpha 10→30, min_child_samples 300→400
+        # 양봉 → 보존: colsample_bytree(0.2~0.3 vs 0.9~1.0), path_smooth(0~5 vs 30~38)
+        return dict(
+            n_estimators=trial.suggest_int(f"{p}n_estimators", 100, 1500),
+            learning_rate=trial.suggest_float(f"{p}learning_rate", 0.005, 0.1, log=True),
+            num_leaves=trial.suggest_int(f"{p}num_leaves", 64, 384),
+            max_depth=trial.suggest_int(f"{p}max_depth", 5, 14),
+            min_child_samples=trial.suggest_int(f"{p}min_child_samples", 5, 400),
+            subsample=trial.suggest_float(f"{p}subsample", 0.6, 0.9),
+            colsample_bytree=trial.suggest_float(f"{p}colsample_bytree", 0.1, 1.0),
+            reg_alpha=trial.suggest_float(f"{p}reg_alpha", 1e-3, 30.0, log=True),
+            reg_lambda=trial.suggest_float(f"{p}reg_lambda", 1e-7, 1e-2, log=True),
+            min_split_gain=trial.suggest_float(f"{p}min_split_gain", 1e-9, 1e-5, log=True),
+            path_smooth=trial.suggest_float(f"{p}path_smooth", 0.0, 50.0),
+            random_state=SEED,
+            n_jobs=-1,
+            verbose=-1,
+            device=DEVICE,
+        )
+
+    # 단일 모델(non-Two-Stage) 또는 알 수 없는 prefix: 기본 wide 범위
     return dict(
         n_estimators=trial.suggest_int(f"{p}n_estimators", 100, 3000),
         learning_rate=trial.suggest_float(f"{p}learning_rate", 0.005, 0.3, log=True),
-        num_leaves=trial.suggest_int(f"{p}num_leaves", 8, 256),
-        max_depth=trial.suggest_int(f"{p}max_depth", 3, 12),
-        min_child_samples=trial.suggest_int(f"{p}min_child_samples", 5, 300),
+        num_leaves=trial.suggest_int(f"{p}num_leaves", 8, 384),
+        max_depth=trial.suggest_int(f"{p}max_depth", 3, 14),
+        min_child_samples=trial.suggest_int(f"{p}min_child_samples", 5, 400),
         subsample=trial.suggest_float(f"{p}subsample", 0.5, 1.0),
         colsample_bytree=trial.suggest_float(f"{p}colsample_bytree", 0.1, 1.0),
-        reg_alpha=trial.suggest_float(f"{p}reg_alpha", 1e-8, 10.0, log=True),
+        reg_alpha=trial.suggest_float(f"{p}reg_alpha", 1e-8, 30.0, log=True),
         reg_lambda=trial.suggest_float(f"{p}reg_lambda", 1e-8, 10.0, log=True),
-        min_split_gain=trial.suggest_float(f"{p}min_split_gain", 1e-8, 1.0, log=True),
+        min_split_gain=trial.suggest_float(f"{p}min_split_gain", 1e-9, 1.0, log=True),
         path_smooth=trial.suggest_float(f"{p}path_smooth", 0.0, 50.0),
         random_state=SEED,
         n_jobs=-1,
@@ -118,23 +168,26 @@ SEARCH_SPACES = {
 
 # ── 클리닝 후보 ───────────────────────────────────────────────
 PP_CLEAN_CANDIDATES = {
-    "const_threshold":     [1e-8, 1e-6, 1e-4],
-    "missing_threshold":   [0.25, 0.50, 0.75, 0.90],
-    "remove_duplicates":   [True, False],
-    "corr_threshold":      [0.90, 0.95, 0.99, None],
-    "corr_keep_by":        ["std", "target_corr"],
-    "add_indicator":       [True, False],
-    "indicator_threshold": [0.01, 0.05, 0.10],
-    "imputation_method":   ["median", "knn", "spatial"],
-    "knn_neighbors":       [3, 5, 10],
-    "spatial_max_dist":    [1.0, 2.0, 3.0],
+    "const_threshold":            [1e-6],
+    "missing_threshold":          [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    "remove_duplicates":          [True],
+    "corr_threshold":             [0.90, 0.94, 0.98],
+    "corr_keep_by":               ["std", "target_corr"],
+    "add_indicator":              [True, False],
+    "indicator_threshold":        [0.01, 0.05, 0.10, 0.15, 0.20, 0.25],
+    "imputation_method":          ["spatial"],
+    "knn_neighbors":              [3, 5, 10],
+    "spatial_max_dist":           [1.0, 2.0, 3.0, 4.0, 5.0],
+    # imputation 후 2차 corr 제거 (인공 상관 제거 목적, 보수적)
+    "post_impute_corr_threshold": [0.97, 0.98, 0.99],
+    "post_impute_corr_keep_by":   ["std", "target_corr"],
 }
 
 # ── 이상치 후보 ───────────────────────────────────────────────
 PP_OUTLIER_CANDIDATES = {
-    "method":         ["winsorize", "iqr_clip", "grubbs", "lot_local", "none"],
-    "lower_pct":      [0.0, 0.005, 0.01],
-    "upper_pct":      [0.99, 0.995, 0.999, 1.0],
+    "method":         ["winsorize"], #,"grubbs", "lot_local", "none", "iqr_clip"],
+    "lower_pct":      [0.0],
+    "upper_pct":      [0.99],
     "iqr_multiplier": [1.5, 3.0, 5.0],
 }
 
@@ -169,6 +222,8 @@ CLEANING_KEYS = [
     "imputation_method",
     "knn_neighbors",
     "spatial_max_dist",
+    "post_impute_corr_threshold",
+    "post_impute_corr_keep_by",
 ]
 
 OUTLIER_KEYS = [
