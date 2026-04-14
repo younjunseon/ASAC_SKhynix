@@ -296,7 +296,7 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
         mask = np.ones(len(y_train), dtype=bool)
 
     reg = None  # fallback: 학습 실패 시 None
-    if mask.sum() == 0:
+    if mask.sum() < 2:  # LightGBM 최소 2샘플 요구
         oof_reg = np.zeros(len(X_train))
         val_reg = np.zeros(len(X_val))
         test_reg = np.zeros(len(X_test))
@@ -404,14 +404,14 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         if use_clf and not clf_filter:
             # two-stage: Y>0인 샘플만 학습
             pos_tr = y_train[tr_idx] > 0
-            if pos_tr.sum() == 0:
+            if pos_tr.sum() < 2:  # LightGBM 최소 2샘플 요구
                 skipped_folds += 1
                 continue
             X_fit, y_fit = X_train[tr_idx][pos_tr], y_train[tr_idx][pos_tr]
         elif clf_filter and train_mask is not None:
             # clf_filter: 분류기가 1로 예측한 샘플만 학습
             tr_keep = train_mask[tr_idx]
-            if tr_keep.sum() == 0:
+            if tr_keep.sum() < 2:  # LightGBM 최소 2샘플 요구
                 skipped_folds += 1
                 continue
             X_fit, y_fit = X_train[tr_idx][tr_keep], y_train[tr_idx][tr_keep]
@@ -443,7 +443,7 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
     if skipped_folds > 0:
         warnings.warn(
             f"[_run_reg_oof] {skipped_folds}/{n_folds} fold(s) skipped due to "
-            f"empty training samples (pos_tr or tr_keep == 0). "
+            f"insufficient training samples (pos_tr or tr_keep < 2). "
             f"OOF for skipped folds filled with fallback value "
             f"({fallback_val:.6f} = mean of y>0).",
             stacklevel=2,
@@ -1195,6 +1195,14 @@ def rerun_best_trial(
             clf_filter_threshold=clf_filter_threshold,
         )
 
+    # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
+    # _die_pred_to_unit / _apply_zero_clip이 reg_result를 교체하기 전에 먼저 보관.
+    if mode == "kfold":
+        reg_models = reg_result.get("fold_models", [])
+    else:
+        _single_model = reg_result.get("model")
+        reg_models = [_single_model] if _single_model is not None else []
+
     # position 모드: die → unit 집계
     if cfg["reg_level"] == "position":
         reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
@@ -1226,13 +1234,6 @@ def rerun_best_trial(
         print(f"Rerun Val RMSE: {val_rmse_score:.6f}  (참고용)")
     except Exception:
         pass
-
-    # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
-    if mode == "kfold":
-        reg_models = reg_result.get("fold_models", [])
-    else:
-        _single_model = reg_result.get("model")
-        reg_models = [_single_model] if _single_model is not None else []
 
     result = {
         "unit_data": unit_data,
@@ -1980,6 +1981,14 @@ def rerun_best_trial_with_pp(
             clf_filter_threshold=clf_filter_threshold,
         )
 
+    # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
+    # _die_pred_to_unit / _apply_zero_clip이 reg_result를 교체하기 전에 먼저 보관.
+    if mode == "kfold":
+        reg_models = reg_result.get("fold_models", [])
+    else:
+        _single_model = reg_result.get("model")
+        reg_models = [_single_model] if _single_model is not None else []
+
     # position 모드: die → unit 집계
     if cfg["reg_level"] == "position":
         reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
@@ -2010,13 +2019,6 @@ def rerun_best_trial_with_pp(
         print(f"Rerun Val RMSE: {val_rmse_score:.6f}  (참고용)")
     except Exception:
         pass
-
-    # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
-    if mode == "kfold":
-        reg_models = reg_result.get("fold_models", [])
-    else:
-        _single_model = reg_result.get("model")
-        reg_models = [_single_model] if _single_model is not None else []
 
     result = {
         "unit_data": unit_data,
