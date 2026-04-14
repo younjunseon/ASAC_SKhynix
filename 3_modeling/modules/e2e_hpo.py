@@ -1705,7 +1705,7 @@ def run_e2e_optimization_with_pp(
     # ── Study 실행 ──
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    # Storage: Local은 매 trial 자동 SQLite 저장, Colab은 10 trial마다 sync
+    # Storage: Local은 매 trial 자동 SQLite 저장, Colab은 in-memory로만 돌리고 최종에 한 번 저장
     db_sync_callback = None
     inmem_storage_ref = None
     if db_path:
@@ -1715,7 +1715,7 @@ def run_e2e_optimization_with_pp(
             _os_db.makedirs(_db_dir, exist_ok=True)
 
         if ENV == "colab" and exp_id:
-            # in-memory에서 학습 → 10 trial마다 SQLite로 sync (Drive I/O 비용 절감)
+            # Colab: in-memory에서만 학습, 중간 sync 없음 (study.optimize 종료 후 1회 저장)
             inmem_storage_ref = optuna.storages.InMemoryStorage()
             storage = inmem_storage_ref
             # 기존 SQLite가 있으면 in-memory로 미리 로드 (warm start 데이터 보존)
@@ -1731,9 +1731,6 @@ def run_e2e_optimization_with_pp(
                     print(f"[Colab] 기존 DB에서 trial 로드 완료: {db_path}")
                 except (KeyError, Exception) as _e:
                     pass
-            db_sync_callback = _make_db_sync_callback(
-                inmem_storage_ref, db_path, exp_id, sync_every=10
-            )
         else:
             storage = f"sqlite:///{db_path}"
     else:
