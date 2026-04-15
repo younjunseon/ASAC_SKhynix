@@ -170,7 +170,7 @@ study.optimize(objective, n_trials=100)
 | 균형잡힌 접근 | Step 1 → Boruta → Optuna HPO |
 | 최고 성능 추구 | Step 1 → Boruta + Null Importance → Optuna HPO → Permutation 검증 |
 
-## EDA 결과 요약 (2026-03-29)
+## EDA 결과 요약 (2026-03-29, 2026-04-15 전처리 후 재검증 반영)
 
 ### 데이터 구조 확인
 - 모든 unit은 정확히 **4개 die**로 구성 (position 1~4, 각 43,745개 균등)
@@ -199,6 +199,9 @@ study.optimize(objective, n_trials=100)
 - |r| > 0.1인 feature: **0개**, |r| > 0.05: **0개**
 - 평균 |r| = 0.011
 - **시사점**: 단일 feature로는 예측 불가 → feature 간 상호작용과 비선형 관계가 핵심
+- **전처리 전후 변화 (2026-04-15 재검증)**: 향상 49.2%, 악화 50.8%, 평균 Δ=+0.00006, max\|r\| 0.0372 → 0.0374. **전처리 효과가 Pearson 상관에 사실상 중립** — 신호 자체가 비선형이라 전처리로는 선형 상관이 올라가지 않음
+- **Stage 1/Stage 2 피처 분리 필요성**: 전체 기준 top feature들이 Y>0 서브셋에서는 r≈0으로 수렴 (X1083: 전체 -0.037 → Y>0 -0.002, X739: 전체 +0.037 → Y>0 -0.008). 전체 상관의 대부분이 "Y=0 vs Y>0 구분"에서만 발생하며 Y>0 내부 크기와는 무관 → **Stage 1(분류)과 Stage 2(회귀)에서 서로 다른 피처 세트를 써야 함**
+- **CV 집계 재평가 (2026-04-15)**: 원본 CV max\|r\|=0.147은 X375 단 1개 피처(상수 feature로 전처리에서 제거됨)가 만든 수치. 전처리 후 CV max\|r\|=0.030으로 mean(0.037)보다 **낮음**. "CV가 die 집계의 핵심"이라는 원본 해석은 **폐기**
 
 ### 이상치 / 스케일
 - IQR 기준 이상치 5% 초과: 167개, 10% 초과: 62개
@@ -244,9 +247,13 @@ EDA 결과를 바탕으로 도출한 end-to-end 전략. 핵심은 **(1) die→un
 
 > **Pre-optimization 원칙** (논문 3-3 근거, 7.9%p 향상): 이상치/노이즈 처리는 **반드시 die 레벨에서 먼저 수행**한 후 unit 레벨로 집계한다. 집계 후 처리하면 die 간 노이즈가 집계 통계에 오염됨.
 
-### Stage 4: Die → Unit 집계 (Feature Engineering 핵심)
+### Stage 4: Die → Unit 집계 (보조 옵션 — position pivot 우선)
 
-단일 feature 상관이 max 0.037로 극도로 낮으므로, **집계 통계량의 다양성**이 성능을 좌우한다. EDA Phase 26에서 11종 집계 비교 결과, **CV(변동계수)가 |r|=0.147로 유일하게 |r|>0.05 달성** — mean(0.037)의 4배.
+> **실험 결과 (2026-04-15)**: position pivot(`reg_level='position'`, die 4개를 unit 행에 옆으로 펼치는 방식)이 대부분의 조합에서 unit 집계보다 우수했다. 따라서 이 섹션의 집계 전략(mean/std/CV 등)은 **보조 옵션**으로 취급하며, 1·2차 funnel은 position pivot을 기본으로 사용한다. 아래 표와 본문은 향후 재비교가 필요할 때를 위한 카탈로그로 유지한다.
+
+단일 feature 상관이 max 0.037로 극도로 낮으므로, **집계 통계량의 다양성**이 성능을 좌우한다.
+
+> **⚠ 수정 (2026-04-15, eda_after.ipynb 기준)**: 원본 EDA Phase 26의 **CV max\|r\|=0.1473은 X375 단 1개 피처가 만든 수치였고, X375는 상수 feature로 전처리에서 제거됐다**. 전처리 후 실제 CV max\|r\|=0.030으로 mean(0.037)보다 **오히려 낮다**. "CV가 die 집계의 핵심"이라는 원본 해석은 폐기. 전처리 후 집계 방식 간 차이가 미미하므로 **9종 집계를 균등 생성한 뒤 Feature Selection에서 자연선별**하는 전략이 합리적.
 
 ```
 die-level feature (4 dies per unit)
@@ -254,23 +261,42 @@ die-level feature (4 dies per unit)
 unit-level aggregated features
 ```
 
-| 집계 함수 | 설명 | 기대 효과 | EDA 검증 (max\|r\|) |
-|-----------|------|----------|-------------------|
-| mean | 평균 | 기본 중심 경향 | 0.0372 |
-| std | 표준편차 | die 간 편차 → 불균일성 지표 | 0.0317 |
-| min, max | 최소/최대 | 극단 die 포착 | 0.0372 / 0.0362 |
-| max - min (range) | 범위 | die 간 산포 | 0.0299 |
-| median | 중앙값 | robust 중심 경향 | 0.0377 |
-| Q25, Q75 | 사분위수 | die 분포의 하위/상위 경향 | 0.0390 / 0.0383 |
-| **CV** | **std/\|mean\|** | **scale-free 변동률 → 핵심** | **0.1473** |
-| skew | 왜도 | die 분포 비대칭 (die=4 불안정) | 0.0212 |
-| kurtosis | 첨도 | die 분포 꼬리 (die=4 불안정) | 0.0276 |
+| 집계 함수 | 설명 | 기대 효과 | 원본 EDA max\|r\| | **전처리 후 max\|r\|** |
+|-----------|------|----------|-------------------|----------------------|
+| mean | 평균 | 기본 중심 경향 | 0.0372 | 0.037 |
+| std | 표준편차 | die 간 편차 → 불균일성 지표 | 0.0317 | ~0.031 |
+| min, max | 최소/최대 | 극단 die 포착 | 0.0372 / 0.0362 | ~0.036 |
+| max - min (range) | 범위 | die 간 산포 | 0.0299 | ~0.030 |
+| median | 중앙값 | robust 중심 경향 | 0.0377 | 0.038 |
+| Q25, Q75 | 사분위수 | die 분포의 하위/상위 경향 | 0.0390 / 0.0383 | 0.039 / 0.039 |
+| CV | std/\|mean\| | scale-free 변동률 | ~~0.1473~~ (X375 단일 효과) | **0.030** (mean보다 낮음) |
+| skew | 왜도 | die 분포 비대칭 (die=4 불안정) | 0.0212 | — |
+| kurtosis | 첨도 | die 분포 꼬리 (die=4 불안정) | 0.0276 | — |
 
-- **기본 9종**: mean + std + min + max + range + median + Q25 + Q75 + CV
+- **기본 9종**: mean + std + min + max + range + median + Q25 + Q75 + CV (CV는 핵심이 아닌 **보조**로 재분류)
 - skew/kurtosis는 die=4에서 불안정하므로 선택적 포함
 - 960개 feature × 9개 통계 = **~8,640개** unit-level feature 생성
 - position별 feature도 고려: position 1/2/3/4 각각의 값을 별도 컬럼으로 (960 × 4 = 3,840개 추가 가능)
-- CV 핵심 feature: X375(0.147), X384(0.130) — mean으로는 무상관이나 die 간 변동률이 target과 강하게 연결
+- 전처리 후에는 **어떤 집계 방식도 단독으로 우세하지 않음**. 9종 균등 생성 + FS 선별이 원칙
+- 단, 집계 방식별 최적 feature는 존재: max가 최적인 feature 159개(16.3%), Q75 최적 136개(13.9%) — 극단 die 값이 평균보다 target과 더 잘 연결되는 feature 그룹 존재
+
+#### 대안 경로: 회귀 → 집계 (2026-04-15 추가)
+
+현재 파이프라인은 본질적으로 두 경로 중 하나의 선택이다.
+
+- **경로 1 (기본)**: **"집계 → 회귀"** — die feature를 unit 단위로 집계(또는 position pivot)한 뒤 unit-level로 회귀. 현재 `reg_level='position'`이 이 경로의 구현이며 1·2차 funnel 기본값
+- **경로 2 (실험)**: **"회귀 → 집계"** — die-level로 먼저 회귀하고(target = unit health를 4 die에 broadcast), 4개 per-die 예측을 unit 단위로 **가중 평균**하여 최종값 생성
+
+경로 2의 unit 집계 공식:
+
+```
+ŷ_unit = w1·ŷ_p1 + w2·ŷ_p2 + w3·ŷ_p3 + w4·ŷ_p4      (w1+w2+w3+w4 = 1)
+```
+
+- **가중치 w1~w4는 Optuna 탐색 대상**. Dirichlet 정규화(`w_i = raw_i / Σraw`) 또는 `w4 = 1 - w1 - w2 - w3`로 3개만 탐색
+- **장점**: 학습 샘플 4배(43K unit → 170K die), position별 중요도가 명시적 파라미터로 드러남, 후처리 단계에서 경로 1과 blend 가능
+- **단점**: 같은 unit 내 4 die가 target 공유 → IID 가정 약화. CV fold 분할은 반드시 **unit 단위**로 수행하여 leakage 방지 필수
+- **적용 시점**: 2차 funnel 앙상블 베이스코드 구축 시 경로 1과 **병행 실험** (대체가 아니라 3번째 경로로 추가). 가중치 정밀 튜닝은 3차 funnel로 이관
 
 ### Stage 4.5: Wafer 메타 피처 엔지니어링 (run_wf_xy 활용)
 
@@ -468,6 +494,74 @@ Stage 2: 회귀 (Y>0인 샘플만)
 | 5 | Stage 7-D (유망 모델 HPO) | 하이퍼파라미터 최적화 → RMSE 개선 | 4-1 |
 | 6 | Stage 7-B (Two-Stage + **Custom Loss + SMOTE**) | zero-inflated 대응 → RMSE 개선 | 1-4, 2-1, 2-2 |
 | 7 | Stage 7-C (Stacking/Voting) + Stage 8 (후처리) | 최종 성능 극대화 | 4-1 |
+
+### 실제 실행 Funnel (2026-04-15 갱신)
+
+위 Stage 1~7 카탈로그는 풀 옵션이며, 실제 실행은 아래 3-pass funnel로 진행한다. 1차에서 좁히고, 2차에서 모델 다양성·feature 정리·앙상블 베이스코드를 동시 확보하고, 3차에서 최종 1개 조합에 trial을 몰아 성능을 짜내는 구조다.
+
+#### 1차 — 전처리 스크리닝 (LGBM 단일, E2E Optuna)
+
+- **대상**: `PP_CLEAN × PP_OUTLIER × AGG_PRESETS` 카르테시안 (~60 조합)
+- **모델**: LGBM 단일 (결측·이상치·집계 축은 트리도 영향받으므로 단일 모델로 충분)
+- **설정**: `baseline.ipynb`, `run_clf=False`, `run_fs=False`, `reg_level='position'`
+- **산출**: 살아남은 전처리 상위 3~5개
+- **주의**: Optuna 기본 sampler(TPE)는 좋은 영역에 trial을 몰아주므로 60 조합이 균등 평가되지 않는다. 거르는 기준은 best RMSE 1개가 아니라 조합별 `(count, mean, std, min)`을 함께 보고 판단한다. 표본 5개 미만인 조합은 신뢰도 낮음
+- **현재 baseline.ipynb 상태 (2026-04-15 1차 실험 진행 중)**:
+  - `run_clf=False`, `run_fs=False` (둘 다 1·2차에서는 비활성)
+  - `reg_level='position'`
+  - `TARGET_TRANSFORM='none'`, `CLIP_Y_EXTREME=True`
+  - cell 6에서 `imputation='spatial'`, `outlier='winsorize'`로 사전 축소
+
+#### 2차 — 모델 다양성 + 불필요 feature 제거 + 앙상블 베이스코드
+
+- **모델**: LGBM(부스팅) + ExtraTrees(베깅) + ElasticNet(선형)
+- **선정 이유**: 아키텍처 다양성 확보 + 트리 importance 2종(LGBM gain, ET impurity) + ElasticNet 계수 기반 선형 시각의 자동 feature 제거
+- **입력 전처리**: 1차에서 살린 상위 N개 전처리 × 모델 3개 cross
+- **선형 모델 추가 전처리**: RobustScaler + log1p (LGBM/ET와는 별도 파이프라인). 이게 빠지면 "선형은 원래 약하네" 오해를 그대로 받는다 (1차에서 LGBM 친화 전처리만 살아남았을 가능성 보정용)
+- **ElasticNet HPO**: `alpha` + `l1_ratio` 동시 탐색 (`l1_ratio` 0.1~0.9, 0/1 양 끝 제외). 약신호(EDA max\|r\|=0.037) + 다중공선성 47쌍 데이터라 순수 Lasso(`l1_ratio=1`)는 위험하다. 약신호가 noise penalty에 다 0으로 가버리고, 상관 그룹에서 한 feature만 무작위로 살린다. Optuna가 고른 best `l1_ratio`가 한쪽으로 쏠리면 그 자체가 데이터의 L1/L2 선호 진단치
+- **Feature 제거 룰**: **3개 모델 모두 무관 판정한 feature만 제거** (교집합). 2/3 합의로 자르면 ElasticNet이 비선형 신호를 잘라낸 것을 진짜 무관으로 오해할 위험
+- **OOF 예측 CSV 저장 필수**: 3차에서 모델 재학습 없이 가중치 튜닝/Stacking에 재사용
+- **전처리 marginal 효과 측정**: 각 전처리 축(`outlier_method`, `imputation_method`, `scaling`)의 candidate에 `'none'`(passthrough)을 포함하여 Optuna가 ON/OFF를 동시 샘플링하게 한다. 분석 단계에서 축별 groupby 평균 RMSE로 marginal contribution 측정. 다른 축 교란이 의심되면 paired 비교(다른 축 고정 후 pivot)로 검증. **목적: "전처리 X가 좋다"가 아니라 "전처리 X가 안 하는 것보다 나은가"를 확인**
+- **산출**: 앙상블 베이스코드, 핵심 feature set, 전처리 × 모델 RMSE 매트릭스, 전처리별 marginal 효과
+
+**추가 작업 (2026-04-15 결정)** — 위 기본 구성에 아래 실험을 나란히 얹어 2차에서 함께 소화한다.
+
+1. **전처리 추가 candidate** (PP_CLEAN / PP_OUTLIER / PP_SCALING 축 확장)
+   - **다변량 이상치 점수 피처**: IsolationForest로 die-level anomaly score를 **컬럼으로 추가** (제거 아님). `outlier.py`에 `multivariate_anomaly_score()` 신규. 단일 |r| max=0.037 → 단변량 clip의 한계 보완. 트리 모델이 `score > τ` 분기로 자동 활용
+   - **Quantile Transformer**: `scaling.py`에 `quantile_scale()` 추가, `transform` candidate에 `'quantile'` 포함. Yeo-Johnson(파라메트릭)이 커버 못하는 `|skew|>10` feature 101개 대응. rank 기반이라 극단값도 자동 평탄화
+   - **die_x/die_y 제거 실험**: 전체 스캔 결과 **공간 패턴 feature 8개**(X708, X1056, X1059, X1072, X1073, X1075, X1076, X1077)가 이미 위치 정보를 담고 있음. `run_meta_features(die_coords=False)`를 candidate로 추가하여 중복 여부를 marginal 비교로 검증
+
+2. **경로 2 (회귀 → 집계) 실험** — Stage 4의 "대안 경로" 참조
+   - Die-level 학습 파이프라인을 2차 앙상블 베이스코드의 **한 경로로 추가**. 경로 1(position pivot)과 나란히 돌려 **OOF CSV를 각 경로별로 분리 저장**
+   - 2차에서는 가중치를 **균등(w1=w2=w3=w4=0.25)**으로 고정한 상태로 OOF를 뽑고, **정밀 튜닝은 3차에서 수행**
+   - CV fold는 반드시 `ufs_serial` 단위로 분할 (die 단위 분할 시 같은 unit의 4 die가 train/val에 섞여 leakage 발생)
+
+**추천 제외 (근거 있음, 재논의 불필요)**:
+- **공간 번들 신규 구현** — raw X에 이미 ring/sector/stripe 패턴이 들어 있음 (전체 스캔으로 확인). die_x/die_y 제거 실험으로 대체
+- **네이티브 결측 처리(NaN 유지)** — LGBM 단독은 가능하지만 ElasticNet이 수용 불가 → 앙상블 최종 파이프라인 호환 실패
+- **PIMP / Bootstrap Stability FS** — 사용자 자체 FS 계획(트리 importance + ElasticNet L1/L2 계수 기반 보수적 제거)으로 커버
+
+#### 3차 — 최종 1개 조합에서 성능 짜내기
+
+- 살아남은 (전처리 1개 + 모델 조합 1개)에 trial 크게 부여
+- **이 단계에서 검토할 옵션**: Two-Stage 활성화(`run_clf=True`), FS 활성화(`run_fs=True`), `target transform`, `zero_clip threshold` 재탐색
+- **앙상블**: 2차에서 저장한 OOF 예측에 가중치 튜닝 또는 Stacking
+- **EVAL_TEST 정책**: 성능 우선이므로 `True` 운용. peek-bias로 인한 test 과적합 위험은 인지하고, val/OOF와 test 차이를 모니터링
+- **포지션 가중치 정밀 튜닝**: 2차에서 저장한 경로 2(회귀→집계) OOF 예측에 대해 Optuna로 `w1~w4` 탐색(Dirichlet 정규화). 경로 1 단독 / 경로 2 단독 / 두 경로 blend 중 val RMSE 최소를 최종 선택
+
+#### 모듈 재사용
+
+1차 baseline에서 만든 [3_modeling/modules/](3_modeling/modules/) (`model_zoo`, `training`, `e2e_hpo`, `ensemble`)는 multi-model 구조로 설계되어 2차에서 그대로 재사용한다. ExtraTrees/ElasticNet은 `model_zoo`에 이미 등록되어 있고, `e2e_hpo.run_e2e_optimization()`은 `clf_model`/`reg_model` 파라미터를 받는다. `ensemble.py`에 voting/stacking이 구현되어 있어 OOF CSV만 모이면 동작한다.
+
+2차 진입 시 **기본 모듈** 작업은 3가지뿐이다 (위 "추가 작업" 블록은 별도로 얹는다).
+
+| # | 작업 | 위치 | 성격 |
+|---|------|------|------|
+| 1 | `elasticnet_space()` 함수 + `SEARCH_SPACES['elasticnet']` 등록 | `search_space.py` 끝부분 | 순수 추가 |
+| 2 | `PP_OUTLIER_CANDIDATES['method']`에 `'none'` 포함 | `baseline.ipynb` cell 6 (사용자가 이미 덮어쓰는 패턴) | 노트북만 수정 |
+| 3 | ElasticNet 전용 RobustScaler+log1p 전처리 | (a) `e2e_hpo.rerun_best_trial()` 안에 분기 1개 추가 / (b) 노트북에서 데이터 미리 변환 후 모듈 호출 | 둘 중 택1 |
+
+3번은 **1차 실험 종료 후 결정**한다. (a)는 깔끔하지만 `e2e_hpo.py`를 건드린다. (b)는 모듈 무수정으로 가능하지만 노트북에 변환 코드가 흩어진다. 2차 들어가기 직전에 1차 결과 보고 결정하면 충분하다.
 
 ---
 

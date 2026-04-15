@@ -1242,7 +1242,16 @@ def rerun_best_trial(
         reg_models = [_single_model] if _single_model is not None else []
 
     # position 모드: die → unit 집계
+    # die_data: SHAP/Permutation Importance 등 사후 분석용으로 die-level
+    # feature matrix (val/test) 를 slim copy 로 보관. agg 이후 unit_data는
+    # [KEY_COL, TARGET_COL] 만 남아 feature 컬럼이 사라지므로 미리 떠 둔다.
+    die_data = None
     if cfg["reg_level"] == "position":
+        _keep_cols = [KEY_COL, TARGET_COL] + list(selected_cols)
+        die_data = {}
+        for _split in ("val", "test"):
+            _cols = [c for c in _keep_cols if c in unit_data[_split].columns]
+            die_data[_split] = unit_data[_split][_cols].copy()
         reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
         # CSV용으로 unit_data를 unit-level로 교체
         unit_data = agg_unit_data
@@ -1275,6 +1284,7 @@ def rerun_best_trial(
 
     result = {
         "unit_data": unit_data,
+        "die_data": die_data,
         "selected_cols": selected_cols,
         "val_pred": reg_result["val_pred"],
         "test_pred": reg_result["test_pred"],
@@ -2038,7 +2048,16 @@ def rerun_best_trial_with_pp(
         reg_models = [_single_model] if _single_model is not None else []
 
     # position 모드: die → unit 집계
+    # die_data: SHAP/Permutation Importance 등 사후 분석용으로 die-level
+    # feature matrix (val/test) 를 slim copy 로 보관. agg 이후 unit_data는
+    # [KEY_COL, TARGET_COL] 만 남아 feature 컬럼이 사라지므로 미리 떠 둔다.
+    die_data = None
     if cfg["reg_level"] == "position":
+        _keep_cols = [KEY_COL, TARGET_COL] + list(selected_cols)
+        die_data = {}
+        for _split in ("val", "test"):
+            _cols = [c for c in _keep_cols if c in unit_data[_split].columns]
+            die_data[_split] = unit_data[_split][_cols].copy()
         reg_result, agg_unit_data = _die_pred_to_unit(unit_data, reg_result)
         unit_data = agg_unit_data
 
@@ -2070,6 +2089,7 @@ def rerun_best_trial_with_pp(
 
     result = {
         "unit_data": unit_data,
+        "die_data": die_data,
         "selected_cols": selected_cols,
         "feat_cols_clean": feat_cols_clean,
         "val_pred": reg_result["val_pred"],
