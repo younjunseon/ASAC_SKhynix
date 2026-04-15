@@ -272,13 +272,20 @@ def _run_clf_single(pos_data, feat_cols, clf_params, model_name,
 # ═════════════════════════════════════════════════════════════
 def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
                     early_stop, use_clf=True, clf_filter=False,
-                    clf_filter_threshold=0.5, es_holdout=0.1):
+                    clf_filter_threshold=0.5, es_holdout=0.1,
+                    target_transform_fn=None, target_inverse_fn=None):
     """
     Unit-level 회귀 단일 학습 (KFold 없음, train 100% 사용)
 
     clf_filter_threshold : float
         clf_filter=True일 때 회귀 학습에서 제외할 proba 임계값
         (clf_proba_mean <= threshold → 제외)
+    target_transform_fn : callable, optional
+        모델 학습 직전에 y에 적용할 변환 함수 (예: np.log1p, yeo transform).
+        None이면 변환 없음. 변환/역변환은 **내부에서만** 일어나고
+        unit_data의 y, 반환되는 예측값은 항상 **원본 스케일**이다.
+    target_inverse_fn : callable, optional
+        모델 예측 직후에 적용할 역변환 함수. target_transform_fn을 쓸 때 반드시 같이 지정.
     """
     X_train = unit_data["train"][feat_cols].values
     y_train = unit_data["train"][TARGET_COL].values
@@ -297,12 +304,17 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
 
     reg = None  # fallback: 학습 실패 시 None
     if mask.sum() < 2:  # LightGBM 최소 2샘플 요구
+        # fallback은 원본 스케일의 0 (이후 raw 스케일로 흘러감)
         oof_reg = np.zeros(len(X_train))
         val_reg = np.zeros(len(X_val))
         test_reg = np.zeros(len(X_test))
     else:
         X_fit_pool = X_train[mask]
         y_fit_pool = y_train[mask]
+
+        # ── 타깃 변환: 모델 학습용으로만 변환 (y_train 원본은 건드리지 않음) ──
+        if target_transform_fn is not None:
+            y_fit_pool = target_transform_fn(y_fit_pool)
 
         use_es = (
             supports_early_stopping(model_name)
@@ -325,9 +337,15 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
         else:
             fit_model(reg, X_fit, y_fit)
 
-        oof_reg = reg.predict(X_train)  # in-sample
+        oof_reg = reg.predict(X_train)  # in-sample (변환 스케일)
         val_reg = reg.predict(X_val)
         test_reg = reg.predict(X_test)
+
+        # ── 예측 즉시 원본 스케일로 역변환 ──
+        if target_inverse_fn is not None:
+            oof_reg = target_inverse_fn(oof_reg)
+            val_reg = target_inverse_fn(val_reg)
+            test_reg = target_inverse_fn(test_reg)
 
     # two-stage 곱셈
     if use_clf and "clf_proba_mean" in unit_data["train"].columns:
@@ -356,7 +374,8 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
 # ═════════════════════════════════════════════════════════════
 def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
                  n_folds, early_stop, use_clf=True, clf_filter=False,
-                 clf_filter_threshold=0.5):
+                 clf_filter_threshold=0.5,
+                 target_transform_fn=None, target_inverse_fn=None):
     """
     Unit-level 회귀 OOF
 
@@ -370,6 +389,12 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
     clf_filter_threshold : float
         clf_filter=True일 때 회귀 학습에서 제외할 proba 임계값
         (clf_proba_mean <= threshold → 제외)
+    target_transform_fn : callable, optional
+        모델 학습 직전에 y_fit에 적용할 변환 함수 (예: np.log1p, yeo transform).
+        None이면 변환 없음. 변환/역변환은 **내부에서만** 일어나고
+        unit_data의 y, fallback_val, 반환되는 예측값은 항상 **원본 스케일**이다.
+    target_inverse_fn : callable, optional
+        모델 예측 직후에 적용할 역변환 함수. target_transform_fn을 쓸 때 반드시 같이 지정.
     """
     X_train = unit_data["train"][feat_cols].values
     y_train = unit_data["train"][TARGET_COL].values
@@ -419,6 +444,10 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
             # 단순 회귀: 전체 학습
             X_fit, y_fit = X_train[tr_idx], y_train[tr_idx]
 
+        # ── 타깃 변환: 모델 학습용으로만 변환 ──
+        if target_transform_fn is not None:
+            y_fit = target_transform_fn(y_fit)
+
         # ─── 2단계: inner holdout 분리 (ES용, va_idx 누수 방지) ───
         reg = create_model(model_name, "reg", reg_params)
         if supports_early_stopping(model_name) and len(X_fit) >= 10:
@@ -436,7 +465,11 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         else:
             fit_model(reg, X_fit, y_fit)
 
-        oof_reg[va_idx] = reg.predict(X_train[va_idx])
+        # 예측 즉시 원본 스케일로 역변환
+        pred_va = reg.predict(X_train[va_idx])
+        if target_inverse_fn is not None:
+            pred_va = target_inverse_fn(pred_va)
+        oof_reg[va_idx] = pred_va
         fold_models.append(reg)
 
     # fold skip 경고 (일부 fold만 스킵된 경우)
@@ -455,11 +488,16 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
             f"val/test predictions filled with fallback value ({fallback_val:.6f}).",
             stacklevel=2,
         )
+        # fallback_val은 이미 원본 스케일이므로 역변환 없음
         val_reg = np.full(len(X_val), fallback_val, dtype=float)
         test_reg = np.full(len(X_test), fallback_val, dtype=float)
     else:
         val_reg = np.mean([m.predict(X_val) for m in fold_models], axis=0)
         test_reg = np.mean([m.predict(X_test) for m in fold_models], axis=0)
+        # 앙상블 평균 후 원본 스케일로 역변환
+        if target_inverse_fn is not None:
+            val_reg = target_inverse_fn(val_reg)
+            test_reg = target_inverse_fn(test_reg)
 
     # two-stage: proba * reg_pred
     if use_clf and "clf_proba_mean" in unit_data["train"].columns:
@@ -1491,6 +1529,8 @@ def run_e2e_optimization_with_pp(
     sample_frac=1.0,
     exclude_cols=None,
     pp_cache_size=10,
+    target_transform_fn=None,
+    target_inverse_fn=None,
     # SQLite / warm start / CSV 로그
     exp_id=None,
     db_path=None,
@@ -1646,6 +1686,8 @@ def run_e2e_optimization_with_pp(
             n_folds, reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
             clf_filter_threshold=clf_filter_threshold,
+            target_transform_fn=target_transform_fn,
+            target_inverse_fn=target_inverse_fn,
         )
 
         # ── ⑤ RMSE ──
@@ -1856,6 +1898,8 @@ def rerun_best_trial_with_pp(
     zero_clip_threshold_fixed=0.0,
     clf_fixed=None,
     reg_fixed=None,
+    target_transform_fn=None,
+    target_inverse_fn=None,
     use_sampling=False,
     sample_frac=1.0,
     exclude_cols=None,
@@ -1971,6 +2015,8 @@ def rerun_best_trial_with_pp(
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
             clf_filter_threshold=clf_filter_threshold,
             es_holdout=es_holdout,
+            target_transform_fn=target_transform_fn,
+            target_inverse_fn=target_inverse_fn,
         )
     else:
         print(f"Rerun REG: {reg_model}, features={len(selected_cols)}, mode=kfold (folds={n_folds})")
@@ -1979,6 +2025,8 @@ def rerun_best_trial_with_pp(
             n_folds, reg_early_stop,
             use_clf=cfg["run_clf"], clf_filter=cfg["clf_filter"],
             clf_filter_threshold=clf_filter_threshold,
+            target_transform_fn=target_transform_fn,
+            target_inverse_fn=target_inverse_fn,
         )
 
     # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
