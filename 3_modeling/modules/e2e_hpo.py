@@ -25,7 +25,10 @@ import os
 import numpy as np
 import pandas as pd
 import optuna
-from sklearn.model_selection import StratifiedKFold, KFold, GroupKFold, train_test_split
+from sklearn.model_selection import (
+    StratifiedKFold, KFold, GroupKFold, StratifiedGroupKFold,
+    GroupShuffleSplit, train_test_split,
+)
 from sklearn.metrics import (
     roc_auc_score, average_precision_score,
     f1_score, recall_score, precision_score,
@@ -109,7 +112,11 @@ def _run_clf_oof(pos_data, feat_cols, clf_params, model_name,
                  n_folds, early_stop, label_col, imbalance_method,
                  clf_output="proba"):
     """
-    Position별 분류 OOF
+    4-position concat 분류 OOF (★ Speed A: fit 횟수 1/4)
+
+    기존: pos별 독립 학습 (4pos × n_folds = 4N fits)
+    변경: 4pos concat → 1회 학습 (n_folds fits) + position feature 추가
+          GroupKFold → 같은 unit의 die가 train/val에 섞이지 않음 (leakage 방지)
 
     Parameters
     ----------
@@ -120,82 +127,109 @@ def _run_clf_oof(pos_data, feat_cols, clf_params, model_name,
     -------
     clf_result : dict
         {position: {"train_proba": arr, "val_proba": arr, "test_proba": arr}}
+        기존과 동일한 포맷 (하위 소비자 15개 호환)
     """
-    clf_result = {}
+    positions = sorted(pos_data.keys())
+    OHE_POSITIONS = [1, 2, 3, 4]
 
-    for pos in sorted(pos_data.keys()):
-        d = pos_data[pos]
-        X_tr = d["train"][feat_cols].values
-        y_tr = d["train"][label_col].values
-        X_val = d["val"][feat_cols].values
-        X_test = d["test"][feat_cols].values
+    # ── 1. 4-position concat + position feature 추가 ──
+    def _concat_with_pos(split_name):
+        frames_X, frames_y, frames_group = [], [], []
+        pos_lengths = {}
+        for pos in positions:
+            df = pos_data[pos][split_name]
+            X = df[feat_cols].values
+            # position features: ordinal + OHE
+            pos_ord = np.full((len(X), 1), pos, dtype=np.float32)
+            pos_ohe = np.zeros((len(X), len(OHE_POSITIONS)), dtype=np.int8)
+            pos_ohe[:, OHE_POSITIONS.index(pos)] = 1
+            X_aug = np.hstack([X, pos_ord, pos_ohe])
+            frames_X.append(X_aug)
+            frames_y.append(df[label_col].values)
+            frames_group.append(df[KEY_COL].values)
+            pos_lengths[pos] = len(X)
+        return (np.vstack(frames_X),
+                np.concatenate(frames_y),
+                np.concatenate(frames_group),
+                pos_lengths)
 
-        # 불균형 처리
-        actual_params = clf_params.copy()
-        if imbalance_method == "scale_pos_weight":
-            n_neg = (y_tr == 0).sum()
-            n_pos = (y_tr == 1).sum()
-            spw = n_neg / n_pos if n_pos > 0 else 1.0
-            if model_name in ("lgbm", "xgb"):
-                actual_params["scale_pos_weight"] = spw
-            elif model_name == "catboost":
-                actual_params["auto_class_weights"] = "Balanced"
-            elif model_name in ("rf", "et"):
-                actual_params["class_weight"] = "balanced"
-            # [P1-2] logreg_enet 불균형 대응 누락 수정 — LogReg도 sklearn 표준 class_weight 지원
-            elif model_name == "logreg_enet":
-                actual_params["class_weight"] = "balanced"
+    X_tr_all, y_tr_all, groups_all, pos_len_tr = _concat_with_pos("train")
+    X_val_all, _, _, pos_len_val = _concat_with_pos("val")
+    X_test_all, _, _, pos_len_test = _concat_with_pos("test")
 
-        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=SEED)
-        oof_proba = np.zeros(len(X_tr))
-        fold_models = []
+    # ── 2. 불균형 처리 (concat 전체 기준 1회) ──
+    actual_params = clf_params.copy()
+    if imbalance_method == "scale_pos_weight":
+        n_neg = (y_tr_all == 0).sum()
+        n_pos = (y_tr_all == 1).sum()
+        spw = n_neg / n_pos if n_pos > 0 else 1.0
+        if model_name in ("lgbm", "xgb"):
+            actual_params["scale_pos_weight"] = spw
+        elif model_name == "catboost":
+            actual_params["auto_class_weights"] = "Balanced"
+        elif model_name in ("rf", "et"):
+            actual_params["class_weight"] = "balanced"
+        elif model_name == "logreg_enet":
+            actual_params["class_weight"] = "balanced"
 
-        for tr_idx, val_idx in skf.split(X_tr, y_tr):
-            clf = create_model(model_name, "clf", actual_params)
-            if supports_early_stopping(model_name):
-                # ES용 inner holdout을 tr_idx 내부에서 분리 (val_idx 누수 방지)
-                X_tr_fold = X_tr[tr_idx]
-                y_tr_fold = y_tr[tr_idx]
-                if len(np.unique(y_tr_fold)) >= 2:
-                    inner_tr, inner_es = train_test_split(
-                        np.arange(len(tr_idx)),
-                        test_size=0.15,
-                        random_state=SEED,
-                        stratify=y_tr_fold,
-                    )
-                    fit_model(
-                        clf,
-                        X_tr_fold[inner_tr], y_tr_fold[inner_tr],
-                        X_tr_fold[inner_es], y_tr_fold[inner_es],
-                        early_stop,
-                    )
-                else:
-                    # stratify 불가 (단일 클래스) → ES 없이 학습
-                    fit_model(clf, X_tr_fold, y_tr_fold)
+    # ── 3. StratifiedGroupKFold (unit 단위 분할 + 클래스 균형) ──
+    sgkf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=SEED)
+    oof_proba = np.zeros(len(X_tr_all))
+    fold_models = []
+
+    for tr_idx, val_idx in sgkf.split(X_tr_all, y_tr_all, groups=groups_all):
+        clf = create_model(model_name, "clf", actual_params)
+        if supports_early_stopping(model_name):
+            X_tr_fold = X_tr_all[tr_idx]
+            y_tr_fold = y_tr_all[tr_idx]
+            groups_fold = groups_all[tr_idx]
+            if len(np.unique(y_tr_fold)) >= 2:
+                # ES inner holdout도 group-aware
+                gss = GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=SEED)
+                inner_tr, inner_es = next(gss.split(X_tr_fold, y_tr_fold, groups=groups_fold))
+                fit_model(
+                    clf,
+                    X_tr_fold[inner_tr], y_tr_fold[inner_tr],
+                    X_tr_fold[inner_es], y_tr_fold[inner_es],
+                    early_stop,
+                )
             else:
-                fit_model(clf, X_tr[tr_idx], y_tr[tr_idx])
+                fit_model(clf, X_tr_fold, y_tr_fold)
+        else:
+            fit_model(clf, X_tr_all[tr_idx], y_tr_all[tr_idx])
 
-            oof_proba[val_idx] = clf.predict_proba(X_tr[val_idx])[:, 1]
-            fold_models.append(clf)
+        oof_proba[val_idx] = clf.predict_proba(X_tr_all[val_idx])[:, 1]
+        fold_models.append(clf)
 
-        val_proba = np.mean(
-            [m.predict_proba(X_val)[:, 1] for m in fold_models], axis=0
-        )
-        test_proba = np.mean(
-            [m.predict_proba(X_test)[:, 1] for m in fold_models], axis=0
-        )
+    # ── 4. val/test predict (fold 평균) ──
+    val_proba_all = np.mean(
+        [m.predict_proba(X_val_all)[:, 1] for m in fold_models], axis=0
+    )
+    test_proba_all = np.mean(
+        [m.predict_proba(X_test_all)[:, 1] for m in fold_models], axis=0
+    )
 
-        # binary 모드: 확률 → 0/1
-        if clf_output == "binary":
-            oof_proba = (oof_proba > 0.5).astype(float)
-            val_proba = (val_proba > 0.5).astype(float)
-            test_proba = (test_proba > 0.5).astype(float)
+    # binary 모드
+    if clf_output == "binary":
+        oof_proba = (oof_proba > 0.5).astype(float)
+        val_proba_all = (val_proba_all > 0.5).astype(float)
+        test_proba_all = (test_proba_all > 0.5).astype(float)
 
+    # ── 5. position별 split-back (기존 반환 포맷 유지) ──
+    clf_result = {}
+    tr_off, val_off, test_off = 0, 0, 0
+    for pos in positions:
+        n_tr = pos_len_tr[pos]
+        n_val = pos_len_val[pos]
+        n_test = pos_len_test[pos]
         clf_result[pos] = {
-            "train_proba": oof_proba,
-            "val_proba": val_proba,
-            "test_proba": test_proba,
+            "train_proba": oof_proba[tr_off:tr_off + n_tr],
+            "val_proba":   val_proba_all[val_off:val_off + n_val],
+            "test_proba":  test_proba_all[test_off:test_off + n_test],
         }
+        tr_off += n_tr
+        val_off += n_val
+        test_off += n_test
 
     return clf_result
 
@@ -311,70 +345,98 @@ def _run_clf_single(pos_data, feat_cols, clf_params, model_name,
                     early_stop, label_col, imbalance_method,
                     clf_output="proba", es_holdout=0.1):
     """
-    Position별 분류 단일 학습 (KFold 없음, train 100% 사용)
+    4-position concat 분류 단일 학습 (★ Speed A: fit 1회)
 
-    - ES용 holdout만 train에서 내부 분리
-    - train 예측은 in-sample (진단용)
-    - val/test는 단일 모델 예측
+    기존: pos별 독립 학습 (4 fits)
+    변경: 4pos concat → 1회 학습 + position feature
+          ES holdout도 GroupShuffleSplit (unit leakage 방지)
+
+    Returns
+    -------
+    clf_result : dict  (기존과 동일 포맷)
     """
+    positions = sorted(pos_data.keys())
+    OHE_POSITIONS = [1, 2, 3, 4]
+
+    def _concat_with_pos(split_name):
+        frames_X, frames_y, frames_group = [], [], []
+        pos_lengths = {}
+        for pos in positions:
+            df = pos_data[pos][split_name]
+            X = df[feat_cols].values
+            pos_ord = np.full((len(X), 1), pos, dtype=np.float32)
+            pos_ohe = np.zeros((len(X), len(OHE_POSITIONS)), dtype=np.int8)
+            pos_ohe[:, OHE_POSITIONS.index(pos)] = 1
+            X_aug = np.hstack([X, pos_ord, pos_ohe])
+            frames_X.append(X_aug)
+            frames_y.append(df[label_col].values)
+            frames_group.append(df[KEY_COL].values)
+            pos_lengths[pos] = len(X)
+        return (np.vstack(frames_X),
+                np.concatenate(frames_y),
+                np.concatenate(frames_group),
+                pos_lengths)
+
+    X_tr_all, y_tr_all, groups_all, pos_len_tr = _concat_with_pos("train")
+    X_val_all, _, _, pos_len_val = _concat_with_pos("val")
+    X_test_all, _, _, pos_len_test = _concat_with_pos("test")
+
+    # 불균형 처리
+    actual_params = clf_params.copy()
+    if imbalance_method == "scale_pos_weight":
+        n_neg = (y_tr_all == 0).sum()
+        n_pos = (y_tr_all == 1).sum()
+        spw = n_neg / n_pos if n_pos > 0 else 1.0
+        if model_name in ("lgbm", "xgb"):
+            actual_params["scale_pos_weight"] = spw
+        elif model_name == "catboost":
+            actual_params["auto_class_weights"] = "Balanced"
+        elif model_name in ("rf", "et"):
+            actual_params["class_weight"] = "balanced"
+        elif model_name == "logreg_enet":
+            actual_params["class_weight"] = "balanced"
+
+    # ES holdout (group-aware)
+    use_es = supports_early_stopping(model_name) and es_holdout > 0
+    if use_es and len(np.unique(y_tr_all)) >= 2:
+        gss = GroupShuffleSplit(n_splits=1, test_size=es_holdout, random_state=SEED)
+        fit_idx, es_idx = next(gss.split(X_tr_all, y_tr_all, groups=groups_all))
+        X_fit, y_fit = X_tr_all[fit_idx], y_tr_all[fit_idx]
+        X_es, y_es = X_tr_all[es_idx], y_tr_all[es_idx]
+    else:
+        X_fit, y_fit = X_tr_all, y_tr_all
+        X_es, y_es = None, None
+
+    clf = create_model(model_name, "clf", actual_params)
+    if use_es and X_es is not None:
+        fit_model(clf, X_fit, y_fit, X_es, y_es, early_stop)
+    else:
+        fit_model(clf, X_fit, y_fit)
+
+    train_proba = clf.predict_proba(X_tr_all)[:, 1]
+    val_proba = clf.predict_proba(X_val_all)[:, 1]
+    test_proba = clf.predict_proba(X_test_all)[:, 1]
+
+    if clf_output == "binary":
+        train_proba = (train_proba > 0.5).astype(float)
+        val_proba = (val_proba > 0.5).astype(float)
+        test_proba = (test_proba > 0.5).astype(float)
+
+    # position별 split-back
     clf_result = {}
-
-    for pos in sorted(pos_data.keys()):
-        d = pos_data[pos]
-        X_tr_full = d["train"][feat_cols].values
-        y_tr_full = d["train"][label_col].values
-        X_val = d["val"][feat_cols].values
-        X_test = d["test"][feat_cols].values
-
-        # 불균형 처리
-        actual_params = clf_params.copy()
-        if imbalance_method == "scale_pos_weight":
-            n_neg = (y_tr_full == 0).sum()
-            n_pos = (y_tr_full == 1).sum()
-            spw = n_neg / n_pos if n_pos > 0 else 1.0
-            if model_name in ("lgbm", "xgb"):
-                actual_params["scale_pos_weight"] = spw
-            elif model_name == "catboost":
-                actual_params["auto_class_weights"] = "Balanced"
-            elif model_name in ("rf", "et"):
-                actual_params["class_weight"] = "balanced"
-            # [P1-2] logreg_enet 불균형 대응 누락 수정 — LogReg도 sklearn 표준 class_weight 지원
-            elif model_name == "logreg_enet":
-                actual_params["class_weight"] = "balanced"
-
-        # ES용 holdout 분리 (stratified)
-        use_es = supports_early_stopping(model_name) and es_holdout > 0
-        if use_es and len(np.unique(y_tr_full)) >= 2:
-            X_fit, X_es, y_fit, y_es = train_test_split(
-                X_tr_full, y_tr_full,
-                test_size=es_holdout,
-                random_state=SEED,
-                stratify=y_tr_full,
-            )
-        else:
-            X_fit, y_fit = X_tr_full, y_tr_full
-            X_es, y_es = None, None
-
-        clf = create_model(model_name, "clf", actual_params)
-        if use_es and X_es is not None:
-            fit_model(clf, X_fit, y_fit, X_es, y_es, early_stop)
-        else:
-            fit_model(clf, X_fit, y_fit)
-
-        train_proba = clf.predict_proba(X_tr_full)[:, 1]  # in-sample
-        val_proba = clf.predict_proba(X_val)[:, 1]
-        test_proba = clf.predict_proba(X_test)[:, 1]
-
-        if clf_output == "binary":
-            train_proba = (train_proba > 0.5).astype(float)
-            val_proba = (val_proba > 0.5).astype(float)
-            test_proba = (test_proba > 0.5).astype(float)
-
+    tr_off, val_off, test_off = 0, 0, 0
+    for pos in positions:
+        n_tr = pos_len_tr[pos]
+        n_val = pos_len_val[pos]
+        n_test = pos_len_test[pos]
         clf_result[pos] = {
-            "train_proba": train_proba,
-            "val_proba": val_proba,
-            "test_proba": test_proba,
+            "train_proba": train_proba[tr_off:tr_off + n_tr],
+            "val_proba":   val_proba[val_off:val_off + n_val],
+            "test_proba":  test_proba[test_off:test_off + n_test],
         }
+        tr_off += n_tr
+        val_off += n_val
+        test_off += n_test
 
     return clf_result
 
