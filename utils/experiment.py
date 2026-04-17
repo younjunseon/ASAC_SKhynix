@@ -56,20 +56,22 @@ def _get_baseline_id(exp_id: str) -> str:
     return f"{team}-{model}-001"
 
 
-def _load_csv() -> pd.DataFrame:
+def _load_csv(path=None) -> pd.DataFrame:
     """기존 csv 로드. 없거나 비어있으면 빈 DataFrame 반환"""
-    if os.path.exists(CSV_PATH) and os.path.getsize(CSV_PATH) > 0:
+    p = path or CSV_PATH
+    if os.path.exists(p) and os.path.getsize(p) > 0:
         try:
-            return pd.read_csv(CSV_PATH, dtype={"실험번호": str})
+            return pd.read_csv(p, dtype={"실험번호": str})
         except Exception:
             return pd.DataFrame(columns=CSV_COLUMNS)
     return pd.DataFrame(columns=CSV_COLUMNS)
 
 
-def _save_csv(df: pd.DataFrame):
+def _save_csv(df: pd.DataFrame, path=None):
     """csv 저장 (UTF-8 BOM: 한글 Excel 호환)"""
-    os.makedirs(EXP_DIR, exist_ok=True)
-    df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
+    p = path or CSV_PATH
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    df.to_csv(p, index=False, encoding="utf-8-sig")
 
 
 def download_from_drive(
@@ -214,6 +216,7 @@ def log_experiment(
     user: str = "",
     n_trials: int = None,
     csv_gdrive_id: str = "",
+    csv_path: str = None,
 ):
     """
     실험 결과를 csv에 기록 (1행 = 1실험).
@@ -246,7 +249,8 @@ def log_experiment(
     _parse_exp_id(exp_id)
 
     # ── csv 처리 ───────────────────────────────────────────
-    df = _load_csv()
+    _csv = csv_path or CSV_PATH
+    df = _load_csv(_csv)
 
     # 중복 체크
     if exp_id in df["실험번호"].values:
@@ -266,7 +270,7 @@ def log_experiment(
         "날짜": datetime.now().strftime("%Y-%m-%d"),
         "타입": exp_type,
         "베스트모델": best_model,
-        "val_rmse": round(val_rmse, 6),
+        "val_rmse": round(val_rmse, 6) if val_rmse is not None else None,
         "test_rmse": round(test_rmse, 6) if test_rmse is not None else None,
         "val_증감": round(val_delta, 6) if val_delta is not None else None,
         "test_증감": round(test_delta, 6) if test_delta is not None else None,
@@ -276,13 +280,15 @@ def log_experiment(
         "n_trials": n_trials,
     }])
     df = pd.concat([df, new_row], ignore_index=True)
-    _save_csv(df)
+    _save_csv(df, _csv)
 
     # ── 결과 출력 ─────────────────────────────────────────
     print(f"\n{'='*50}")
     print(f"실험 기록 완료: {exp_id}")
     print(f"  타입: {exp_type} | 베스트: {best_model} | user: {user}")
-    print(f"  Val RMSE:  {val_rmse:.6f}", end="")
+    # val_rmse/test_rmse None 방어 (EVAL_VAL=False 경로 대응)
+    _val_str = f"{val_rmse:.6f}" if pd.notna(val_rmse) else "N/A"
+    print(f"  Val RMSE:  {_val_str}", end="")
     if pd.notna(val_delta):
         sign = "+" if val_delta >= 0 else ""
         print(f"  ({sign}{val_delta:.6f})", end="")
@@ -293,7 +299,7 @@ def log_experiment(
         print(f"  ({sign}{test_delta:.6f})", end="")
     print()
     print(f"  피처수: {n_features} | n_trials: {n_trials} | 메모: {memo}")
-    print(f"  csv: {CSV_PATH}")
+    print(f"  csv: {_csv}")
     print(f"{'='*50}")
 
     # ── Colab이면 Google Drive에 업로드 ─────────────────────
