@@ -6,6 +6,7 @@
 - 중복 컬럼 제거
 - 고상관 feature 제거 (|r|>0.95 쌍에서 한쪽 제거)
 - 결측치 imputation (train 기준 median) + 결측 indicator 옵션
+- Degenerate feature binarize (최빈값 비율 > threshold → 이진 indicator, 2차 신규)
 
 EDA 결과 기반:
 - 상수 feature: 97개
@@ -14,6 +15,7 @@ EDA 결과 기반:
 - 고상관 쌍 (|r|>0.95): 47개
 - 전체 1,087개 feature에 결측 존재 (대부분 0.23%)
 - 결측률 1~50%: 약 11개 → indicator 컬럼 추가 고려
+- Degenerate distribution (최빈값 top%>99%) 36개 → binarize 대응
 """
 import pandas as pd
 import numpy as np
@@ -736,3 +738,90 @@ def run_cleaning(xs, feat_cols, xs_dict,
     print("=" * 60)
 
     return xs_train, xs_val, xs_test, all_feat_cols, report
+
+
+# ============================================================
+# 2차 funnel — Degenerate feature Binarize (2026-04-16)
+# ============================================================
+
+def binarize_degenerate(xs_train, xs_val, xs_test, feat_cols,
+                        top_value_threshold=0.99,
+                        max_unique=None,
+                        verbose=True):
+    """
+    Degenerate feature를 binary indicator로 변환.
+
+    "99%가 한 값 + 1%가 outlier" 또는 "2~5개 값만 가지는 이산형" feature는 어떤
+    스케일링도 skew를 못 잡음. "특이값 여부 (0/1)"로 요약하여 파이프라인 안정화.
+
+    변환 조건 (OR):
+      1) train 기준 최빈값 비율 > top_value_threshold
+      2) train 기준 nunique <= max_unique (max_unique=None이면 스킵)
+
+    Parameters
+    ----------
+    xs_train, xs_val, xs_test : DataFrame (cleaning 이후, outlier 이전에 호출 권장)
+    feat_cols : list
+        대상 feature. 보통 clean_cols
+    top_value_threshold : float, default 0.99
+        train 기준 최빈값 비율이 이 값을 초과하면 변환.
+        0.99 → "99% 이상이 한 값"인 feature 대상
+    max_unique : int or None, default None
+        train 기준 nunique가 이 값 이하이면 무조건 변환 (top%와 OR).
+        None이면 nunique 조건 스킵 (top%만 사용).
+        예: 5 → "train nunique ≤ 5인 이산형 feature도 binary로"
+    verbose : bool, default True
+
+    Returns
+    -------
+    xs_train, xs_val, xs_test : DataFrame (inplace 변경됨)
+    report : dict
+        {'n_converted', 'top_value_threshold', 'max_unique',
+         'converted': [(feature, mode_val, top_pct, n_uniq, trigger), ...]}
+
+    Notes
+    -----
+    - train 기준 최빈값/nunique를 val/test에도 동일하게 적용 (누수 방지)
+    - 변환 후 dtype은 int8 (공간 절약, 모델 입력 호환)
+    - feat_cols 리스트는 변경되지 않음 (컬럼 수 동일, 값만 이진화)
+    - trigger 필드: 'top%', 'nuniq', 'top%+nuniq' 중 하나 (어떤 조건이 발동했는지)
+    """
+    converted = []
+
+    for c in feat_cols:
+        s = xs_train[c].dropna()
+        if len(s) == 0:
+            continue
+        mode_val = s.mode().iloc[0]
+        top_pct = float((s == mode_val).mean())
+        n_uniq = int(s.nunique())
+
+        hit_top = top_pct > top_value_threshold
+        hit_uniq = (max_unique is not None) and (n_uniq <= max_unique)
+
+        if hit_top or hit_uniq:
+            for df in [xs_train, xs_val, xs_test]:
+                df[c] = (df[c] != mode_val).astype(np.int8)
+            triggers = []
+            if hit_top:  triggers.append("top%")
+            if hit_uniq: triggers.append("nuniq")
+            converted.append((c, float(mode_val), top_pct, n_uniq, "+".join(triggers)))
+
+    if verbose:
+        cond_str = f"top% > {top_value_threshold*100:.0f}%"
+        if max_unique is not None:
+            cond_str += f" OR nuniq ≤ {max_unique}"
+        print(f"[Binarize] {cond_str} → binary 변환")
+        print(f"  변환 대상: {len(converted)}개 / {len(feat_cols)}개")
+        for c, v, p, n, why in converted[:25]:
+            print(f"  {c}: mode={v:.4g} (top%={p*100:.2f}%, nuniq={n}) → 0/1  [{why}]")
+        if len(converted) > 25:
+            print(f"  ... 외 {len(converted) - 25}개")
+
+    report = {
+        "n_converted": len(converted),
+        "top_value_threshold": top_value_threshold,
+        "max_unique": max_unique,
+        "converted": converted,
+    }
+    return xs_train, xs_val, xs_test, report

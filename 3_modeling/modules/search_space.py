@@ -1,7 +1,7 @@
 """
 Optuna Search Space 정의 — 모델별 하이퍼파라미터 + 전처리 탐색 공간
 
-- 모델별 하이퍼파라미터: lgbm_space, xgb_space, catboost_space, rf_space
+- 모델별 하이퍼파라미터: lgbm_space, rf_space
 - 전처리/이상치/집계 통합: preprocessing_space (LGBM-only baseline용)
 
 preprocessing_space의 후보 list는 모듈 상수(PP_*_CANDIDATES)로 노출되어
@@ -45,7 +45,7 @@ def lgbm_space(trial, prefix=""):
         # Stage2 회귀기: 더 큰 num_leaves + 강한 정규화(reg_alpha) 선호
         # 상한 포화 → 확장: num_leaves 256→384, reg_alpha 10→30, min_child_samples 300→400
         # 양봉 → 보존: colsample_bytree(0.2~0.3 vs 0.9~1.0), path_smooth(0~5 vs 30~38)
-        return dict(
+        params = dict(
             n_estimators=trial.suggest_int(f"{p}n_estimators", 100, 1500),
             learning_rate=trial.suggest_float(f"{p}learning_rate", 0.005, 0.1, log=True),
             num_leaves=trial.suggest_int(f"{p}num_leaves", 64, 384),
@@ -62,6 +62,19 @@ def lgbm_space(trial, prefix=""):
             verbose=-1,
             device=DEVICE,
         )
+        # ★ 2차 신규: objective 탐색 (논문 2-2/2-5/2-6/2-7 근거)
+        # zero-inflated + 비음수 타깃엔 Tweedie/Poisson이 MSE보다 우위일 수 있음.
+        obj_choice = trial.suggest_categorical(
+            f"{p}objective",
+            ['regression', 'poisson', 'tweedie_1.2', 'tweedie_1.5'],
+        )
+        if obj_choice == 'poisson':
+            params['objective'] = 'poisson'
+        elif obj_choice.startswith('tweedie'):
+            params['objective'] = 'tweedie'
+            params['tweedie_variance_power'] = float(obj_choice.split('_')[1])
+        # 'regression' (MSE, LGBM default) 선택 시 주입 없음
+        return params
 
     # 단일 모델(non-Two-Stage) 또는 알 수 없는 prefix: 기본 wide 범위
     return dict(
@@ -83,52 +96,8 @@ def lgbm_space(trial, prefix=""):
     )
 
 
-def xgb_space(trial, prefix=""):
-    """XGBoost 탐색 공간"""
-    p = prefix
-    return dict(
-        n_estimators=trial.suggest_int(f"{p}n_estimators", 100, 3000),
-        learning_rate=trial.suggest_float(f"{p}learning_rate", 0.005, 0.3, log=True),
-        max_depth=trial.suggest_int(f"{p}max_depth", 3, 12),
-        min_child_weight=trial.suggest_int(f"{p}min_child_weight", 1, 300),
-        subsample=trial.suggest_float(f"{p}subsample", 0.5, 1.0),
-        colsample_bytree=trial.suggest_float(f"{p}colsample_bytree", 0.1, 1.0),
-        reg_alpha=trial.suggest_float(f"{p}reg_alpha", 1e-8, 10.0, log=True),
-        reg_lambda=trial.suggest_float(f"{p}reg_lambda", 1e-8, 10.0, log=True),
-        gamma=trial.suggest_float(f"{p}gamma", 1e-8, 5.0, log=True),
-        tree_method="hist",
-        device="cuda" if DEVICE == "gpu" else "cpu",
-        random_state=SEED,
-        n_jobs=-1,
-        verbosity=0,
-    )
-
-
-def catboost_space(trial, prefix=""):
-    """CatBoost 탐색 공간
-
-    Note: 기본 bootstrap_type=Bayesian은 subsample을 지원하지 않으므로
-    subsample을 탐색하기 위해 Bernoulli로 고정한다.
-    task_type='CPU' 강제: Colab T4 GPU에서 LGBM과 GPU 메모리 경합으로 OOM 발생하여 CPU로 고정.
-    """
-    p = prefix
-    return dict(
-        iterations=trial.suggest_int(f"{p}iterations", 100, 3000),
-        learning_rate=trial.suggest_float(f"{p}learning_rate", 0.005, 0.3, log=True),
-        depth=trial.suggest_int(f"{p}depth", 3, 10),
-        min_data_in_leaf=trial.suggest_int(f"{p}min_data_in_leaf", 5, 300),
-        bootstrap_type="Bernoulli",
-        subsample=trial.suggest_float(f"{p}subsample", 0.5, 1.0),
-        colsample_bylevel=trial.suggest_float(f"{p}colsample_bylevel", 0.1, 1.0),
-        l2_leaf_reg=trial.suggest_float(f"{p}l2_leaf_reg", 1e-8, 10.0, log=True),
-        task_type="CPU",
-        random_seed=SEED,
-        verbose=0,
-    )
-
-
 def rf_space(trial, prefix=""):
-    """RandomForest / ExtraTrees 탐색 공간"""
+    """RandomForest 탐색 공간 (ET는 et_space 사용)"""
     p = prefix
     return dict(
         n_estimators=trial.suggest_int(f"{p}n_estimators", 100, 1000),
@@ -143,12 +112,73 @@ def rf_space(trial, prefix=""):
     )
 
 
+# ═════════════════════════════════════════════════════════════
+# 2차 funnel 신규: ExtraTrees / LogReg-enet / ElasticNet space
+# ═════════════════════════════════════════════════════════════
+
+def et_space(trial, prefix=""):
+    """ExtraTrees 탐색 공간 (분류·회귀 공통).
+
+    RandomForest 대비 특징:
+    - bootstrap 기본 False (ET 이론) — 탐색 축으로 열어둠
+    - split threshold가 random이라 n_estimators를 RF보다 넉넉히 (300~)
+    """
+    p = prefix
+    return dict(
+        n_estimators=trial.suggest_int(f"{p}n_estimators", 300, 1500),
+        max_depth=trial.suggest_int(f"{p}max_depth", 6, 30),
+        min_samples_leaf=trial.suggest_int(f"{p}min_samples_leaf", 1, 30),
+        min_samples_split=trial.suggest_int(f"{p}min_samples_split", 2, 40),
+        max_features=trial.suggest_categorical(
+            f"{p}max_features", ["sqrt", "log2", 0.3, 0.5, 0.7]
+        ),
+        bootstrap=trial.suggest_categorical(f"{p}bootstrap", [True, False]),
+        random_state=SEED,
+        n_jobs=-1,
+    )
+
+
+def logreg_enet_space(trial, prefix=""):
+    """LogisticRegression(penalty='elasticnet', solver='saga') 탐색 공간.
+
+    - saga는 scaled data 전제 → hybrid_scale 적용 후 입력 필수
+    - l1_ratio 0/1 끝단 제외 (순수 L1/L2는 엣지 케이스)
+    """
+    p = prefix
+    return dict(
+        penalty='elasticnet',
+        solver='saga',
+        C=trial.suggest_float(f"{p}C", 1e-3, 100.0, log=True),
+        l1_ratio=trial.suggest_float(f"{p}l1_ratio", 0.1, 0.9),
+        max_iter=trial.suggest_int(f"{p}max_iter", 1000, 4000, step=500),
+        tol=1e-3,
+        random_state=SEED,
+        n_jobs=-1,
+    )
+
+
+def enet_space(trial, prefix=""):
+    """ElasticNet 회귀 탐색 공간.
+
+    약신호(EDA max|r|=0.037) + 다중공선성 47쌍 → 순수 Lasso(l1_ratio=1) 위험.
+    Optuna가 고른 best l1_ratio가 쏠리면 데이터의 L1/L2 선호 진단치로 활용.
+    """
+    p = prefix
+    return dict(
+        alpha=trial.suggest_float(f"{p}alpha", 1e-5, 1.0, log=True),
+        l1_ratio=trial.suggest_float(f"{p}l1_ratio", 0.1, 0.9),
+        max_iter=trial.suggest_int(f"{p}max_iter", 2000, 8000, step=1000),
+        tol=1e-4,
+        random_state=SEED,
+    )
+
+
 SEARCH_SPACES = {
-    "lgbm": lgbm_space,
-    "xgb": xgb_space,
-    "catboost": catboost_space,
-    "rf": rf_space,
-    "et": rf_space,
+    "lgbm":        lgbm_space,
+    "rf":          rf_space,
+    "et":          et_space,             # ★ 2차: rf_space → et_space 교체 (bootstrap 축 추가)
+    "logreg_enet": logreg_enet_space,    # ★ 2차 신규
+    "enet":        enet_space,           # ★ 2차 신규
 }
 
 
@@ -209,6 +239,46 @@ AGG_PRESETS = [
 PP_AGG_PRESET_IDX_CANDIDATES = list(range(len(AGG_PRESETS)))
 
 
+# ═════════════════════════════════════════════════════════════
+# 2차 funnel 신규 PP 후보 (IsoForest / LDS)
+#
+# Scaling(HybridScaler)과 Binarize는 옵튜나 탐색 X — 고정값(PP_SCALE_CONFIG /
+# PP_BINARIZE_CONFIG)으로만 사용. test.ipynb 4종 비교 결과 skew_threshold=5.0
+# 정규근사율 68%로 최고 확정.
+# ═════════════════════════════════════════════════════════════
+
+# ── IsoForest anomaly score 후보 (컬럼 추가, 제거 아님) ──
+PP_ISO_ANOMALY_CANDIDATES = {
+    "iso_enabled":       [True, False],           # on/off marginal 측정
+    "iso_contamination": [0.05, 0.1, 'auto'],
+    "iso_n_estimators":  [100, 200],
+}
+
+# ── LDS 가중치 후보 (Y>0 long-tail 대응) ──
+PP_LDS_CANDIDATES = {
+    "lds_enabled":    [True, False],
+    "lds_sigma":      [0.005, 0.01, 0.02],        # y>0 평균 0.0087 기준
+    "lds_max_weight": [5.0, 10.0],                # soft cap (재정규화 후 초과 가능)
+}
+
+# ── HybridScaler 고정 설정 (옵튜나 탐색 X) ──
+# skew_threshold: test.ipynb 확정 (|skew|>5 → quantile, 나머지 → power)
+# binary_passthrough: nunique≤2는 변환 없음 (binarize 결과 보존)
+PP_SCALE_CONFIG = {
+    "transform":         "hybrid",
+    "skew_threshold":    5.0,
+    "binary_passthrough": True,
+}
+
+# ── Binarize 고정 설정 (cleaning 직후) ──
+# top%>0.95 OR nunique≤5 → 0/1 (int8)
+PP_BINARIZE_CONFIG = {
+    "apply":               True,
+    "top_value_threshold": 0.95,
+    "max_unique":          5,
+}
+
+
 # ── run_cleaning / run_outlier_treatment에 실제 전달할 인자 키 ──
 # (preprocessing_space 반환 dict에서 해당 함수로 분배할 때 사용)
 CLEANING_KEYS = [
@@ -236,22 +306,27 @@ OUTLIER_KEYS = [
 
 def preprocessing_space(trial):
     """
-    전처리 + 이상치 + 집계 통합 search space.
+    전처리 + 이상치 + IsoForest + LDS + 집계 통합 search space.
 
     Returns
     -------
     dict
         {
-            # cleaning (CLEANING_KEYS)
+            # cleaning (CLEANING_KEYS, flat)
             "const_threshold": ...,
             ...
             # outlier (OUTLIER_KEYS, key에 'outlier__' prefix)
-            "outlier__method": ...,
-            "outlier__lower_pct": ...,
-            ...
+            "outlier__method": ..., "outlier__lower_pct": ..., ...
+            # ★ 2차 신규: IsoForest anomaly score ('iso__' prefix)
+            "iso__iso_enabled": ..., "iso__iso_contamination": ..., ...
+            # ★ 2차 신규: LDS weight ('lds__' prefix)
+            "lds__lds_enabled": ..., "lds__lds_sigma": ..., ...
             # 집계
             "agg_preset_idx": int,
         }
+
+    Scaling(hybrid)과 Binarize는 여기서 탐색 X — PP_SCALE_CONFIG /
+    PP_BINARIZE_CONFIG 고정값을 _run_preprocessing에서 직접 사용.
 
     trial param 이름은 모두 'pp_' prefix로 통일 (clf_/reg_와 구분).
     """
@@ -267,6 +342,18 @@ def preprocessing_space(trial):
             f"pp_outlier_{key}", candidates
         )
 
+    # ── ★ IsoForest (2차 신규) ──
+    for key, candidates in PP_ISO_ANOMALY_CANDIDATES.items():
+        params[f"iso__{key}"] = trial.suggest_categorical(
+            f"pp_iso_{key}", candidates
+        )
+
+    # ── ★ LDS (2차 신규) ──
+    for key, candidates in PP_LDS_CANDIDATES.items():
+        params[f"lds__{key}"] = trial.suggest_categorical(
+            f"pp_lds_{key}", candidates
+        )
+
     # ── 집계 preset ──
     params["agg_preset_idx"] = trial.suggest_categorical(
         "pp_agg_preset_idx", PP_AGG_PRESET_IDX_CANDIDATES
@@ -277,26 +364,37 @@ def preprocessing_space(trial):
 
 def split_pp_params(pp_params):
     """
-    preprocessing_space 반환 dict를 run_cleaning / run_outlier_treatment /
-    aggregate 함수의 인자로 분배.
+    preprocessing_space 반환 dict를 전처리 함수들의 인자로 분배.
+
+    ★ 2차부터 5-tuple 반환 — iso_args, lds_args 추가.
+    e2e_hpo._run_preprocessing이 binarize/scaling/IsoForest/LDS 고정 호출 시
+    PP_SCALE_CONFIG/PP_BINARIZE_CONFIG는 여기서 다루지 않음 (탐색 대상 아님).
 
     Returns
     -------
     cleaning_args : dict — run_cleaning에 넘길 kwargs
     outlier_args  : dict — run_outlier_treatment에 넘길 kwargs
+    iso_args      : dict — multivariate_anomaly_score에 넘길 kwargs
+                   ({'iso_enabled', 'iso_contamination', 'iso_n_estimators'})
+    lds_args      : dict — compute_lds_weights에 넘길 kwargs
+                   ({'lds_enabled', 'lds_sigma', 'lds_max_weight'})
     agg_funcs     : list — aggregate_die_to_unit에 넘길 집계 함수 list
     """
     cleaning_args = {k: v for k, v in pp_params.items() if k in CLEANING_KEYS}
 
-    outlier_args = {}
-    for k, v in pp_params.items():
-        if k.startswith("outlier__"):
-            outlier_args[k[len("outlier__"):]] = v
+    outlier_args = {k[len("outlier__"):]: v
+                    for k, v in pp_params.items() if k.startswith("outlier__")}
+
+    iso_args = {k[len("iso__"):]: v
+                for k, v in pp_params.items() if k.startswith("iso__")}
+
+    lds_args = {k[len("lds__"):]: v
+                for k, v in pp_params.items() if k.startswith("lds__")}
 
     agg_idx = pp_params.get("agg_preset_idx", 0)
     agg_funcs = AGG_PRESETS[agg_idx]
 
-    return cleaning_args, outlier_args, agg_funcs
+    return cleaning_args, outlier_args, iso_args, lds_args, agg_funcs
 
 
 def extract_pp_params_from_best(best_params):
@@ -304,8 +402,12 @@ def extract_pp_params_from_best(best_params):
     Optuna study.best_params에서 'pp_' prefix 항목만 추출해
     preprocessing_space가 반환하는 형식으로 복원.
 
-    trial param 이름 'pp_outlier_method' → dict key 'outlier__method' 로 변환.
-    trial param 'pp_agg_preset_idx' → dict key 'agg_preset_idx'.
+    trial param 이름 → dict key 변환:
+      'pp_outlier_method'      → 'outlier__method'
+      'pp_iso_iso_enabled'     → 'iso__iso_enabled'
+      'pp_lds_lds_sigma'       → 'lds__lds_sigma'
+      'pp_agg_preset_idx'      → 'agg_preset_idx'
+      그 외                    → 'pp_' 떼고 그대로
     """
     out = {}
     for k, v in best_params.items():
@@ -313,8 +415,11 @@ def extract_pp_params_from_best(best_params):
             continue
         inner = k[len("pp_"):]
         if inner.startswith("outlier_"):
-            # pp_outlier_method → outlier__method
             out[f"outlier__{inner[len('outlier_'):]}"] = v
+        elif inner.startswith("iso_"):
+            out[f"iso__{inner[len('iso_'):]}"] = v
+        elif inner.startswith("lds_"):
+            out[f"lds__{inner[len('lds_'):]}"] = v
         else:
             out[inner] = v
     return out

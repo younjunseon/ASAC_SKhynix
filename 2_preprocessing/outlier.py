@@ -456,3 +456,81 @@ def run_outlier_treatment(xs_train, xs_val, xs_test, feat_cols,
     print("=" * 60)
 
     return xs_train, xs_val, xs_test, report
+
+
+# ============================================================
+# 2차 funnel — IsolationForest 다변량 이상치 점수 (feature 추가)
+# ============================================================
+
+def multivariate_anomaly_score(xs_train, xs_val, xs_test, feat_cols,
+                               contamination='auto',
+                               n_estimators=200,
+                               score_col='iso_anomaly_score',
+                               max_samples='auto',
+                               random_state=42):
+    """
+    IsolationForest 기반 다변량 이상치 점수를 컬럼으로 추가 (제거 아님).
+
+    단변량 clip의 한계 보완 목적 (EDA: 단일 |r| max=0.037). 트리 모델이
+    `iso_anomaly_score > τ` 분기로 자동 활용 가능.
+
+    Parameters
+    ----------
+    xs_train, xs_val, xs_test : DataFrame
+    feat_cols : list
+        anomaly score 계산에 쓸 feature (일반적으로 cleaning 이후 남은 cols)
+    contamination : 'auto' or float in (0, 0.5), default 'auto'
+    n_estimators : int, default 200
+    score_col : str, default 'iso_anomaly_score'
+        추가될 컬럼 이름
+    max_samples : 'auto' or int, default 'auto'
+        학습 샘플 수 제한. 175K × 수백 feature 메모리 대응 시 10000 등으로 제한 가능
+    random_state : int, default 42
+
+    Returns
+    -------
+    xs_train, xs_val, xs_test : DataFrame (score_col 컬럼 추가됨)
+    new_feat_cols : list (기존 feat_cols + [score_col])
+    report : dict
+    """
+    from sklearn.ensemble import IsolationForest
+
+    iso = IsolationForest(contamination=contamination,
+                          n_estimators=n_estimators,
+                          max_samples=max_samples,
+                          random_state=random_state,
+                          n_jobs=-1)
+    iso.fit(xs_train[feat_cols].values)
+
+    # decision_function: 높을수록 normal, 낮을수록 anomaly
+    # 부호 뒤집어 "높을수록 이상"으로 통일. dtype은 feature와 동일하게 맞춰
+    # 기존 파이프라인의 float32 일관성 유지
+    in_dtype = xs_train[feat_cols].dtypes.iloc[0]
+    for df in [xs_train, xs_val, xs_test]:
+        scores = -iso.decision_function(df[feat_cols].values)
+        if in_dtype == np.float32:
+            scores = scores.astype(np.float32, copy=False)
+        df[score_col] = scores
+
+    new_feat_cols = list(feat_cols) + [score_col]
+    report = {
+        'n_estimators': n_estimators,
+        'contamination': contamination,
+        'max_samples': max_samples,
+        'score_col': score_col,
+        'train_score_range': (float(xs_train[score_col].min()),
+                              float(xs_train[score_col].max())),
+        'val_score_range':   (float(xs_val[score_col].min()),
+                              float(xs_val[score_col].max())),
+        'test_score_range':  (float(xs_test[score_col].min()),
+                              float(xs_test[score_col].max())),
+    }
+    print(f"[IsoForest] anomaly score 컬럼 추가: '{score_col}'")
+    print(f"  n_estimators={n_estimators}, contamination={contamination}")
+    print(f"  train score 범위: [{report['train_score_range'][0]:.4f}, "
+          f"{report['train_score_range'][1]:.4f}]")
+    print(f"  val   score 범위: [{report['val_score_range'][0]:.4f}, "
+          f"{report['val_score_range'][1]:.4f}]")
+    print(f"  test  score 범위: [{report['test_score_range'][0]:.4f}, "
+          f"{report['test_score_range'][1]:.4f}]")
+    return xs_train, xs_val, xs_test, new_feat_cols, report

@@ -6,3 +6,4 @@
 3-101-001,2026-04-14,baseline + HPO,e2e_single (lgbm),0.005757,0.008447,,,774,"lgbm-only, log1p, y_train clip, val, test 비공개",jh,440
 3-101-002,2026-04-14,baseline + HPO,e2e_single (lgbm),0.005735,0.00844,-2.2e-05,-7e-06,769,"lgbm-only, log1p, y_train clip, val, test 비공개",jh,250
 3-123-001,2026-04-15,baseline + HPO,e2e_single (lgbm),0.005751,0.008437,,,676,"lgbm-only, log1p, y_train clip, val, test 비공개",jh,40
+1-001-998,2026-04-16,ensemble + HPO,ensemble(lgbm+et+enet),0.006043,0.008677,,,707,"2차 funnel: 분류·회귀 3-모델 앙상블(LGBM+ET+선형), hybrid_scale 외부 1회, LDS, IsoForest score, Isotonic cal, A4",jh,2

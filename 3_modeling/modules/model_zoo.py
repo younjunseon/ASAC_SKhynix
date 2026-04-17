@@ -1,28 +1,27 @@
 """
 모델 팩토리 + 공통 fit 래퍼
 
-지원 모델 (트리 5종):
-- lgbm: LightGBM
-- xgb: XGBoost
-- catboost: CatBoost
-- rf: RandomForest
-- et: ExtraTrees
+지원 모델 (트리 3종 + 선형 2종):
+- lgbm: LightGBM (clf/reg)
+- rf: RandomForest (clf/reg)
+- et: ExtraTrees (clf/reg)
+- logreg_enet: LogisticRegression(penalty='elasticnet')  ★ 2차 신규 (clf 전용)
+- enet: ElasticNet                                       ★ 2차 신규 (reg 전용)
 
 사용법:
     from modules.model_zoo import create_model, fit_model, get_default_params
 
     model = create_model("lgbm", "clf", params)
-    fit_model(model, X_tr, y_tr, X_val, y_val, early_stop=50)
+    fit_model(model, X_tr, y_tr, X_val, y_val, early_stop=50, sample_weight=w)
     proba = model.predict_proba(X_test)[:, 1]
 """
 import numpy as np
 import lightgbm as lgb
-import xgboost as xgb
-from catboost import CatBoostClassifier, CatBoostRegressor
 from sklearn.ensemble import (
     RandomForestClassifier, RandomForestRegressor,
     ExtraTreesClassifier, ExtraTreesRegressor,
 )
+from sklearn.linear_model import ElasticNet, LogisticRegression
 
 from utils.config import SEED
 
@@ -34,16 +33,6 @@ MODEL_REGISTRY = {
         "reg": lgb.LGBMRegressor,
         "supports_early_stopping": True,
     },
-    "xgb": {
-        "clf": xgb.XGBClassifier,
-        "reg": xgb.XGBRegressor,
-        "supports_early_stopping": True,
-    },
-    "catboost": {
-        "clf": CatBoostClassifier,
-        "reg": CatBoostRegressor,
-        "supports_early_stopping": True,
-    },
     "rf": {
         "clf": RandomForestClassifier,
         "reg": RandomForestRegressor,
@@ -52,6 +41,17 @@ MODEL_REGISTRY = {
     "et": {
         "clf": ExtraTreesClassifier,
         "reg": ExtraTreesRegressor,
+        "supports_early_stopping": False,
+    },
+    # ★ 2차 신규
+    "logreg_enet": {
+        "clf": LogisticRegression,
+        "reg": None,                          # 분류 전용
+        "supports_early_stopping": False,
+    },
+    "enet": {
+        "clf": None,                          # 회귀 전용
+        "reg": ElasticNet,
         "supports_early_stopping": False,
     },
 }
@@ -84,7 +84,7 @@ def get_default_params(name, task, device=None):
     Parameters
     ----------
     name : str
-        모델명 ("lgbm", "xgb", "catboost", "rf", "et")
+        모델명 ("lgbm", "rf", "et")
     task : str
         "clf" (분류) 또는 "reg" (회귀)
     device : str, optional
@@ -113,35 +113,6 @@ def get_default_params(name, task, device=None):
             verbose=-1,
             device=device,
         )
-    elif name == "xgb":
-        params = dict(
-            n_estimators=1000,
-            learning_rate=0.05,
-            max_depth=6,
-            min_child_weight=20,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            tree_method="hist",
-            device="cuda" if device == "gpu" else "cpu",
-            random_state=SEED,
-            n_jobs=-1,
-            verbosity=0,
-        )
-    elif name == "catboost":
-        # bootstrap_type=Bernoulli: 기본 Bayesian은 subsample 미지원
-        # task_type='CPU' 강제: Colab T4 GPU에서 LGBM과 GPU 메모리 경합으로 OOM 발생하여 CPU로 고정
-        params = dict(
-            iterations=1000,
-            learning_rate=0.05,
-            depth=6,
-            min_data_in_leaf=20,
-            bootstrap_type="Bernoulli",
-            subsample=0.8,
-            colsample_bylevel=0.8,
-            task_type="CPU",
-            random_seed=SEED,
-            verbose=0,
-        )
     elif name == "rf":
         params = dict(
             n_estimators=500,
@@ -159,6 +130,28 @@ def get_default_params(name, task, device=None):
             max_features="sqrt",
             random_state=SEED,
             n_jobs=-1,
+        )
+    elif name == "logreg_enet":
+        # LogisticRegression(penalty='elasticnet', solver='saga')
+        # 선형 모델은 HybridScaler 적용 후 입력 가정
+        params = dict(
+            penalty='elasticnet',
+            solver='saga',
+            C=1.0,
+            l1_ratio=0.5,
+            max_iter=2000,
+            tol=1e-3,
+            random_state=SEED,
+            n_jobs=-1,
+        )
+    elif name == "enet":
+        # ElasticNet 회귀
+        params = dict(
+            alpha=0.001,
+            l1_ratio=0.5,
+            max_iter=5000,
+            tol=1e-4,
+            random_state=SEED,
         )
 
     return params
@@ -188,6 +181,9 @@ def create_model(name, task, params=None):
         raise ValueError(f"task must be 'clf' or 'reg', got '{task}'")
 
     cls = MODEL_REGISTRY[name][task]
+    if cls is None:
+        raise ValueError(f"Model '{name}' does not support task='{task}' "
+                         f"(registry entry is None)")
     if params is None:
         params = get_default_params(name, task)
 
@@ -195,7 +191,8 @@ def create_model(name, task, params=None):
 
 
 # ─── 공통 fit 래퍼 ────────────────────────────────────────────
-def fit_model(model, X_train, y_train, X_val=None, y_val=None, early_stop=50):
+def fit_model(model, X_train, y_train, X_val=None, y_val=None, early_stop=50,
+              sample_weight=None):
     """
     모델 타입에 맞는 early stopping으로 학습
 
@@ -206,6 +203,8 @@ def fit_model(model, X_train, y_train, X_val=None, y_val=None, early_stop=50):
     X_val, y_val : 검증 데이터 (early stopping용. None이면 early stopping 없이 학습)
     early_stop : int
         early stopping patience
+    sample_weight : array-like or None
+        sample weight (LGBM/RF/ET/ElasticNet/LogReg 모두 sklearn 표준 인자로 지원)
 
     Returns
     -------
@@ -216,6 +215,8 @@ def fit_model(model, X_train, y_train, X_val=None, y_val=None, early_stop=50):
     # --- LightGBM ---
     if "lgbm" in model_cls:
         fit_kwargs = {}
+        if sample_weight is not None:
+            fit_kwargs["sample_weight"] = sample_weight
         if X_val is not None:
             fit_kwargs["eval_set"] = [(X_val, y_val)]
             fit_kwargs["callbacks"] = [
@@ -224,26 +225,12 @@ def fit_model(model, X_train, y_train, X_val=None, y_val=None, early_stop=50):
             ]
         model.fit(X_train, y_train, **fit_kwargs)
 
-    # --- XGBoost ---
-    elif "xgb" in model_cls:
-        fit_kwargs = {}
-        if X_val is not None:
-            fit_kwargs["eval_set"] = [(X_val, y_val)]
-            fit_kwargs["verbose"] = False
-        model.set_params(early_stopping_rounds=early_stop if X_val is not None else None)
-        model.fit(X_train, y_train, **fit_kwargs)
-
-    # --- CatBoost ---
-    elif "catboost" in model_cls:
-        fit_kwargs = {}
-        if X_val is not None:
-            fit_kwargs["eval_set"] = (X_val, y_val)
-            fit_kwargs["early_stopping_rounds"] = early_stop
-        model.fit(X_train, y_train, **fit_kwargs)
-
-    # --- RF / ExtraTrees (no early stopping) ---
+    # --- RF / ExtraTrees / ElasticNet / LogisticRegression (sklearn 표준) ---
     else:
-        model.fit(X_train, y_train)
+        if sample_weight is not None:
+            model.fit(X_train, y_train, sample_weight=sample_weight)
+        else:
+            model.fit(X_train, y_train)
 
     return model
 
@@ -253,10 +240,6 @@ def get_best_iteration(model):
     model_cls = type(model).__name__.lower()
 
     if "lgbm" in model_cls:
-        return getattr(model, "best_iteration_", None)
-    elif "xgb" in model_cls:
-        return getattr(model, "best_iteration", None)
-    elif "catboost" in model_cls:
         return getattr(model, "best_iteration_", None)
     return None
 
