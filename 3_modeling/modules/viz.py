@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+plt.rcParams["axes.unicode_minus"] = False
+
 
 # =====================================================================
 # 1. Optuna 결과 시각화
