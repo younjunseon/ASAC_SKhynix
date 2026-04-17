@@ -100,4 +100,9 @@ if os.path.exists(_style_path):
         plt.rcParams["font.family"] = "Malgun Gothic"
     plt.rcParams["axes.unicode_minus"] = False
 
+# U+2212 (−) 글리프 경고 방지: matplotlib 내부 로거 필터링
+import logging
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
+logging.getLogger("matplotlib.mathtext").setLevel(logging.ERROR)
+
 print("setup 완료")
