@@ -2576,6 +2576,7 @@ def rerun_best_trial_with_pp(
 
     result = {
         "unit_data": unit_data,
+        "unit_data_die": unit_data_die,   # die-level concat (reg_level='position'용, 집계 전)
         "die_data": die_data,
         "selected_cols": selected_cols,
         "feat_cols_clean": feat_cols_clean,
