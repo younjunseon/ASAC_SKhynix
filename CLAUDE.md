@@ -486,6 +486,47 @@ Stage 2: 회귀 (Y>0인 샘플만)
 - LightGBM: `objective='poisson'` 또는 `objective='tweedie'` (tweedie_variance_power 1.0~1.5 실험)
 - XGBoost: `objective='count:poisson'`
 
+#### 7-B2: ZITboost — ZI-Tweedie + LightGBM (Two-Stage 대안)
+
+**배경 (2026-04-17 분석)**: 1차 실험 5,750 trial 분석 결과, Stage 1 분류 성능이 **Recall 평균 0.011, 최대 0.076, AUC 평균 0.576**으로 거의 랜덤 수준임을 확인. 분류 실패로 Two-Stage의 `P(Y>0) × E[Y|Y>0]` 곱셈이 예측을 0으로 수렴시키는 구조적 문제 발생. 이를 우회하기 위해 분류와 회귀를 joint loss로 동시 학습하는 ZITboost를 대안 경로로 추가.
+
+**이론적 근거**: Gu 2024 (논문 2-16) — ZI-Tweedie는 semicontinuous 데이터(0에 확률질량 + 양수에 연속분포)를 단일 모델로 처리. compound Poisson-Gamma(Tweedie)에 zero-inflation을 추가한 mixture model을 EM + gradient boosted trees(LightGBM)로 비모수 추정. **우리 health 데이터(70.8% zero + 연속형 양수)와 구조적으로 정확히 일치.**
+
+**Two-Stage vs ZITboost 핵심 차이**:
+
+| | Two-Stage (7-B) | ZITboost (7-B2) |
+|---|---|---|
+| 구조 | 분류 → 회귀 (순차) | π + μ + φ 동시 학습 (EM) |
+| 오차 전파 | **분류 오차가 곱셈으로 증폭** | joint loss로 상호 보완 |
+| 학습 데이터 | Stage 2는 Y>0 29.2%만 | **전체 100%** 사용 |
+| 분류 성능 의존 | **치명적** (Recall 0.01이면 무력화) | 분류 약해도 μ가 보상 |
+| 피처 분리 | Stage별 다른 피처 가능 | 동일 피처 (LightGBM이 자동 선택) |
+
+**ZITboost 모델 구조**:
+```
+Y_i = 0        확률 π(x_i)           ← structural zero (정상 제품)
+Y_i ~ Tweedie(μ_i, φ_i, ζ)  확률 1-π(x_i)  ← Tweedie 상태
+
+최종 예측: E[Y] = (1-π) × μ
+```
+
+**EM 알고리즘 (Generalized EM)**:
+1. **초기화**: Zero-truncated Tweedie(Y>0만)로 μ 초기화 → φ, π 계산
+2. **E-step**: Π_i = P(structural zero | y_i, x_i) — posterior zero probability
+3. **M-step**: 3개 LightGBM 모델 각각 업데이트
+   - `lgb_pi`: cross-entropy loss, target=Π_i
+   - `lgb_mu`: weighted Tweedie deviance, weight=(1-Π_i)×w/φ
+   - `lgb_phi`: weighted gamma regression, weight=(1-Π_i)
+4. 2~3 반복 (10회 정도)
+
+**구현 위치**: `3_modeling/modules/zi_tweedie.py` (신규, ~200줄). 기존 모듈 수정 **0줄**.
+
+**적용 시점**: 2차 funnel 후반 또는 3차에서 Two-Stage OOF와 ZITboost OOF를 나란히 비교. **분류 Recall이 0.05 미만이면 ZITboost 우선 실험 권장.**
+
+**Optuna HPO 탐색 축**: `zeta`(Tweedie power, 1.1~1.9), `n_em_iters`(5~20), LightGBM HP(lr, num_leaves 등)
+
+**ZIP/ZINB와의 차이**: ZIP/ZINB는 **카운트 데이터(정수)** 전용이므로 우리 health(연속형)에 적용 불가. ZI-Tweedie만 semicontinuous 데이터에 적용 가능.
+
 #### 7-C: Ensemble (최고 성능 추구)
 
 7-A의 baseline 결과를 기반으로 상위 모델들을 조합한다.
@@ -575,7 +616,7 @@ Stage 2: 회귀 (Y>0인 샘플만)
 #### 3차 — 최종 1개 조합에서 성능 짜내기
 
 - 살아남은 (전처리 1개 + 모델 조합 1개)에 trial 크게 부여
-- **이 단계에서 검토할 옵션**: Two-Stage 활성화(`run_clf=True`), FS 활성화(`run_fs=True`), `target transform`, `zero_clip threshold` 재탐색
+- **이 단계에서 검토할 옵션**: Two-Stage 활성화(`run_clf=True`), FS 활성화(`run_fs=True`), `target transform`, `zero_clip threshold` 재탐색, **ZITboost(7-B2) vs Two-Stage(7-B) 비교**
 - **앙상블**: 2차에서 저장한 OOF 예측에 가중치 튜닝 또는 Stacking
 - **EVAL_TEST 정책**: 성능 우선이므로 `True` 운용. peek-bias로 인한 test 과적합 위험은 인지하고, val/OOF와 test 차이를 모니터링
 - **포지션 가중치 정밀 튜닝**: 2차에서 저장한 경로 2(회귀→집계) OOF 예측에 대해 Optuna로 `w1~w4` 탐색(Dirichlet 정규화). 경로 1 단독 / 경로 2 단독 / 두 경로 blend 중 val RMSE 최소를 최종 선택
@@ -602,6 +643,7 @@ Stage 2: 회귀 (Y>0인 샘플만)
 2. **Zero-inflated 분포**: Y의 70.8%가 0이므로 이를 고려한 모델링 전략 필요 (two-stage model, zero-inflated regression 등 고려)
 3. **비식별화 데이터**: 변수명이 X0~X1086으로 비식별화되어 있으므로 도메인 지식 기반 해석보다 데이터 기반 접근 필요
 4. **평가 지표는 RMSE**: 회귀 문제이며 분류가 아님
+5. **ZIR 모델 적용 시 주의**: ZIP/ZINB는 카운트(정수) 데이터 전용 → 우리 health(연속형)에 **적용 불가**. 연속형 zero-inflated 데이터에는 **ZI-Tweedie만** 적용 가능. Two-Stage(7-B)의 Stage 1 분류 성능이 Recall < 0.05이면 ZITboost(7-B2)가 유리할 가능성 높음 (1차 실험 5,750 trial 분석 근거: Recall 평균 0.011, AUC 0.576)
 
 ## 논문 참조
 
@@ -622,6 +664,9 @@ Stage 2: 회귀 (Y>0인 샘플만)
 | 5-4 (GPR Outlier, 2024) | Stage 4.5 | 공간 잔차 피처 |
 | Shmuel 2024 (벤치마크 111개) | Stage 7-A | CatBoost 추가 근거 |
 | Kang 2015 (SK Hynix 공저) | Stage 4.5 | 공간 피처의 직접적 근거 |
+| 2-12 (Feng 2021, ZI vs Hurdle) | Stage 7-B/7-B2 | ZI vs Hurdle 체계적 비교, zero-deflation 시 Hurdle 우세 |
+| 2-16 (Gu 2024, ZITboost) | Stage 7-B2 | ZI-Tweedie + LightGBM EM, semicontinuous 데이터 SOTA |
+| 2-13 (Sidumo 2023, ML vs ZIR) | Stage 7-B2 | ML 모델이 ZIP/ZINB outperform → 트리 기반 접근 정당화 |
 
 ## 디렉토리 구조
 
