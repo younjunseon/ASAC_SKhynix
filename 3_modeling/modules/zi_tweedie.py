@@ -302,7 +302,7 @@ class ZITboostRegressor(BaseEstimator, RegressorMixin):
         -------
         self
         """
-        X = np.asarray(X, dtype=np.float32)
+        X = np.asarray(X, dtype=np.float64)
         y = np.asarray(y, dtype=np.float64).ravel()
 
         # 초기화
@@ -392,7 +392,7 @@ class ZITboostRegressor(BaseEstimator, RegressorMixin):
         if not hasattr(self, "fitted_"):
             raise ValueError("Model not fitted. Call fit() first.")
 
-        X = np.asarray(X, dtype=np.float32)
+        X = np.asarray(X, dtype=np.float64)
         pi = self.lgb_pi_.predict(X)  # cross_entropy: 확률 직접 반환
         pi = np.clip(pi, 1e-8, 1 - 1e-8)
         mu = self.lgb_mu_.predict(X)

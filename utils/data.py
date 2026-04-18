@@ -24,19 +24,39 @@ def load_xs(force=False, downcast=True):
     downcast : bool
         True(기본)면 X* feature 컬럼을 float32로 다운캐스트.
         메모리 사용량을 float64 대비 절반으로 줄인다.
+        X1086은 날짜값(8자리 정수)이므로 int32로 별도 변환 (float32 정밀도 부족).
         메타 컬럼(ufs_serial, run_wf_xy, split, position)은 불변.
         주의: 캐시 키가 고정이므로 downcast 값을 도중에 바꾸려면 force=True 필요.
+
+    Notes
+    -----
+    - Feature 1,087개 전부 NaN인 행(all-NaN die)은 로딩 시 자동 제거된다.
 
     Returns
     -------
     DataFrame
-        (174,980 × 1,091) die-level 데이터
+        die-level 데이터 (all-NaN 행 제거 후)
     """
     if "xs" not in _cache or force:
         df = pd.read_csv(XS_PATH)
+
+        # ── all-NaN 행 제거 (feature 1,087개 전부 결측인 die) ──
+        feat_cols = [c for c in df.columns if c.startswith("X")]
+        all_nan = df[feat_cols].isnull().all(axis=1)
+        if all_nan.any():
+            n = int(all_nan.sum())
+            df = df[~all_nan].reset_index(drop=True)
+            print(f"[load_xs] all-NaN 행 {n}개 제거 → {len(df):,}행")
+
+        # ── dtype 다운캐스트 ──
         if downcast:
-            feat_cols = [c for c in df.columns if c.startswith("X")]
-            df[feat_cols] = df[feat_cols].astype("float32")
+            # X1086: 날짜값(8자리 정수) → float32 유효숫자 7자리라 끝자리 변조
+            # all-NaN 행 제거 후 X1086에 NaN 없음 → numpy int32 사용 가능
+            safe_cols = [c for c in feat_cols if c != "X1086"]
+            df[safe_cols] = df[safe_cols].astype("float32")
+            if "X1086" in df.columns:
+                df["X1086"] = df["X1086"].astype("int32")
+
         _cache["xs"] = df
     return _cache["xs"]
 

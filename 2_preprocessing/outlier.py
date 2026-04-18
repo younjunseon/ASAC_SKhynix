@@ -64,9 +64,12 @@ def _match_bounds_dtype(xs_train, feat_cols, lower, upper):
         return lower, upper
     if in_dtype == np.float32:
         if hasattr(lower, 'astype'):
-            lower = lower.astype('float32')
+            # X1086 파생 bounds는 float64 유지 (날짜값 8자리, float32 정밀도 부족)
+            safe_idx = [i for i in lower.index if not str(i).startswith("X1086")]
+            lower[safe_idx] = lower[safe_idx].astype('float32')
         if hasattr(upper, 'astype'):
-            upper = upper.astype('float32')
+            safe_idx = [i for i in upper.index if not str(i).startswith("X1086")]
+            upper[safe_idx] = upper[safe_idx].astype('float32')
     return lower, upper
 
 

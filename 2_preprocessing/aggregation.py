@@ -81,10 +81,12 @@ def run_aggregation(xs_train, xs_val, xs_test, feat_cols,
 
         # groupby.agg는 보통 dtype 보존하지만 일부 버전에서 float64로 승격될 수 있어
         # 입력이 float32면 결과도 float32로 강제 (메모리 일관성)
+        # X1086 파생 컬럼 제외: 날짜값(8자리 정수)은 float32 정밀도 부족
         if in_dtype == np.float32 and not agg_df.empty:
             float_cols = agg_df.select_dtypes(include=['float64']).columns
-            if len(float_cols) > 0:
-                agg_df[float_cols] = agg_df[float_cols].astype('float32')
+            safe_cols = [c for c in float_cols if not c.startswith("X1086")]
+            if len(safe_cols) > 0:
+                agg_df[safe_cols] = agg_df[safe_cols].astype('float32')
 
         parts[name] = agg_df
 

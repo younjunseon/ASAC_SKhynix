@@ -95,10 +95,13 @@ def create_lot_stats_features(xs_train, xs_val, xs_test, feat_cols, agg_funcs=No
     lot_stat_cols = lot_stats.columns.tolist()
 
     # 입력 feat_cols와 dtype 일치 (float32 파이프라인에서 merge 시 upcast 방지)
+    # X1086 파생 컬럼 제외: 날짜값(8자리 정수)은 float32 정밀도 부족
     try:
         in_dtype = xs_train[feat_cols].dtypes.iloc[0]
         if in_dtype == np.float32:
-            lot_stats = lot_stats.astype('float32')
+            safe_cols = [c for c in lot_stats.columns if "X1086" not in c]
+            if safe_cols:
+                lot_stats[safe_cols] = lot_stats[safe_cols].astype('float32')
     except (AttributeError, IndexError):
         pass
 
