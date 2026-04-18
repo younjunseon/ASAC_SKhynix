@@ -173,12 +173,71 @@ def enet_space(trial, prefix=""):
     )
 
 
+def zitboost_space(trial, prefix=""):
+    """ZI-Tweedie + LightGBM EM 탐색 공간 (21개 HP).
+
+    μ(핵심 회귀): 9개 full HP
+    π(zero 확률): 5개 medium HP
+    φ(분산):      5개 medium HP
+    ZIT 전용:     zeta, n_em_iters
+    """
+    p = prefix
+
+    # ── ZIT 전용 (2개) ──
+    params = dict(
+        zeta=trial.suggest_float(f"{p}zeta", 1.1, 1.9),
+        n_em_iters=trial.suggest_int(f"{p}n_em_iters", 3, 20),
+    )
+
+    # ── μ 모델: 핵심 회귀 (9개) ──
+    params.update(
+        mu_n_estimators=trial.suggest_int(f"{p}mu_n_estimators", 100, 2000),
+        mu_learning_rate=trial.suggest_float(f"{p}mu_learning_rate", 0.005, 0.1, log=True),
+        mu_num_leaves=trial.suggest_int(f"{p}mu_num_leaves", 32, 256),
+        mu_max_depth=trial.suggest_int(f"{p}mu_max_depth", 5, 12),
+        mu_min_child_samples=trial.suggest_int(f"{p}mu_min_child_samples", 5, 100),
+        mu_subsample=trial.suggest_float(f"{p}mu_subsample", 0.5, 1.0),
+        mu_colsample_bytree=trial.suggest_float(f"{p}mu_colsample_bytree", 0.3, 1.0),
+        mu_reg_alpha=trial.suggest_float(f"{p}mu_reg_alpha", 1e-8, 10.0, log=True),
+        mu_reg_lambda=trial.suggest_float(f"{p}mu_reg_lambda", 1e-8, 10.0, log=True),
+    )
+
+    # ── π 모델: zero 확률 분류 (5개) ──
+    params.update(
+        pi_n_estimators=trial.suggest_int(f"{p}pi_n_estimators", 50, 500),
+        pi_learning_rate=trial.suggest_float(f"{p}pi_learning_rate", 0.01, 0.1, log=True),
+        pi_num_leaves=trial.suggest_int(f"{p}pi_num_leaves", 16, 128),
+        pi_max_depth=trial.suggest_int(f"{p}pi_max_depth", 3, 8),
+        pi_min_child_samples=trial.suggest_int(f"{p}pi_min_child_samples", 10, 100),
+    )
+
+    # ── φ 모델: 분산 (5개) ──
+    params.update(
+        phi_n_estimators=trial.suggest_int(f"{p}phi_n_estimators", 50, 500),
+        phi_learning_rate=trial.suggest_float(f"{p}phi_learning_rate", 0.01, 0.1, log=True),
+        phi_num_leaves=trial.suggest_int(f"{p}phi_num_leaves", 16, 128),
+        phi_max_depth=trial.suggest_int(f"{p}phi_max_depth", 3, 8),
+        phi_min_child_samples=trial.suggest_int(f"{p}phi_min_child_samples", 10, 100),
+    )
+
+    # ── 공통 ──
+    params.update(
+        random_state=SEED,
+        n_jobs=-1,
+        verbose=-1,
+        device=DEVICE,
+    )
+
+    return params
+
+
 SEARCH_SPACES = {
     "lgbm":        lgbm_space,
     "rf":          rf_space,
     "et":          et_space,             # ★ 2차: rf_space → et_space 교체 (bootstrap 축 추가)
     "logreg_enet": logreg_enet_space,    # ★ 2차 신규
     "enet":        enet_space,           # ★ 2차 신규
+    "zitboost":    zitboost_space,       # ★ ZITboost (ZI-Tweedie + EM)
 }
 
 

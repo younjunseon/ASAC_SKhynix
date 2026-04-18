@@ -24,6 +24,7 @@ from sklearn.ensemble import (
 from sklearn.linear_model import ElasticNet, LogisticRegression
 
 from utils.config import SEED
+from modules.zi_tweedie import ZITboostRegressor
 
 
 # ─── 모델 레지스트리 ──────────────────────────────────────────
@@ -52,6 +53,12 @@ MODEL_REGISTRY = {
     "enet": {
         "clf": None,                          # 회귀 전용
         "reg": ElasticNet,
+        "supports_early_stopping": False,
+    },
+    # ★ ZITboost (ZI-Tweedie + EM)
+    "zitboost": {
+        "clf": None,                          # 회귀 전용 (내부 π가 분류 담당)
+        "reg": ZITboostRegressor,
         "supports_early_stopping": False,
     },
 }
@@ -152,6 +159,35 @@ def get_default_params(name, task, device=None):
             max_iter=5000,
             tol=1e-4,
             random_state=SEED,
+        )
+    elif name == "zitboost":
+        # ZITboost (ZI-Tweedie + EM) 기본 파라미터
+        params = dict(
+            zeta=1.5,
+            n_em_iters=10,
+            mu_n_estimators=500,
+            mu_learning_rate=0.05,
+            mu_num_leaves=31,
+            mu_max_depth=6,
+            mu_min_child_samples=20,
+            mu_subsample=0.8,
+            mu_colsample_bytree=0.8,
+            mu_reg_alpha=1e-3,
+            mu_reg_lambda=1e-1,
+            pi_n_estimators=200,
+            pi_learning_rate=0.05,
+            pi_num_leaves=31,
+            pi_max_depth=6,
+            pi_min_child_samples=20,
+            phi_n_estimators=200,
+            phi_learning_rate=0.05,
+            phi_num_leaves=31,
+            phi_max_depth=6,
+            phi_min_child_samples=20,
+            random_state=SEED,
+            n_jobs=-1,
+            verbose=-1,
+            device=device,
         )
 
     return params

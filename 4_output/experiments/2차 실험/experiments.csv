@@ -1,0 +1,4 @@
+﻿실험번호,날짜,타입,베스트모델,val_rmse,test_rmse,val_증감,test_증감,피처수,메모,user,n_trials
+1-999-001,2026-04-17,ensemble + HPO,ensemble(lgbm+et+enet),0.006012,0.008652,,,596,"2차 funnel: 분류·회귀 3-모델 앙상블(LGBM+ET+선형), hybrid_scale 외부 1회, LDS, IsoForest score, Isotonic cal, A4",jh,1
+1-999-002,2026-04-17,ensemble + HPO,ensemble(lgbm+et+enet),0.006019,0.008657,7e-06,5e-06,801,"2차 funnel: 분류·회귀 3-모델 앙상블(LGBM+ET+선형), hybrid_scale 외부 1회, LDS, IsoForest score, Isotonic cal, A4",jh,5
+3-001-001,2026-04-18,ensemble + HPO,ensemble(lgbm+et+enet),0.005891,0.008557,,,591,"2차 funnel: 분류·회귀 3-모델 앙상블(LGBM+ET+선형), hybrid_scale 외부 1회, LDS, IsoForest score, Isotonic cal, A4",jh,35

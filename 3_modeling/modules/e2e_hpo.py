@@ -2627,12 +2627,14 @@ def _save_per_model_oof(per_model_clf, per_model_reg, clf_result_soft,
 
     Parameters
     ----------
-    per_model_clf : dict {model: {pos: {'train_proba','val_proba','test_proba'}}}
-        _run_clf_oof_multi의 per_model 반환값
+    per_model_clf : dict or None
+        {model: {pos: {'train_proba','val_proba','test_proba'}}}
+        _run_clf_oof_multi의 per_model 반환값. None이면 (run_clf=False) clf CSV 생성 스킵.
     per_model_reg : dict {model: {'oof_pred','val_pred','test_pred', ...}}
         _run_reg_oof_multi의 per_model 반환값 (reg_level='position' die-level concat 순서)
-    clf_result_soft : dict {pos: {'train_proba','val_proba','test_proba'}}
-        _run_clf_oof_multi의 soft-voted 반환값 (meta의 clf_proba_mean에 사용)
+    clf_result_soft : dict or None
+        {pos: {'train_proba','val_proba','test_proba'}}
+        _run_clf_oof_multi의 soft-voted 반환값. None이면 meta의 clf_proba_mean은 NaN.
     sample_weight : np.ndarray or None
         train die-level 가중치 (LDS). None이면 meta의 lds_weight는 전부 NaN.
     pos_data : dict {pos: {'train','val','test'}}
@@ -2669,12 +2671,15 @@ def _save_per_model_oof(per_model_clf, per_model_reg, clf_result_soft,
             else:
                 w_slice = np.full(n, np.nan)
 
+            clf_proba = (clf_result_soft[pos][f"{split}_proba"]
+                         if clf_result_soft is not None
+                         else np.full(n, np.nan))
             meta_rows.append(pd.DataFrame({
                 KEY_COL:          df[KEY_COL].values,
                 POSITION_COL:     pos,
                 "split":          split,
                 TARGET_COL:       df[TARGET_COL].values,
-                "clf_proba_mean": clf_result_soft[pos][f"{split}_proba"],
+                "clf_proba_mean": clf_proba,
                 "lds_weight":     w_slice,
             }))
     meta_df = pd.concat(meta_rows, ignore_index=True)
@@ -2682,22 +2687,23 @@ def _save_per_model_oof(per_model_clf, per_model_reg, clf_result_soft,
     meta_df.to_csv(meta_path, index=False)
     saved_files.append(meta_path)
 
-    # ── oof_clf_{model}.csv × N ──
-    for m in clf_models:
-        rows = []
-        for split in ["train", "val", "test"]:
-            for pos in sorted(pos_data.keys()):
-                df = pos_data[pos][split]
-                rows.append(pd.DataFrame({
-                    KEY_COL:      df[KEY_COL].values,
-                    POSITION_COL: pos,
-                    "split":      split,
-                    TARGET_COL:   df[TARGET_COL].values,
-                    "clf_proba":  per_model_clf[m][pos][f"{split}_proba"],
-                }))
-        clf_path = os.path.join(oof_dir, f"oof_clf_{m}.csv")
-        pd.concat(rows, ignore_index=True).to_csv(clf_path, index=False)
-        saved_files.append(clf_path)
+    # ── oof_clf_{model}.csv × N (run_clf=False면 스킵) ──
+    if per_model_clf is not None:
+        for m in clf_models:
+            rows = []
+            for split in ["train", "val", "test"]:
+                for pos in sorted(pos_data.keys()):
+                    df = pos_data[pos][split]
+                    rows.append(pd.DataFrame({
+                        KEY_COL:      df[KEY_COL].values,
+                        POSITION_COL: pos,
+                        "split":      split,
+                        TARGET_COL:   df[TARGET_COL].values,
+                        "clf_proba":  per_model_clf[m][pos][f"{split}_proba"],
+                    }))
+            clf_path = os.path.join(oof_dir, f"oof_clf_{m}.csv")
+            pd.concat(rows, ignore_index=True).to_csv(clf_path, index=False)
+            saved_files.append(clf_path)
 
     # ── oof_reg_{model}.csv × N ──
     # unit_data의 split별 row 순서 = per_model_reg[m][*_pred] 순서와 동일
