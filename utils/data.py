@@ -83,6 +83,12 @@ def load_ys(force=False):
     force : bool
         True면 캐시 무시하고 CSV에서 다시 로드
 
+    Notes
+    -----
+    - load_xs에서 all-NaN die 또는 4 position 미만 unit이 제거되면,
+      해당 unit은 ys에서도 자동 제거된다 (xs/ys 세트 일관성 보장).
+      제거된 unit은 피처 전원 NaN 또는 die 불완전이라 예측 불가능.
+
     Returns
     -------
     dict
@@ -93,6 +99,23 @@ def load_ys(force=False):
         ys_train = pd.read_csv(YS_TRAIN_PATH)
         ys_val = pd.read_csv(YS_VAL_PATH)
         ys_test = pd.read_csv(YS_TEST_PATH)
+
+        # xs에 존재하는 unit으로 ys 필터링 (xs/ys 세트 일관성)
+        xs_units = set(load_xs(force=force)[KEY_COL].unique())
+
+        def _filter_ys(df, name):
+            before = len(df)
+            out = df[df[KEY_COL].isin(xs_units)].reset_index(drop=True)
+            n_removed = before - len(out)
+            if n_removed > 0:
+                print(f"[load_ys] {name}: xs에 없는 unit {n_removed}개 제거 "
+                      f"→ {len(out):,}")
+            return out
+
+        ys_train = _filter_ys(ys_train, "train")
+        ys_val = _filter_ys(ys_val, "validation")
+        ys_test = _filter_ys(ys_test, "test")
+
         ys_all = pd.concat([
             ys_train.assign(**{SPLIT_COL: "train"}),
             ys_val.assign(**{SPLIT_COL: "validation"}),
