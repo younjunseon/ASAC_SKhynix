@@ -6,7 +6,7 @@
 import pandas as pd
 from utils.config import (
     XS_PATH, YS_TRAIN_PATH, YS_VAL_PATH, YS_TEST_PATH,
-    META_COLS, SPLIT_COL, KEY_COL, TARGET_COL,
+    META_COLS, SPLIT_COL, KEY_COL, POSITION_COL, TARGET_COL,
 )
 
 # ─── 캐시 ──────────────────────────────────────────────────
@@ -31,11 +31,12 @@ def load_xs(force=False, downcast=True):
     Notes
     -----
     - Feature 1,087개 전부 NaN인 행(all-NaN die)은 로딩 시 자동 제거된다.
+    - 4 position이 온전하지 않은 unit은 로딩 시 자동 제거된다 (all-NaN die 제거 이후).
 
     Returns
     -------
     DataFrame
-        die-level 데이터 (all-NaN 행 제거 후)
+        die-level 데이터 (all-NaN 행 + 불완전 unit 제거 후)
     """
     if "xs" not in _cache or force:
         df = pd.read_csv(XS_PATH)
@@ -47,6 +48,18 @@ def load_xs(force=False, downcast=True):
             n = int(all_nan.sum())
             df = df[~all_nan].reset_index(drop=True)
             print(f"[load_xs] all-NaN 행 {n}개 제거 → {len(df):,}행")
+
+        # ── Unit × Position 무결성: 4 position 미만 unit 제거 ──
+        # all-NaN die 제거로 깨진 unit, 또는 원본부터 불완전한 unit 모두 제거
+        pos_cnt = df.groupby(KEY_COL)[POSITION_COL].nunique()
+        incomplete = pos_cnt[pos_cnt != 4].index
+        if len(incomplete) > 0:
+            n_die_before = len(df)
+            split_dist = (df[df[KEY_COL].isin(incomplete)]
+                          .groupby(SPLIT_COL)[KEY_COL].nunique().to_dict())
+            df = df[~df[KEY_COL].isin(incomplete)].reset_index(drop=True)
+            print(f"[load_xs] 4 position 미만 unit {len(incomplete)}개 제거 "
+                  f"(split별: {split_dist}) → die {n_die_before:,} → {len(df):,}")
 
         # ── dtype 다운캐스트 ──
         if downcast:

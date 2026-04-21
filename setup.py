@@ -70,6 +70,12 @@ except ImportError:
 if _this not in sys.path:
     sys.path.insert(0, _this)
 
+# 2_preprocessing 모듈 경로 추가 (final/modules/cleaning.py 가
+# `from meta_features import parse_run_wf_xy` 를 수행하기 때문)
+_pp_dir = os.path.join(_this, "2_preprocessing")
+if os.path.isdir(_pp_dir) and _pp_dir not in sys.path:
+    sys.path.insert(0, _pp_dir)
+
 # ─── matplotlib 한글 설정 ────────────────────────────────
 import matplotlib
 import matplotlib.pyplot as plt
