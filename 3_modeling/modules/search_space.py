@@ -331,10 +331,21 @@ PP_SCALE_CONFIG = {
 
 # ── Binarize 고정 설정 (cleaning 직후) ──
 # top%>0.95 OR nunique≤5 → 0/1 (int8)
+# (zitboost_experiment/ensemble_2nd에서 재현성 로그용으로 계속 참조)
 PP_BINARIZE_CONFIG = {
     "apply":               True,
     "top_value_threshold": 0.95,
     "max_unique":          5,
+}
+
+# ── Binarize 후보 (baseline 전용 Optuna 탐색) ──
+# 기본값 apply=[False]로 두어 기존 노트북(zitboost/ensemble_2nd)의 Binarize OFF
+# 동작을 보존한다. baseline.ipynb에서 dict 뮤테이트로만 override해 ON/OFF 탐색:
+#   PP_BINARIZE_CANDIDATES['apply'] = [True, False]
+PP_BINARIZE_CANDIDATES = {
+    "apply":               [False],
+    "top_value_threshold": [0.95],
+    "max_unique":          [5],
 }
 
 
@@ -401,6 +412,12 @@ def preprocessing_space(trial):
             f"pp_outlier_{key}", candidates
         )
 
+    # ── ★ Binarize (2차 신규, baseline 전용 탐색 — 기본값 apply=[False]) ──
+    for key, candidates in PP_BINARIZE_CANDIDATES.items():
+        params[f"binarize__{key}"] = trial.suggest_categorical(
+            f"pp_binarize_{key}", candidates
+        )
+
     # ── ★ IsoForest (2차 신규) ──
     for key, candidates in PP_ISO_ANOMALY_CANDIDATES.items():
         params[f"iso__{key}"] = trial.suggest_categorical(
@@ -425,14 +442,15 @@ def split_pp_params(pp_params):
     """
     preprocessing_space 반환 dict를 전처리 함수들의 인자로 분배.
 
-    ★ 2차부터 5-tuple 반환 — iso_args, lds_args 추가.
-    e2e_hpo._run_preprocessing이 binarize/scaling/IsoForest/LDS 고정 호출 시
-    PP_SCALE_CONFIG/PP_BINARIZE_CONFIG는 여기서 다루지 않음 (탐색 대상 아님).
+    ★ 2차부터 6-tuple 반환 — binarize_args, iso_args, lds_args 추가.
+    HybridScaler는 여전히 탐색 대상 아님 (PP_SCALE_CONFIG 고정).
 
     Returns
     -------
     cleaning_args : dict — run_cleaning에 넘길 kwargs
     outlier_args  : dict — run_outlier_treatment에 넘길 kwargs
+    binarize_args : dict — binarize_degenerate 호출 제어
+                   ({'apply', 'top_value_threshold', 'max_unique'})
     iso_args      : dict — multivariate_anomaly_score에 넘길 kwargs
                    ({'iso_enabled', 'iso_contamination', 'iso_n_estimators'})
     lds_args      : dict — compute_lds_weights에 넘길 kwargs
@@ -444,6 +462,9 @@ def split_pp_params(pp_params):
     outlier_args = {k[len("outlier__"):]: v
                     for k, v in pp_params.items() if k.startswith("outlier__")}
 
+    binarize_args = {k[len("binarize__"):]: v
+                     for k, v in pp_params.items() if k.startswith("binarize__")}
+
     iso_args = {k[len("iso__"):]: v
                 for k, v in pp_params.items() if k.startswith("iso__")}
 
@@ -453,7 +474,7 @@ def split_pp_params(pp_params):
     agg_idx = pp_params.get("agg_preset_idx", 0)
     agg_funcs = AGG_PRESETS[agg_idx]
 
-    return cleaning_args, outlier_args, iso_args, lds_args, agg_funcs
+    return cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs
 
 
 def extract_pp_params_from_best(best_params):
@@ -462,11 +483,12 @@ def extract_pp_params_from_best(best_params):
     preprocessing_space가 반환하는 형식으로 복원.
 
     trial param 이름 → dict key 변환:
-      'pp_outlier_method'      → 'outlier__method'
-      'pp_iso_iso_enabled'     → 'iso__iso_enabled'
-      'pp_lds_lds_sigma'       → 'lds__lds_sigma'
-      'pp_agg_preset_idx'      → 'agg_preset_idx'
-      그 외                    → 'pp_' 떼고 그대로
+      'pp_outlier_method'       → 'outlier__method'
+      'pp_binarize_apply'       → 'binarize__apply'
+      'pp_iso_iso_enabled'      → 'iso__iso_enabled'
+      'pp_lds_lds_sigma'        → 'lds__lds_sigma'
+      'pp_agg_preset_idx'       → 'agg_preset_idx'
+      그 외                     → 'pp_' 떼고 그대로
     """
     out = {}
     for k, v in best_params.items():
@@ -475,6 +497,8 @@ def extract_pp_params_from_best(best_params):
         inner = k[len("pp_"):]
         if inner.startswith("outlier_"):
             out[f"outlier__{inner[len('outlier_'):]}"] = v
+        elif inner.startswith("binarize_"):
+            out[f"binarize__{inner[len('binarize_'):]}"] = v
         elif inner.startswith("iso_"):
             out[f"iso__{inner[len('iso_'):]}"] = v
         elif inner.startswith("lds_"):

@@ -1579,6 +1579,19 @@ def _build_params_from_best(best_params, prefix, model_name, fixed):
         if k.startswith(prefix):
             params[k[len(prefix):]] = v
 
+    # ★ LGBM objective 카테고리 파싱 (lgbm_space 내부 변환 재현)
+    # search space: ['regression', 'poisson', 'tweedie_1.2', 'tweedie_1.5']
+    # trial.params에는 'tweedie_1.2' 문자열로 저장되어 rerun 경로에서
+    # LGBM이 이해 못하므로, 'tweedie' + tweedie_variance_power 로 분해.
+    if model_name == "lgbm":
+        obj = params.pop("objective", None)
+        if obj == "poisson":
+            params["objective"] = "poisson"
+        elif isinstance(obj, str) and obj.startswith("tweedie"):
+            params["objective"] = "tweedie"
+            params["tweedie_variance_power"] = float(obj.split("_")[1])
+        # "regression" 또는 None → LGBM 기본(MSE), objective 주입 생략
+
     # 모델별 고정값
     if model_name == "lgbm":
         params.setdefault("random_state", SEED)
@@ -1698,7 +1711,7 @@ def _build_pos_data(xs_train, xs_val, xs_test, ys, label_col,
 
 
 def _run_preprocessing(xs, xs_dict, ys, feat_cols,
-                       cleaning_args, outlier_args,
+                       cleaning_args, outlier_args, binarize_args,
                        iso_args, lds_args,
                        label_col, exclude_cols,
                        use_sampling, sample_frac):
@@ -1707,13 +1720,19 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
 
     실행 순서 (strategy_2nd_preprocessing.md §7.1):
       1) cleaning
-      1.5) binarize_degenerate (고정: PP_BINARIZE_CONFIG)
+      1.5) binarize_degenerate (binarize_args['apply']=True일 때)
       2) outlier
       3) multivariate_anomaly_score (iso_args; iso_enabled=False면 스킵)
       4) hybrid_scale (고정: PP_SCALE_CONFIG, skew_threshold=5.0)
       5) exclude_cols 필터
       6) pos_data 빌드 (die-level, position 분리)
       7) compute_lds_weights (lds_args; expand_to_die=True → die-level weight)
+
+    Parameters
+    ----------
+    binarize_args : dict
+        {'apply', 'top_value_threshold', 'max_unique'}. None/빈 dict면
+        PP_BINARIZE_CONFIG 폴백 (하위호환). split_pp_params가 만든 dict 그대로.
 
     Returns
     -------
@@ -1728,6 +1747,12 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
     from scaling import hybrid_scale   # noqa: E402
     from sample_weight import compute_lds_weights   # noqa: E402
 
+    # binarize_args 폴백 (None/빈 dict → PP_BINARIZE_CONFIG 기본값)
+    _ba = binarize_args or {}
+    _apply     = _ba.get("apply", PP_BINARIZE_CONFIG.get("apply", False))
+    _top_val   = _ba.get("top_value_threshold", PP_BINARIZE_CONFIG["top_value_threshold"])
+    _max_uniq  = _ba.get("max_unique", PP_BINARIZE_CONFIG["max_unique"])
+
     ys_train = ys["train"]
 
     # --- 1) cleaning ---
@@ -1737,12 +1762,12 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
         **cleaning_args,
     )
 
-    # --- 1.5) binarize_degenerate (★ 2차 신규, 고정 설정) ---
-    if PP_BINARIZE_CONFIG.get("apply", True):
+    # --- 1.5) binarize_degenerate (★ 2차 신규, trial args) ---
+    if _apply:
         xs_train, xs_val, xs_test, _ = binarize_degenerate(
             xs_train, xs_val, xs_test, clean_cols,
-            top_value_threshold=PP_BINARIZE_CONFIG["top_value_threshold"],
-            max_unique=PP_BINARIZE_CONFIG["max_unique"],
+            top_value_threshold=_top_val,
+            max_unique=_max_uniq,
         )
 
     # --- 2) outlier ---
@@ -1796,7 +1821,7 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
 
 
 def _get_or_run_pp(cache, cache_key, xs, xs_dict, ys, feat_cols,
-                   cleaning_args, outlier_args,
+                   cleaning_args, outlier_args, binarize_args,
                    iso_args, lds_args,
                    label_col, exclude_cols,
                    use_sampling, sample_frac, max_size):
@@ -1816,7 +1841,7 @@ def _get_or_run_pp(cache, cache_key, xs, xs_dict, ys, feat_cols,
     with contextlib.redirect_stdout(buf):
         pos_data, feat_cols_clean, sample_weight, scaler = _run_preprocessing(
             xs, xs_dict, ys, feat_cols,
-            cleaning_args, outlier_args,
+            cleaning_args, outlier_args, binarize_args,
             iso_args, lds_args,
             label_col, exclude_cols,
             use_sampling, sample_frac,
@@ -1949,12 +1974,12 @@ def run_e2e_optimization_with_pp(
     def objective(trial):
         # ── ⓪ 전처리 (캐싱) ──
         pp_params = preprocessing_space(trial)
-        cleaning_args, outlier_args, iso_args, lds_args, agg_funcs = split_pp_params(pp_params)
+        cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs = split_pp_params(pp_params)
         cache_key = _pp_hash(pp_params)
 
         pp_value = _get_or_run_pp(
             pp_cache, cache_key, xs, xs_dict, ys, feat_cols,
-            cleaning_args, outlier_args,
+            cleaning_args, outlier_args, binarize_args,
             iso_args, lds_args,
             label_col, exclude_cols,
             use_sampling, sample_frac, pp_cache_size,
@@ -2308,16 +2333,17 @@ def rerun_best_trial_with_pp(
 
     # ── ⓪ 전처리 (best pp_params 복원) ──
     pp_params = extract_pp_params_from_best(best_params)
-    cleaning_args, outlier_args, iso_args, lds_args, agg_funcs = split_pp_params(pp_params)
+    cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs = split_pp_params(pp_params)
 
     print(f"Rerun preprocessing: cleaning={len(cleaning_args)} args, "
           f"outlier method={outlier_args.get('method')}, "
+          f"binarize_apply={binarize_args.get('apply')}, "
           f"iso_enabled={iso_args.get('iso_enabled')}, "
           f"lds_enabled={lds_args.get('lds_enabled')}, "
           f"agg_funcs={agg_funcs}")
     pos_data, feat_cols_clean, sample_weight, scaler = _run_preprocessing(
         xs, xs_dict, ys, feat_cols,
-        cleaning_args, outlier_args,
+        cleaning_args, outlier_args, binarize_args,
         iso_args, lds_args,
         label_col, exclude_cols,
         use_sampling, sample_frac,
