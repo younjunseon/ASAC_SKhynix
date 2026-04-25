@@ -1,4 +1,0 @@
-stage,model,split,metric,value
-reg,zitboost,train,rmse,0.00550813602280636
-reg,zitboost,val,rmse,0.005719645258781222
-reg,zitboost,test,rmse,0.00841661549512228

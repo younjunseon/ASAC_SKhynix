@@ -1,9 +1,0 @@
-stage,model,split,metric,value
-reg,lgbm,val,rmse,0.005829647727066699
-reg,lgbm,test,rmse,0.00851605401784227
-reg,et,val,rmse,0.00589739089645692
-reg,et,test,rmse,0.00856749768587319
-reg,enet,val,rmse,0.005828069917002575
-reg,enet,test,rmse,0.008515504306717794
-reg,ensemble,oof,rmse,0.005463944487737148
-reg,ensemble,val,rmse,0.005847755015557259

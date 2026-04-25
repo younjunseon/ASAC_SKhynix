@@ -105,9 +105,9 @@ def lgbm_space(trial):
 def xgb_space(trial):
     """XGBoost 회귀 탐색 공간. objective는 squarederror/tweedie 3종."""
     params = dict(
-        n_estimators=trial.suggest_int("n_estimators", 100, 3000),
+        n_estimators=trial.suggest_int("n_estimators", 100, 1500),
         learning_rate=trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
-        max_depth=trial.suggest_int("max_depth", 3, 12),
+        max_depth=trial.suggest_int("max_depth", 3, 10),
         min_child_weight=trial.suggest_float("min_child_weight", 0.5, 30.0, log=True),
         subsample=trial.suggest_float("subsample", 0.5, 1.0),
         colsample_bytree=trial.suggest_float("colsample_bytree", 0.3, 1.0),
@@ -133,13 +133,14 @@ def xgb_space(trial):
 def catboost_space(trial):
     """CatBoost 회귀 탐색 공간. loss_function은 RMSE/Tweedie 3종."""
     params = dict(
-        iterations=trial.suggest_int("iterations", 100, 3000),
+        iterations=trial.suggest_int("iterations", 100, 2500),
         learning_rate=trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
-        depth=trial.suggest_int("depth", 3, 10),
+        depth=trial.suggest_int("depth", 3, 9),
         l2_leaf_reg=trial.suggest_float("l2_leaf_reg", 1.0, 30.0, log=True),
         random_strength=trial.suggest_float("random_strength", 0.1, 10.0, log=True),
         bagging_temperature=trial.suggest_float("bagging_temperature", 0.0, 1.0),
-        border_count=trial.suggest_int("border_count", 32, 254),
+        border_count=trial.suggest_int("border_count", 32, 192),
+        rsm=trial.suggest_float("rsm", 0.3, 1.0),
         random_seed=SEED,
         verbose=False,
         allow_writing_files=False,
@@ -158,12 +159,12 @@ def catboost_space(trial):
 def et_space(trial):
     """ExtraTrees 회귀 탐색 공간."""
     return dict(
-        n_estimators=trial.suggest_int("n_estimators", 300, 1500),
-        max_depth=trial.suggest_int("max_depth", 6, 30),
-        min_samples_leaf=trial.suggest_int("min_samples_leaf", 1, 30),
+        n_estimators=trial.suggest_int("n_estimators", 200, 800),
+        max_depth=trial.suggest_int("max_depth", 6, 20),
+        min_samples_leaf=trial.suggest_int("min_samples_leaf", 5, 30),
         min_samples_split=trial.suggest_int("min_samples_split", 2, 40),
         max_features=trial.suggest_categorical(
-            "max_features", ["sqrt", "log2", 0.3, 0.5, 0.7]
+            "max_features", ["sqrt", "log2", 0.3, 0.5]
         ),
         bootstrap=trial.suggest_categorical("bootstrap", [True, False]),
         random_state=SEED,
@@ -174,10 +175,11 @@ def et_space(trial):
 def enet_space(trial):
     """ElasticNet 회귀 탐색 공간. 스케일링 필수 (scaler.maybe_scale 경유)."""
     return dict(
-        alpha=trial.suggest_float("alpha", 1e-5, 1.0, log=True),
+        alpha=trial.suggest_float("alpha", 1e-3, 1.0, log=True),
         l1_ratio=trial.suggest_float("l1_ratio", 0.1, 0.9),
-        max_iter=trial.suggest_int("max_iter", 2000, 8000, step=1000),
+        max_iter=trial.suggest_int("max_iter", 1000, 3000, step=1000),
         tol=1e-4,
+        selection="random",
         random_state=SEED,
     )
 

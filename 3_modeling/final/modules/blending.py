@@ -43,10 +43,26 @@ def _align_preds(oofs_dict, reference_keys):
     P : np.ndarray (N, K)  — 각 열이 모델 k의 예측
     """
     names = list(oofs_dict.keys())
+    ref_arr = np.asarray(reference_keys)
+    ref_set = set(ref_arr.tolist())
+    n_ref = len(ref_arr)
+
     P_cols = []
     for name in names:
         df = oofs_dict[name]
-        aligned = df.set_index(KEY_COL).loc[reference_keys, "pred"].values
+        keys_set = set(df[KEY_COL].tolist())
+        missing = ref_set - keys_set
+        extra   = keys_set - ref_set
+        if missing or len(df) != n_ref:
+            raise ValueError(
+                f"[blend align] '{name}' 경로 길이/키 불일치: "
+                f"len(df)={len(df)} vs len(ref)={n_ref}, "
+                f"missing={len(missing)}개"
+                + (f" (예: {list(missing)[:3]})" if missing else "")
+                + f", extra={len(extra)}개"
+                + (f" (예: {list(extra)[:3]})" if extra else "")
+            )
+        aligned = df.set_index(KEY_COL).loc[ref_arr, "pred"].values
         P_cols.append(aligned)
     P = np.column_stack(P_cols)
     return names, P

@@ -156,6 +156,13 @@ def run_hpo(
     seed=SEED, direction="minimize",
     show_progress_bar=True,
     user_attrs=None,
+    # ── trial별 holdout 평가 (옵션) ──
+    # xs_val/ys_val_unit 둘 다 주면 매 trial 마다 fold-평균 val 예측 → val_rmse 기록.
+    # extra_feature_val/multiplier_val 은 *_train 과 동일한 의미로 val 측에 적용.
+    xs_val=None, ys_val_unit=None,
+    extra_feature_val=None, multiplier_val=None,
+    xs_test=None, ys_test_unit=None,
+    extra_feature_test=None, multiplier_test=None,
 ):
     """die-level KFold OOF → unit RMSE를 최소화하는 Optuna study 실행.
 
@@ -188,6 +195,13 @@ def run_hpo(
         `target_transform_fn` 있으면 반드시 쌍으로 제공.
     study_name, storage : Optuna study 옵션 (SQLite 경로 등)
     user_attrs : dict 저장할 메타데이터
+    xs_val, ys_val_unit : DataFrame, DataFrame (optional, 짝)
+        주면 매 trial 마다 fold 평균 val 예측 → unit RMSE 계산하여
+        `trial.set_user_attr("val_rmse", ...)` 로 기록.
+    xs_test, ys_test_unit : (optional, 짝) 동일하게 test_rmse 기록.
+    extra_feature_val/test, multiplier_val/test :
+        *_train 과 동일한 의미로 val/test 측에 적용.
+        `extra_feature_train` 있을 때 *_val/test 도 모양/길이 맞춰 제공해야 함.
 
     Returns
     -------
@@ -195,6 +209,10 @@ def run_hpo(
     """
     if (target_transform_fn is None) != (target_inverse_fn is None):
         raise ValueError("target_transform_fn / target_inverse_fn은 쌍으로 제공")
+    if (xs_val is None) != (ys_val_unit is None):
+        raise ValueError("xs_val / ys_val_unit 은 쌍으로 제공해야 함")
+    if (xs_test is None) != (ys_test_unit is None):
+        raise ValueError("xs_test / ys_test_unit 은 쌍으로 제공해야 함")
     space_fn = _models.get_search_space(model_name)
 
     # unit 수준 KFold split을 trial 전체에서 재사용 (공정성)
@@ -209,21 +227,50 @@ def run_hpo(
 
     y_die_orig = _broadcast_y_to_die(xs_train, ys_train_unit)
     y_die_fit  = target_transform_fn(y_die_orig) if target_transform_fn else y_die_orig
-    X_full = _build_X(xs_train, feat_cols, extra_feature_train)
+    X_full      = _build_X(xs_train, feat_cols, extra_feature_train)
     y_true_unit = ys_train_unit.set_index(KEY_COL)[TARGET_COL]   # 원본 스케일
 
-    # multiplier 배열 검증
-    if multiplier_train is not None:
-        multiplier_train = np.asarray(multiplier_train, dtype=float).ravel()
-        if len(multiplier_train) != len(xs_train):
-            raise ValueError(
-                f"multiplier_train 길이 {len(multiplier_train)} "
-                f"!= xs_train 길이 {len(xs_train)}"
-            )
+    # ── eval set X 사전 구성 (trial 전체에서 1회만) ──
+    X_val_full = (_build_X(xs_val, feat_cols, extra_feature_val)
+                  if xs_val is not None else None)
+    X_test_full = (_build_X(xs_test, feat_cols, extra_feature_test)
+                   if xs_test is not None else None)
+    y_val_true_unit = (ys_val_unit.set_index(KEY_COL)[TARGET_COL]
+                       if ys_val_unit is not None else None)
+    y_test_true_unit = (ys_test_unit.set_index(KEY_COL)[TARGET_COL]
+                        if ys_test_unit is not None else None)
+
+    # multiplier 배열 검증 (train/val/test 공통)
+    def _check_mult(arr, n, name):
+        if arr is None:
+            return None
+        arr = np.asarray(arr, dtype=float).ravel()
+        if len(arr) != n:
+            raise ValueError(f"{name} 길이 {len(arr)} != 대상 die 수 {n}")
+        return arr
+    multiplier_train = _check_mult(multiplier_train, len(xs_train), "multiplier_train")
+    multiplier_val   = _check_mult(multiplier_val,
+                                    len(xs_val) if xs_val is not None else 0,
+                                    "multiplier_val")
+    multiplier_test  = _check_mult(multiplier_test,
+                                    len(xs_test) if xs_test is not None else 0,
+                                    "multiplier_test")
+
+    def _eval_split_rmse(xs_split, die_pred_accum, multiplier, y_true_unit_split):
+        """fold 평균된 die 예측 → 역변환 → multiplier → unit 집계 → RMSE."""
+        pred = target_inverse_fn(die_pred_accum) if target_inverse_fn else die_pred_accum
+        if multiplier is not None:
+            pred = pred * multiplier
+        unit = _aggregate_die_to_unit(xs_split, pred)
+        aligned = unit.set_index(KEY_COL)["pred"].loc[y_true_unit_split.index]
+        return float(np.sqrt(np.mean((aligned.values - y_true_unit_split.values) ** 2)))
 
     def objective(trial):
         hp = space_fn(trial)
         oof = np.full(len(xs_train), np.nan)
+        val_pred_accum  = (np.zeros(len(xs_val))  if xs_val  is not None else None)
+        test_pred_accum = (np.zeros(len(xs_test)) if xs_test is not None else None)
+
         for tr_mask, vl_mask in fold_masks:
             # ── 학습 데이터 필터링 (정석 Two-Stage: Y>0 만) ──
             if y_positive_only:
@@ -232,21 +279,49 @@ def run_hpo(
                 fit_mask = tr_mask
             X_tr, y_tr = X_full[fit_mask], y_die_fit[fit_mask]
             X_vl       = X_full[vl_mask]
-            X_tr, X_vl = _scale_fold_if_needed(model_name, X_tr, X_vl)
+
+            # scaler: enet 일 때만. fit-on-train → val/test 도 동일 변환
+            if _scaler.needs_scaling(model_name):
+                med = np.median(X_tr, axis=0)
+                q75 = np.quantile(X_tr, 0.75, axis=0)
+                q25 = np.quantile(X_tr, 0.25, axis=0)
+                iqr = np.maximum(q75 - q25, 1e-8)
+                X_tr   = (X_tr - med) / iqr
+                X_vl   = (X_vl - med) / iqr
+                X_eval_v = (X_val_full  - med) / iqr if X_val_full  is not None else None
+                X_eval_t = (X_test_full - med) / iqr if X_test_full is not None else None
+            else:
+                X_eval_v = X_val_full
+                X_eval_t = X_test_full
+
             res = _fit_predict_fold(model_name, hp, X_tr, y_tr, X_vl)
             oof[vl_mask] = res["pred"]
+
+            # ── eval set 예측 (fold 평균) ──
+            if X_eval_v is not None:
+                val_pred_accum  += res["model"].predict(X_eval_v)  / n_folds
+            if X_eval_t is not None:
+                test_pred_accum += res["model"].predict(X_eval_t) / n_folds
 
         if np.isnan(oof).any():
             raise RuntimeError("OOF has NaN — fold coverage bug")
 
-        # ── 역변환 → 원본 스케일에서 (1-π) 곱셈 적용 → 집계 + RMSE ──
-        oof_orig = target_inverse_fn(oof) if target_inverse_fn else oof
-        if multiplier_train is not None:
-            oof_orig = oof_orig * multiplier_train   # die-level element-wise
-        unit_pred = _aggregate_die_to_unit(xs_train, oof_orig)
-        aligned = unit_pred.set_index(KEY_COL)["pred"].loc[y_true_unit.index]
-        rmse = float(np.sqrt(np.mean((aligned.values - y_true_unit.values) ** 2)))
-        return rmse
+        # ── train OOF RMSE (objective 반환값) ──
+        train_rmse = _eval_split_rmse(xs_train, oof, multiplier_train, y_true_unit)
+        # 명시적으로 trial.set_user_attr 에도 기록 — Optuna dashboard 에서 라벨링 명확화
+        trial.set_user_attr("train_rmse", train_rmse)
+
+        # ── val/test RMSE (옵션) ──
+        if val_pred_accum is not None:
+            val_rmse = _eval_split_rmse(xs_val, val_pred_accum,
+                                        multiplier_val, y_val_true_unit)
+            trial.set_user_attr("val_rmse", val_rmse)
+        if test_pred_accum is not None:
+            test_rmse = _eval_split_rmse(xs_test, test_pred_accum,
+                                         multiplier_test, y_test_true_unit)
+            trial.set_user_attr("test_rmse", test_rmse)
+
+        return train_rmse
 
     # resume_study=False 기본: 같은 study_name/storage 조합이 이미 있으면 에러를
     # 명시적으로 내어 trial 누적으로 best 값이 오염되는 것을 막는다.
@@ -509,18 +584,38 @@ def refit_best(
 from utils.config import DIE_KEY_COL as _DIE_KEY_COL
 
 
-def _die_csv(xs_split, pred, pi=None, mu=None):
-    """die-level 예측을 KEY_COL + DIE_KEY_COL 과 함께 DataFrame으로."""
+def _die_csv(xs_split, pred, pi=None, mu=None, y_unit=None):
+    """die-level 예측을 KEY_COL + DIE_KEY_COL 과 함께 DataFrame으로.
+
+    `y_unit` (DataFrame `[KEY_COL, TARGET_COL]` 또는 Series indexed by KEY_COL)이
+    주어지면 unit-level health 를 die-level 로 broadcast 하여 `health` 컬럼 추가.
+    test split 처럼 y 가 없으면 None 으로 두면 컬럼 자체가 빠진다.
+    """
     out = pd.DataFrame({
         KEY_COL:      xs_split[KEY_COL].values,
         _DIE_KEY_COL: xs_split[_DIE_KEY_COL].values,
         "pred":       pred,
     })
+    if y_unit is not None:
+        h_map = (y_unit.set_index(KEY_COL)[TARGET_COL]
+                 if isinstance(y_unit, pd.DataFrame) else y_unit)
+        out[TARGET_COL] = out[KEY_COL].map(h_map)
     if pi is not None:
         out["pi"] = pi
         out["one_minus_pi"] = 1.0 - pi   # 경로 B에서 바로 쓰기 쉬우라고 파생
     if mu is not None:
         out["mu"] = mu
+    return out
+
+
+def _add_health_to_unit(unit_df, y_unit):
+    """unit-level [KEY_COL, 'pred'] DataFrame 에 health 컬럼을 merge."""
+    if y_unit is None:
+        return unit_df
+    h_map = (y_unit.set_index(KEY_COL)[TARGET_COL]
+             if isinstance(y_unit, pd.DataFrame) else y_unit)
+    out = unit_df.copy()
+    out[TARGET_COL] = out[KEY_COL].map(h_map)
     return out
 
 
@@ -530,6 +625,8 @@ def save_artifacts(
     feature_names=None,
     extra_feature_name=None,
     y_train_unit=None,
+    y_val_unit=None,
+    y_test_unit=None,
     postprocess_config=None,
     study_meta=None,
 ):
@@ -543,6 +640,10 @@ def save_artifacts(
         경로 B 처럼 X 뒤에 붙은 추가 피처 이름 (예: 'one_minus_pi'). 저장 전용 메타.
     y_train_unit : DataFrame or None
         postprocess_config 가 주어질 때 필수. unit RMSE 기반으로 집계/threshold 튜닝.
+        die/unit CSV 의 `health` 컬럼 도 여기서 가져온다.
+    y_val_unit, y_test_unit : DataFrame or None
+        주어지면 val/test die·unit CSV 에 `health` 컬럼 merge.
+        None 이면 컬럼 자체가 빠진다 (test 가 비공개일 때 등).
     postprocess_config : dict or None
         None 이면 기존 mean 집계만 저장 (backward-compat).
         dict 이면 postprocess.tune_and_apply 에 kwargs 로 전달하여
@@ -555,9 +656,9 @@ def save_artifacts(
     ------
     - {out_dir}/fold_models.pkl      : {'fold_models', 'feature_names', ...}
     - {out_dir}/best_params.json     : model_name + resolved HP + feature_names + study_meta
-    - {out_dir}/oof_die.csv          : train OOF die-level (+ pi, mu if ZIT)
-    - {out_dir}/val_die.csv          : val die-level
-    - {out_dir}/test_die.csv         : test die-level
+    - {out_dir}/oof_die.csv          : train OOF die-level (+ health, +pi/mu if ZIT)
+    - {out_dir}/val_die.csv          : val die-level (+ health if y_val_unit 제공)
+    - {out_dir}/test_die.csv         : test die-level (+ health if y_test_unit 제공)
     - {out_dir}/oof_unit.csv         : train OOF unit-level (postprocess tuned if config 제공)
     - {out_dir}/val_unit.csv         : val unit-level (동일)
     - {out_dir}/test_unit.csv        : test unit-level (동일)
@@ -598,18 +699,21 @@ def save_artifacts(
         meta["unit_ids_hash"] = hashlib.sha1(uid_bytes).hexdigest()
         meta["n_units_train"] = int(len(uid_arr))
 
-    # 3) die-level CSV (tune 이전 raw die 예측 그대로)
+    # 3) die-level CSV (tune 이전 raw die 예측 그대로) + health merge
     _die_csv(xs_train, refit_result["oof_pred_die"],
-             refit_result.get("oof_pi"), refit_result.get("oof_mu")
+             refit_result.get("oof_pi"), refit_result.get("oof_mu"),
+             y_unit=y_train_unit,
              ).to_csv(os.path.join(out_dir, "oof_die.csv"), index=False)
     _die_csv(xs_val,   refit_result["val_pred_die"],
-             refit_result.get("val_pi"), refit_result.get("val_mu")
+             refit_result.get("val_pi"), refit_result.get("val_mu"),
+             y_unit=y_val_unit,
              ).to_csv(os.path.join(out_dir, "val_die.csv"), index=False)
     _die_csv(xs_test,  refit_result["test_pred_die"],
-             refit_result.get("test_pi"), refit_result.get("test_mu")
+             refit_result.get("test_pi"), refit_result.get("test_mu"),
+             y_unit=y_test_unit,
              ).to_csv(os.path.join(out_dir, "test_die.csv"), index=False)
 
-    # 4) unit-level CSV — postprocess_config 여부로 분기
+    # 4) unit-level CSV — postprocess_config 여부로 분기 + health merge
     if postprocess_config is not None and y_train_unit is not None:
         from . import postprocess as _pp
         pp_res = _pp.tune_and_apply(
@@ -623,11 +727,11 @@ def save_artifacts(
             die_pi_test=refit_result.get("test_pi"),
             **postprocess_config,
         )
-        pp_res["final_train_unit"].to_csv(
+        _add_health_to_unit(pp_res["final_train_unit"], y_train_unit).to_csv(
             os.path.join(out_dir, "oof_unit.csv"), index=False)
-        pp_res["final_val_unit"].to_csv(
+        _add_health_to_unit(pp_res["final_val_unit"], y_val_unit).to_csv(
             os.path.join(out_dir, "val_unit.csv"), index=False)
-        pp_res["final_test_unit"].to_csv(
+        _add_health_to_unit(pp_res["final_test_unit"], y_test_unit).to_csv(
             os.path.join(out_dir, "test_unit.csv"), index=False)
         # best tuning 결과도 메타에 기록
         meta["postprocess"] = {
@@ -641,12 +745,12 @@ def save_artifacts(
             "config":            postprocess_config,
         }
     else:
-        # 기존 동작: refit 단계의 mean 집계 그대로
-        refit_result["oof_pred_unit"].to_csv(
+        # 기존 동작: refit 단계의 mean 집계 그대로 + health merge
+        _add_health_to_unit(refit_result["oof_pred_unit"], y_train_unit).to_csv(
             os.path.join(out_dir, "oof_unit.csv"), index=False)
-        refit_result["val_pred_unit"].to_csv(
+        _add_health_to_unit(refit_result["val_pred_unit"], y_val_unit).to_csv(
             os.path.join(out_dir, "val_unit.csv"), index=False)
-        refit_result["test_pred_unit"].to_csv(
+        _add_health_to_unit(refit_result["test_pred_unit"], y_test_unit).to_csv(
             os.path.join(out_dir, "test_unit.csv"), index=False)
         meta["postprocess"] = None
 
