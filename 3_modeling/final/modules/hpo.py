@@ -156,6 +156,7 @@ def run_hpo(
     seed=SEED, direction="minimize",
     show_progress_bar=True,
     user_attrs=None,
+    space_variant="default",      # 'default' | 'zitreg' — models.get_search_space 의 variant
     # ── trial별 holdout 평가 (옵션) ──
     # xs_val/ys_val_unit 둘 다 주면 매 trial 마다 fold-평균 val 예측 → val_rmse 기록.
     # extra_feature_val/multiplier_val 은 *_train 과 동일한 의미로 val 측에 적용.
@@ -213,7 +214,7 @@ def run_hpo(
         raise ValueError("xs_val / ys_val_unit 은 쌍으로 제공해야 함")
     if (xs_test is None) != (ys_test_unit is None):
         raise ValueError("xs_test / ys_test_unit 은 쌍으로 제공해야 함")
-    space_fn = _models.get_search_space(model_name)
+    space_fn = _models.get_search_space(model_name, variant=space_variant)
 
     # unit 수준 KFold split을 trial 전체에서 재사용 (공정성)
     unit_ids = ys_train_unit[KEY_COL].unique()
@@ -336,6 +337,10 @@ def run_hpo(
         for k, v in user_attrs.items():
             study.set_user_attr(k, v)
 
+    if _scaler.needs_scaling(model_name):
+        print(f"[scaler] {model_name} → fold-local RobustScaler 적용 "
+              f"(매 fold train 기준 fit, holdout/val/test 동일 변환)")
+
     study.optimize(objective, n_trials=n_trials, show_progress_bar=show_progress_bar)
 
     return {
@@ -406,7 +411,9 @@ def _hp_from_best(best_params, model_name):
         hp.setdefault("n_jobs", -1)
     elif model_name == "enet":
         hp.setdefault("random_state", _S)
-        hp.setdefault("tol", 1e-4)
+        hp.setdefault("tol", 1e-6)
+        hp.setdefault("selection", "random")
+        hp.setdefault("precompute", True)
 
     return hp
 
@@ -448,6 +455,7 @@ def refit_best(
         'val_pred_unit': DataFrame — original,
         'test_pred_unit': DataFrame — original,
         'fold_models': list,
+        'fold_scalers': list — fold별 {'median', 'iqr'} dict 또는 None (스케일링 안 하는 모델),
         'best_params_resolved': dict,
     }
     """
@@ -493,6 +501,11 @@ def refit_best(
     test_mu = np.zeros(n_te) if is_zit else None
 
     fold_models = []
+    fold_scalers = []   # enet 등 스케일링 모델: fold별 (median, iqr) 보관 → pkl 재현용
+
+    if _scaler.needs_scaling(model_name):
+        print(f"[scaler] {model_name} → fold-local RobustScaler 적용 "
+              f"(매 fold train 기준 fit, holdout/val/test 동일 변환)")
 
     for i, (tr_units, vl_units) in enumerate(folds):
         tr_mask = _die_mask_from_units(xs_train, set(tr_units))
@@ -516,8 +529,10 @@ def refit_best(
             X_vl = (X_vl - med) / iqr
             X_val_tr  = (X_val_full  - med) / iqr
             X_test_tr = (X_test_full - med) / iqr
+            fold_scalers.append({"median": med, "iqr": iqr})
         else:
             X_val_tr, X_test_tr = X_val_full, X_test_full
+            fold_scalers.append(None)
 
         model = _models.create_regressor(model_name, hp)
         model.fit(X_tr, y_tr)
@@ -572,6 +587,7 @@ def refit_best(
         "val_pred_unit":  _aggregate_die_to_unit(xs_val,   val_pred),
         "test_pred_unit": _aggregate_die_to_unit(xs_test,  test_pred),
         "fold_models":    fold_models,
+        "fold_scalers":   fold_scalers,
         "best_params_resolved": hp,
         "model_name": model_name,
     }
@@ -654,7 +670,7 @@ def save_artifacts(
 
     생성물
     ------
-    - {out_dir}/fold_models.pkl      : {'fold_models', 'feature_names', ...}
+    - {out_dir}/fold_models.pkl      : {'fold_models', 'fold_scalers', 'feature_names', ...}
     - {out_dir}/best_params.json     : model_name + resolved HP + feature_names + study_meta
     - {out_dir}/oof_die.csv          : train OOF die-level (+ health, +pi/mu if ZIT)
     - {out_dir}/val_die.csv          : val die-level (+ health if y_val_unit 제공)
@@ -672,6 +688,7 @@ def save_artifacts(
     # 1) fold models + feature_names (pkl)
     pkl_payload = {
         "fold_models":         refit_result["fold_models"],
+        "fold_scalers":        refit_result.get("fold_scalers"),
         "feature_names":       list(feature_names) if feature_names is not None else None,
         "extra_feature_name":  extra_feature_name,
         "model_name":          refit_result["model_name"],

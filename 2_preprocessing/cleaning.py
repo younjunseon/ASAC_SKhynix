@@ -540,7 +540,8 @@ def run_cleaning(xs, feat_cols, xs_dict,
                  knn_neighbors=5,
                  spatial_max_dist=2.0,
                  post_impute_corr_threshold=None,
-                 post_impute_corr_keep_by="std"):
+                 post_impute_corr_keep_by="std",
+                 protected_cols=None):
     """
     클리닝 파이프라인 전체 실행
 
@@ -586,6 +587,12 @@ def run_cleaning(xs, feat_cols, xs_dict,
         대상은 일반 feature(current_cols)만이며 indicator 컬럼은 제외.
     post_impute_corr_keep_by : {"std", "target_corr"}
         2차 고상관 제거에서 남길 기준. 기본 "std"
+    protected_cols : list of str, optional
+        클리닝 전 과정(상수/결측/중복/고상관/imputation/post-impute corr)을
+        우회시킬 컬럼 목록. 사전 산출된 encoding 컬럼처럼 cleaning이 건드리면
+        안 되는 컬럼을 보호. 우회된 컬럼은 끝에 그대로 재부착되어 결과 feat_cols에
+        포함된다. None이면 기존 동작 (모든 feat_cols가 cleaning 대상).
+        용도: GroupTargetEncoder 산출물 보호 등. `get_default_protected_cols()` 헬퍼 활용.
 
     Returns
     -------
@@ -593,6 +600,49 @@ def run_cleaning(xs, feat_cols, xs_dict,
     clean_feat_cols : list (남은 feature 컬럼, indicator 컬럼 포함)
     report : dict (각 단계별 제거 내역)
     """
+    # protected_cols 처리: 우회 → 일반 cleaning 재호출 → 결과에 재부착
+    if protected_cols:
+        protected_set = set(protected_cols)
+        protected_in_feat = [c for c in feat_cols if c in protected_set]
+        if protected_in_feat:
+            other_cols = [c for c in feat_cols if c not in protected_set]
+            xs_other = xs.drop(columns=protected_in_feat, errors="ignore")
+            xs_dict_other = {
+                k: v.drop(columns=protected_in_feat, errors="ignore")
+                for k, v in xs_dict.items()
+            }
+
+            print(f"[Protected Cleaning] {len(protected_in_feat)} 컬럼 우회: "
+                  f"{protected_in_feat}")
+            xs_train, xs_val, xs_test, clean_cols, report = run_cleaning(
+                xs_other, other_cols, xs_dict_other,
+                const_threshold=const_threshold,
+                missing_threshold=missing_threshold,
+                remove_duplicates=remove_duplicates,
+                corr_threshold=corr_threshold,
+                corr_keep_by=corr_keep_by,
+                corr_winsorize_pct=corr_winsorize_pct,
+                ys_train=ys_train,
+                add_indicator=add_indicator,
+                indicator_threshold=indicator_threshold,
+                imputation_method=imputation_method,
+                knn_neighbors=knn_neighbors,
+                spatial_max_dist=spatial_max_dist,
+                post_impute_corr_threshold=post_impute_corr_threshold,
+                post_impute_corr_keep_by=post_impute_corr_keep_by,
+                protected_cols=None,  # 재귀 방지
+            )
+
+            # 보호 컬럼을 cleaning 결과 DataFrame에 재부착 (index 정렬)
+            for split_name, target in [
+                ("train", xs_train), ("validation", xs_val), ("test", xs_test),
+            ]:
+                src_df = xs_dict[split_name]
+                for ec in protected_in_feat:
+                    target[ec] = src_df[ec].reindex(target.index).values
+
+            return xs_train, xs_val, xs_test, clean_cols + protected_in_feat, report
+
     print("=" * 60)
     print("클리닝 파이프라인 시작")
     print(f"원본 feature 수: {len(feat_cols)}")

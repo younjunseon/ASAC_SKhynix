@@ -53,3 +53,14 @@ code.zip
 4_output/**/*.xlsx
 4_output/**/*.json
 4_output/**/*.db
+
+# 모델 binary (대용량 — GitHub 100MB 제한 + repo bloat)
+*.pkl
+*.pkl.gz
+
+# 임시/scratch 작업 폴더
+temp/
+_scratch/
+
+# 일반 zip (final.zip 등)
+*.zip

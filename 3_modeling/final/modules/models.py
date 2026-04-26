@@ -159,14 +159,14 @@ def catboost_space(trial):
 def et_space(trial):
     """ExtraTrees 회귀 탐색 공간."""
     return dict(
-        n_estimators=trial.suggest_int("n_estimators", 200, 800),
-        max_depth=trial.suggest_int("max_depth", 6, 20),
-        min_samples_leaf=trial.suggest_int("min_samples_leaf", 5, 30),
+        n_estimators=trial.suggest_int("n_estimators", 250, 600),
+        max_depth=trial.suggest_int("max_depth", 10, 22),
+        min_samples_leaf=trial.suggest_int("min_samples_leaf", 5, 40),
         min_samples_split=trial.suggest_int("min_samples_split", 2, 40),
         max_features=trial.suggest_categorical(
-            "max_features", ["sqrt", "log2", 0.3, 0.5]
+            "max_features", ["sqrt"]
         ),
-        bootstrap=trial.suggest_categorical("bootstrap", [True, False]),
+        bootstrap=True,
         random_state=SEED,
         n_jobs=-1,
     )
@@ -175,11 +175,12 @@ def et_space(trial):
 def enet_space(trial):
     """ElasticNet 회귀 탐색 공간. 스케일링 필수 (scaler.maybe_scale 경유)."""
     return dict(
-        alpha=trial.suggest_float("alpha", 1e-3, 1.0, log=True),
-        l1_ratio=trial.suggest_float("l1_ratio", 0.1, 0.9),
-        max_iter=trial.suggest_int("max_iter", 1000, 3000, step=1000),
-        tol=1e-4,
+        alpha=trial.suggest_float("alpha", 1e-7, 1e-3, log=True),
+        l1_ratio=trial.suggest_float("l1_ratio", 0.4, 0.99),
+        max_iter=trial.suggest_int("max_iter", 8000, 15000, step=1000),
+        tol=1e-6,
         selection="random",
+        precompute=True,
         random_state=SEED,
     )
 
@@ -190,36 +191,36 @@ def zitboost_space(trial):
     μ(핵심 회귀): 9 / π(분류): 5 / φ(분산): 5 / ZIT 전용: 2
     """
     params = dict(
-        zeta=trial.suggest_float("zeta", 1.1, 1.9),
-        n_em_iters=trial.suggest_int("n_em_iters", 3, 20),
+        zeta=trial.suggest_float("zeta", 1.1, 1.4),
+        n_em_iters=trial.suggest_int("n_em_iters", 10, 30),
     )
     # μ 모델
     params.update(
-        mu_n_estimators=trial.suggest_int("mu_n_estimators", 100, 2000),
-        mu_learning_rate=trial.suggest_float("mu_learning_rate", 0.005, 0.1, log=True),
-        mu_num_leaves=trial.suggest_int("mu_num_leaves", 32, 256),
-        mu_max_depth=trial.suggest_int("mu_max_depth", 5, 12),
-        mu_min_child_samples=trial.suggest_int("mu_min_child_samples", 5, 100),
-        mu_subsample=trial.suggest_float("mu_subsample", 0.5, 1.0),
-        mu_colsample_bytree=trial.suggest_float("mu_colsample_bytree", 0.3, 1.0),
-        mu_reg_alpha=trial.suggest_float("mu_reg_alpha", 1e-8, 10.0, log=True),
-        mu_reg_lambda=trial.suggest_float("mu_reg_lambda", 1e-8, 10.0, log=True),
+        mu_n_estimators=trial.suggest_int("mu_n_estimators", 50, 400),
+        mu_learning_rate=trial.suggest_float("mu_learning_rate", 0.003, 0.02, log=True),
+        mu_num_leaves=trial.suggest_int("mu_num_leaves", 100, 200),
+        mu_max_depth=trial.suggest_int("mu_max_depth", 3, 8),
+        mu_min_child_samples=trial.suggest_int("mu_min_child_samples", 30, 200),
+        mu_subsample=trial.suggest_float("mu_subsample", 0.55, 0.80),
+        mu_colsample_bytree=trial.suggest_float("mu_colsample_bytree", 0.2, 0.5),
+        mu_reg_alpha=trial.suggest_float("mu_reg_alpha", 1e-6, 1e-2, log=True),
+        mu_reg_lambda=trial.suggest_float("mu_reg_lambda", 0.01, 1.0, log=True),
     )
     # π 모델
     params.update(
-        pi_n_estimators=trial.suggest_int("pi_n_estimators", 50, 500),
-        pi_learning_rate=trial.suggest_float("pi_learning_rate", 0.01, 0.1, log=True),
-        pi_num_leaves=trial.suggest_int("pi_num_leaves", 16, 128),
-        pi_max_depth=trial.suggest_int("pi_max_depth", 3, 8),
-        pi_min_child_samples=trial.suggest_int("pi_min_child_samples", 10, 100),
+        pi_n_estimators=trial.suggest_int("pi_n_estimators", 100, 250),
+        pi_learning_rate=trial.suggest_float("pi_learning_rate", 0.05, 0.2, log=True),
+        pi_num_leaves=trial.suggest_int("pi_num_leaves", 50, 100),
+        pi_max_depth=trial.suggest_int("pi_max_depth", 5, 14),
+        pi_min_child_samples=trial.suggest_int("pi_min_child_samples", 20, 60),
     )
     # φ 모델
     params.update(
-        phi_n_estimators=trial.suggest_int("phi_n_estimators", 50, 500),
-        phi_learning_rate=trial.suggest_float("phi_learning_rate", 0.01, 0.1, log=True),
-        phi_num_leaves=trial.suggest_int("phi_num_leaves", 16, 128),
-        phi_max_depth=trial.suggest_int("phi_max_depth", 3, 8),
-        phi_min_child_samples=trial.suggest_int("phi_min_child_samples", 10, 100),
+        phi_n_estimators=trial.suggest_int("phi_n_estimators", 20, 250),
+        phi_learning_rate=trial.suggest_float("phi_learning_rate", 0.005, 0.03, log=True),
+        phi_num_leaves=trial.suggest_int("phi_num_leaves", 50, 120),
+        phi_max_depth=trial.suggest_int("phi_max_depth", 4, 6),
+        phi_min_child_samples=trial.suggest_int("phi_min_child_samples", 20, 100),
     )
     params.update(random_state=SEED, n_jobs=-1, verbose=-1, device=DEVICE)
     return params
@@ -235,8 +236,92 @@ SEARCH_SPACES = {
 }
 
 
-def get_search_space(name):
-    """모델 이름 → search space 함수."""
-    if name not in SEARCH_SPACES:
-        raise KeyError(f"No search space for {name!r}. Available: {list(SEARCH_SPACES)}")
-    return SEARCH_SPACES[name]
+# ═════════════════════════════════════════════════════════════
+# ZITREG (경로 B) 전용 Search Space — 03_zit_plus_reg.ipynb
+# ═════════════════════════════════════════════════════════════
+# 사용 시점: 03 노트북에서 hpo.run_hpo(..., space_variant='zitreg').
+# 근거: zitreg-lgbm-002 study top 10 trial 분포 (2026-04-26 분석)
+#   - num_leaves: 384(cap) 도달, max_depth: 13~14 cluster, min_split_gain: floor 군집
+#   - objective: 10/10 trial 모두 tweedie_1.5 → regression/poisson 제거
+#   - n_estimators: 2252~2773 cluster (3000 cap 근접 → 5000 으로 여유)
+# xgb/catboost/et/enet 은 default 와 동일 (사용자 지시: "나머지는 그냥 복사").
+
+def lgbm_zitreg_space(trial):
+    """LightGBM 회귀 zitreg 전용. zitreg-lgbm-002 boundary hit 반영 확장."""
+    params = dict(
+        n_estimators=trial.suggest_int("n_estimators", 200, 5000),                # 3000 → 5000
+        learning_rate=trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+        num_leaves=trial.suggest_int("num_leaves", 8, 768),                       # 384 → 768 (cap hit)
+        max_depth=trial.suggest_int("max_depth", 3, 20),                          # 14 → 20 (cap hit)
+        min_child_samples=trial.suggest_int("min_child_samples", 5, 400),
+        subsample=trial.suggest_float("subsample", 0.5, 1.0),
+        subsample_freq=1,
+        colsample_bytree=trial.suggest_float("colsample_bytree", 0.1, 1.0),
+        reg_alpha=trial.suggest_float("reg_alpha", 1e-8, 30.0, log=True),
+        reg_lambda=trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
+        min_split_gain=trial.suggest_float("min_split_gain", 1e-12, 1.0, log=True),  # 1e-9 → 1e-12 (floor cluster)
+        path_smooth=trial.suggest_float("path_smooth", 0.0, 50.0),
+        random_state=SEED,
+        n_jobs=-1,
+        verbose=-1,
+        device=DEVICE,
+    )
+    # tweedie 4단 (1.2/1.3/1.5/1.7) — 1.5 선호 + 인접값 추가 탐색
+    obj_choice = trial.suggest_categorical(
+        "objective", ["tweedie_1.2", "tweedie_1.3", "tweedie_1.5", "tweedie_1.7"]
+    )
+    params["objective"] = "tweedie"
+    params["tweedie_variance_power"] = float(obj_choice.split("_")[1])
+    return params
+
+
+# 나머지 4종 — default 와 동일한 범위 (사용자 지시: 복사만)
+def xgb_zitreg_space(trial):
+    return xgb_space(trial)
+
+
+def catboost_zitreg_space(trial):
+    return catboost_space(trial)
+
+
+def et_zitreg_space(trial):
+    return et_space(trial)
+
+
+def enet_zitreg_space(trial):
+    return enet_space(trial)
+
+
+SEARCH_SPACES_ZITREG = {
+    "lgbm":     lgbm_zitreg_space,
+    "xgb":      xgb_zitreg_space,
+    "catboost": catboost_zitreg_space,
+    "et":       et_zitreg_space,
+    "enet":     enet_zitreg_space,
+}
+
+
+def get_search_space(name, variant="default"):
+    """모델 이름 + variant → search space 함수.
+
+    variant
+    -------
+    'default' : 1차 baseline (lgbm/xgb/catboost/et/enet/zitboost)
+    'zitreg'  : 03_zit_plus_reg 전용 (lgbm 확장, 나머지 4개는 default 복제)
+    """
+    if variant == "default":
+        if name not in SEARCH_SPACES:
+            raise KeyError(
+                f"No search space for {name!r} (variant=default). "
+                f"Available: {list(SEARCH_SPACES)}"
+            )
+        return SEARCH_SPACES[name]
+    elif variant == "zitreg":
+        if name not in SEARCH_SPACES_ZITREG:
+            raise KeyError(
+                f"No zitreg search space for {name!r}. "
+                f"Available: {list(SEARCH_SPACES_ZITREG)}"
+            )
+        return SEARCH_SPACES_ZITREG[name]
+    else:
+        raise ValueError(f"Unknown variant {variant!r} (allowed: 'default', 'zitreg')")
