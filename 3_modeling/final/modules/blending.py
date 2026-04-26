@@ -218,7 +218,7 @@ def fit_and_apply(
         raise ValueError(f"Unknown method: {method!r}")
 
     weights = fit["weights"]
-    return {
+    out = {
         "weights":      weights,
         "train_rmse":   fit["train_rmse"],
         "train_blend":  apply_weights(train_preds, weights),
@@ -226,3 +226,6 @@ def fit_and_apply(
         "test_blend":   apply_weights(test_preds,  weights),
         "method":       fit["method"],
     }
+    if "study" in fit:
+        out["study"] = fit["study"]
+    return out

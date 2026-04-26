@@ -349,6 +349,18 @@ PP_BINARIZE_CANDIDATES = {
 }
 
 
+# ── ★ Group Encoder (lot/wafer/wp OOF target encoding) ──
+# 모듈 기본값 use_encoder=[False] → 기존 노트북(baseline 등) 동작 보존.
+# preprocessing_test.ipynb에서 dict mutate로 ON/OFF·alpha·n_folds·group_specs 탐색.
+#   group_specs_name: 'default'(3그룹 9컬) | 'all'(4그룹 12컬, +lp)
+GROUP_ENCODER_CANDIDATES = {
+    "use_encoder":      [False],
+    "alpha":            [20.0],
+    "n_folds":          [5],
+    "group_specs_name": ["default"],
+}
+
+
 # ── run_cleaning / run_outlier_treatment에 실제 전달할 인자 키 ──
 # (preprocessing_space 반환 dict에서 해당 함수로 분배할 때 사용)
 CLEANING_KEYS = [
@@ -402,33 +414,113 @@ def preprocessing_space(trial):
     """
     params = {}
 
+    # ════════════════════════════════════════════════════════════
+    # Conditional sampling 도입 — parent OFF면 child suggest 자체를 안 함.
+    # 이유:
+    #   - 같은 실제 전처리 조합이 단일 trial 벡터로 표현 → 캐시 hit ↑
+    #   - TPE multivariate=True + group=True 효과 극대화
+    #   - 차원 자체 감소로 학습 효율 ↑
+    # 다운스트림은 모두 .get(default) / signature default로 안전.
+    # ════════════════════════════════════════════════════════════
+
+    def _sug(name_full, name_trial, candidates):
+        """단일 후보면 trial.suggest 호출 자체를 스킵 (Optuna 차원 감소)."""
+        if len(candidates) == 1:
+            params[name_full] = candidates[0]
+        else:
+            params[name_full] = trial.suggest_categorical(name_trial, candidates)
+
     # ── 클리닝 ──
-    for key, candidates in PP_CLEAN_CANDIDATES.items():
-        params[key] = trial.suggest_categorical(f"pp_{key}", candidates)
+    # 항상 샘플하는 키
+    for key in (
+        "const_threshold", "missing_threshold", "remove_duplicates",
+        "corr_threshold", "corr_keep_by", "add_indicator",
+        "imputation_method",
+        "post_impute_corr_threshold", "post_impute_corr_keep_by",
+    ):
+        _sug(key, f"pp_{key}", PP_CLEAN_CANDIDATES[key])
 
-    # ── 이상치 (key에 'outlier__' prefix 유지, run_outlier 호출 시 strip) ──
-    for key, candidates in PP_OUTLIER_CANDIDATES.items():
-        params[f"outlier__{key}"] = trial.suggest_categorical(
-            f"pp_outlier_{key}", candidates
-        )
+    # add_indicator 의존: indicator_threshold
+    if params["add_indicator"]:
+        _sug("indicator_threshold", "pp_indicator_threshold",
+             PP_CLEAN_CANDIDATES["indicator_threshold"])
+    else:
+        params["indicator_threshold"] = PP_CLEAN_CANDIDATES["indicator_threshold"][0]
 
-    # ── ★ Binarize (2차 신규, baseline 전용 탐색 — 기본값 apply=[False]) ──
-    for key, candidates in PP_BINARIZE_CANDIDATES.items():
-        params[f"binarize__{key}"] = trial.suggest_categorical(
-            f"pp_binarize_{key}", candidates
-        )
+    # imputation_method 의존: spatial_max_dist (spatial일 때만), knn_neighbors (knn일 때만)
+    imp_method = params["imputation_method"]
+    if imp_method == "spatial":
+        _sug("spatial_max_dist", "pp_spatial_max_dist",
+             PP_CLEAN_CANDIDATES["spatial_max_dist"])
+        params["knn_neighbors"] = PP_CLEAN_CANDIDATES["knn_neighbors"][0]
+    elif imp_method == "knn":
+        _sug("knn_neighbors", "pp_knn_neighbors",
+             PP_CLEAN_CANDIDATES["knn_neighbors"])
+        params["spatial_max_dist"] = PP_CLEAN_CANDIDATES["spatial_max_dist"][0]
+    else:
+        # median 등 — 둘 다 무관
+        params["knn_neighbors"]    = PP_CLEAN_CANDIDATES["knn_neighbors"][0]
+        params["spatial_max_dist"] = PP_CLEAN_CANDIDATES["spatial_max_dist"][0]
 
-    # ── ★ IsoForest (2차 신규) ──
-    for key, candidates in PP_ISO_ANOMALY_CANDIDATES.items():
-        params[f"iso__{key}"] = trial.suggest_categorical(
-            f"pp_iso_{key}", candidates
-        )
+    # ── 이상치 ──
+    # method, lower_pct, upper_pct는 항상
+    for key in ("method", "lower_pct", "upper_pct"):
+        _sug(f"outlier__{key}", f"pp_outlier_{key}",
+             PP_OUTLIER_CANDIDATES[key])
+    # iqr_multiplier: method=='iqr_clip'일 때만 (outlier.py 모듈 method 이름 정확)
+    if params["outlier__method"] == "iqr_clip":
+        _sug("outlier__iqr_multiplier", "pp_outlier_iqr_multiplier",
+             PP_OUTLIER_CANDIDATES["iqr_multiplier"])
+    else:
+        params["outlier__iqr_multiplier"] = PP_OUTLIER_CANDIDATES["iqr_multiplier"][0]
 
-    # ── ★ LDS (2차 신규) ──
-    for key, candidates in PP_LDS_CANDIDATES.items():
-        params[f"lds__{key}"] = trial.suggest_categorical(
-            f"pp_lds_{key}", candidates
-        )
+    # ── Binarize ──
+    _sug("binarize__apply", "pp_binarize_apply", PP_BINARIZE_CANDIDATES["apply"])
+    if params["binarize__apply"]:
+        _sug("binarize__top_value_threshold", "pp_binarize_top_value_threshold",
+             PP_BINARIZE_CANDIDATES["top_value_threshold"])
+        _sug("binarize__max_unique", "pp_binarize_max_unique",
+             PP_BINARIZE_CANDIDATES["max_unique"])
+    else:
+        params["binarize__top_value_threshold"] = PP_BINARIZE_CANDIDATES["top_value_threshold"][0]
+        params["binarize__max_unique"]          = PP_BINARIZE_CANDIDATES["max_unique"][0]
+
+    # ── IsoForest ──
+    _sug("iso__iso_enabled", "pp_iso_iso_enabled",
+         PP_ISO_ANOMALY_CANDIDATES["iso_enabled"])
+    if params["iso__iso_enabled"]:
+        _sug("iso__iso_contamination", "pp_iso_iso_contamination",
+             PP_ISO_ANOMALY_CANDIDATES["iso_contamination"])
+        _sug("iso__iso_n_estimators", "pp_iso_iso_n_estimators",
+             PP_ISO_ANOMALY_CANDIDATES["iso_n_estimators"])
+    else:
+        params["iso__iso_contamination"] = PP_ISO_ANOMALY_CANDIDATES["iso_contamination"][0]
+        params["iso__iso_n_estimators"]  = PP_ISO_ANOMALY_CANDIDATES["iso_n_estimators"][0]
+
+    # ── LDS ──
+    _sug("lds__lds_enabled", "pp_lds_lds_enabled",
+         PP_LDS_CANDIDATES["lds_enabled"])
+    if params["lds__lds_enabled"]:
+        _sug("lds__lds_sigma", "pp_lds_lds_sigma",
+             PP_LDS_CANDIDATES["lds_sigma"])
+        _sug("lds__lds_max_weight", "pp_lds_lds_max_weight",
+             PP_LDS_CANDIDATES["lds_max_weight"])
+    else:
+        params["lds__lds_sigma"]      = PP_LDS_CANDIDATES["lds_sigma"][0]
+        params["lds__lds_max_weight"] = PP_LDS_CANDIDATES["lds_max_weight"][0]
+
+    # ── Group Encoder ──
+    _sug("ge__use_encoder", "pp_ge_use_encoder",
+         GROUP_ENCODER_CANDIDATES["use_encoder"])
+    if params["ge__use_encoder"]:
+        _sug("ge__alpha", "pp_ge_alpha", GROUP_ENCODER_CANDIDATES["alpha"])
+        _sug("ge__n_folds", "pp_ge_n_folds", GROUP_ENCODER_CANDIDATES["n_folds"])
+        _sug("ge__group_specs_name", "pp_ge_group_specs_name",
+             GROUP_ENCODER_CANDIDATES["group_specs_name"])
+    else:
+        params["ge__alpha"]            = GROUP_ENCODER_CANDIDATES["alpha"][0]
+        params["ge__n_folds"]          = GROUP_ENCODER_CANDIDATES["n_folds"][0]
+        params["ge__group_specs_name"] = GROUP_ENCODER_CANDIDATES["group_specs_name"][0]
 
     # ── 집계 preset ──
     params["agg_preset_idx"] = trial.suggest_categorical(
@@ -456,6 +548,9 @@ def split_pp_params(pp_params):
     lds_args      : dict — compute_lds_weights에 넘길 kwargs
                    ({'lds_enabled', 'lds_sigma', 'lds_max_weight'})
     agg_funcs     : list — aggregate_die_to_unit에 넘길 집계 함수 list
+    ge_args       : dict — GroupTargetEncoder 호출 제어
+                   ({'use_encoder', 'alpha', 'n_folds', 'group_specs_name'}).
+                   use_encoder=False면 인코딩 스킵 (기존 동작).
     """
     cleaning_args = {k: v for k, v in pp_params.items() if k in CLEANING_KEYS}
 
@@ -471,10 +566,13 @@ def split_pp_params(pp_params):
     lds_args = {k[len("lds__"):]: v
                 for k, v in pp_params.items() if k.startswith("lds__")}
 
+    ge_args = {k[len("ge__"):]: v
+               for k, v in pp_params.items() if k.startswith("ge__")}
+
     agg_idx = pp_params.get("agg_preset_idx", 0)
     agg_funcs = AGG_PRESETS[agg_idx]
 
-    return cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs
+    return cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs, ge_args
 
 
 def extract_pp_params_from_best(best_params):
@@ -503,6 +601,8 @@ def extract_pp_params_from_best(best_params):
             out[f"iso__{inner[len('iso_'):]}"] = v
         elif inner.startswith("lds_"):
             out[f"lds__{inner[len('lds_'):]}"] = v
+        elif inner.startswith("ge_"):
+            out[f"ge__{inner[len('ge_'):]}"] = v
         else:
             out[inner] = v
     return out

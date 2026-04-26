@@ -1714,7 +1714,8 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
                        cleaning_args, outlier_args, binarize_args,
                        iso_args, lds_args,
                        label_col, exclude_cols,
-                       use_sampling, sample_frac):
+                       use_sampling, sample_frac,
+                       protected_cols=None, ge_args=None):
     """
     2차 funnel 전처리 파이프라인 — 1회 실행.
 
@@ -1755,10 +1756,54 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
 
     ys_train = ys["train"]
 
+    # --- 0) GroupTargetEncoder (ge_args.use_encoder=True일 때만) ---
+    user_protected = list(protected_cols) if protected_cols else []
+    if ge_args and ge_args.get("use_encoder", False):
+        # 지연 import (의존성 옵션화 — use_encoder=False면 import 안 함)
+        import sys as _sys, os as _os
+        from utils.config import PROJECT_ROOT as _PR, SPLIT_COL as _SC
+        _pp_path = _os.path.join(_PR, "2_preprocessing")
+        if _pp_path not in _sys.path:
+            _sys.path.insert(0, _pp_path)
+        from group_encoder import (
+            GroupTargetEncoder, get_default_protected_cols,
+            DEFAULT_GROUP_SPECS, ALL_GROUP_SPECS,
+        )
+
+        # 사본에 lot_id/wafer_id 추가 (parse_group_columns 자체가 .copy() 수행)
+        xs_local = GroupTargetEncoder.parse_group_columns(xs)
+
+        gs_name = ge_args.get("group_specs_name", "default")
+        group_specs = DEFAULT_GROUP_SPECS if gs_name == "default" else ALL_GROUP_SPECS
+
+        encoder = GroupTargetEncoder(
+            alpha=float(ge_args.get("alpha", 20.0)),
+            n_folds=int(ge_args.get("n_folds", 5)),
+        )
+        enc_dict = encoder.fit_transform(xs_local, ys_train, group_specs=group_specs)
+        for col, arr in enc_dict.items():
+            xs_local[col] = arr
+
+        ge_cols = list(enc_dict.keys())
+        feat_cols_use = list(feat_cols) + ge_cols
+        xs_dict_use = {
+            split: xs_local[xs_local[_SC] == split]
+            for split in ("train", "validation", "test")
+        }
+        ge_protected = get_default_protected_cols(group_specs)
+        protected_for_cleaning = list(set(user_protected + ge_protected))
+        xs_for_cleaning = xs_local
+    else:
+        xs_for_cleaning = xs
+        feat_cols_use = feat_cols
+        xs_dict_use = xs_dict
+        protected_for_cleaning = user_protected if user_protected else None
+
     # --- 1) cleaning ---
     xs_train, xs_val, xs_test, clean_cols, _ = run_cleaning(
-        xs, feat_cols, xs_dict,
+        xs_for_cleaning, feat_cols_use, xs_dict_use,
         ys_train=ys_train,
+        protected_cols=protected_for_cleaning,
         **cleaning_args,
     )
 
@@ -1824,7 +1869,8 @@ def _get_or_run_pp(cache, cache_key, xs, xs_dict, ys, feat_cols,
                    cleaning_args, outlier_args, binarize_args,
                    iso_args, lds_args,
                    label_col, exclude_cols,
-                   use_sampling, sample_frac, max_size):
+                   use_sampling, sample_frac, max_size,
+                   protected_cols=None, ge_args=None):
     """
     전처리 캐시 조회 + 없으면 실행 + 저장.
 
@@ -1845,6 +1891,8 @@ def _get_or_run_pp(cache, cache_key, xs, xs_dict, ys, feat_cols,
             iso_args, lds_args,
             label_col, exclude_cols,
             use_sampling, sample_frac,
+            protected_cols=protected_cols,
+            ge_args=ge_args,
         )
 
     value = {
@@ -1886,9 +1934,12 @@ def run_e2e_optimization_with_pp(
     use_sampling=False,
     sample_frac=1.0,
     exclude_cols=None,
+    protected_cols=None,
     pp_cache_size=10,
     target_transform_fn=None,
     target_inverse_fn=None,
+    # ★ Optuna sampler (None이면 기본 TPESampler. multivariate/group/QMC 등 사용자 주입용)
+    sampler=None,
     # SQLite / warm start / CSV 로그
     exp_id=None,
     db_path=None,
@@ -1974,7 +2025,11 @@ def run_e2e_optimization_with_pp(
     def objective(trial):
         # ── ⓪ 전처리 (캐싱) ──
         pp_params = preprocessing_space(trial)
-        cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs = split_pp_params(pp_params)
+        # ★ resolved pp_params를 user_attr에 저장 — conditional skip된 키도 보존됨.
+        #   rerun_best_trial_with_pp가 study.best_trial.user_attrs['resolved_pp_params']로
+        #   읽어 사용하면 HPO와 rerun 전처리가 정확히 일치한다.
+        trial.set_user_attr("resolved_pp_params", pp_params)
+        cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs, ge_args = split_pp_params(pp_params)
         cache_key = _pp_hash(pp_params)
 
         pp_value = _get_or_run_pp(
@@ -1983,6 +2038,8 @@ def run_e2e_optimization_with_pp(
             iso_args, lds_args,
             label_col, exclude_cols,
             use_sampling, sample_frac, pp_cache_size,
+            protected_cols=protected_cols,
+            ge_args=ge_args,
         )
         pos_data = pp_value["pos_data"]
         feat_cols_clean = pp_value["feat_cols"]
@@ -2173,7 +2230,7 @@ def run_e2e_optimization_with_pp(
         study_name=study_name,
         storage=storage,
         direction="minimize",
-        sampler=optuna.samplers.TPESampler(),
+        sampler=sampler if sampler is not None else optuna.samplers.TPESampler(),
         load_if_exists=True,
     )
 
@@ -2271,6 +2328,7 @@ def rerun_best_trial_with_pp(
     ys,
     feat_cols,
     best_params,
+    best_pp_params_resolved=None,
     pipeline_config=None,
     clf_model="lgbm",
     reg_model="lgbm",
@@ -2291,6 +2349,7 @@ def rerun_best_trial_with_pp(
     use_sampling=False,
     sample_frac=1.0,
     exclude_cols=None,
+    protected_cols=None,
     # ★ 2차 신규
     clf_models=None,                # list/tuple. None이면 (clf_model,)로 폴백
     reg_models=None,                # list/tuple. None이면 (reg_model,)로 폴백
@@ -2332,14 +2391,24 @@ def rerun_best_trial_with_pp(
         raise ValueError("save_per_model_oof=True면 oof_dir 필수.")
 
     # ── ⓪ 전처리 (best pp_params 복원) ──
-    pp_params = extract_pp_params_from_best(best_params)
-    cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs = split_pp_params(pp_params)
+    # ★ conditional sampling 도입 후, best_params에는 trial.suggest 호출된 키만 남는다.
+    #   단일 후보로 skip된 키는 best_params에 빠져 있어, signature default가 사용되어
+    #   HPO와 rerun 전처리가 어긋날 수 있다. 이를 방지하기 위해 objective에서
+    #   trial.set_user_attr('resolved_pp_params', pp_params)로 보존한 dict를 우선 사용한다.
+    if best_pp_params_resolved is not None:
+        pp_params = best_pp_params_resolved
+        print("Rerun: using best_pp_params_resolved (from trial.user_attrs) — conditional skip 키도 보존됨")
+    else:
+        pp_params = extract_pp_params_from_best(best_params)
+        print("Rerun: using extract_pp_params_from_best (구버전 호환 — single-候补 키는 default fallback)")
+    cleaning_args, outlier_args, binarize_args, iso_args, lds_args, agg_funcs, ge_args = split_pp_params(pp_params)
 
     print(f"Rerun preprocessing: cleaning={len(cleaning_args)} args, "
           f"outlier method={outlier_args.get('method')}, "
           f"binarize_apply={binarize_args.get('apply')}, "
           f"iso_enabled={iso_args.get('iso_enabled')}, "
           f"lds_enabled={lds_args.get('lds_enabled')}, "
+          f"ge_use_encoder={ge_args.get('use_encoder')}, "
           f"agg_funcs={agg_funcs}")
     pos_data, feat_cols_clean, sample_weight, scaler = _run_preprocessing(
         xs, xs_dict, ys, feat_cols,
@@ -2347,6 +2416,8 @@ def rerun_best_trial_with_pp(
         iso_args, lds_args,
         label_col, exclude_cols,
         use_sampling, sample_frac,
+        protected_cols=protected_cols,
+        ge_args=ge_args,
     )
     print(f"Rerun preprocessing 완료: feat_cols={len(feat_cols_clean)}, "
           f"sample_weight={'die-level len=' + str(len(sample_weight)) if sample_weight is not None else 'None'}")
