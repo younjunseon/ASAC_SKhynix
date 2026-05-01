@@ -1,0 +1,31 @@
+# ─── Node / Frontend ───────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.log
+
+# ─── 환경 설정 (개인) ───────────────────────────────
+frontend/.env.local
+frontend/.env.*.local
+.env.local
+
+# ─── Python ────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.Python
+
+# ─── IDE / OS ──────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─── 임시 파일 ──────────────────────────────────────
+*.tmp
+*.bak
+*.log

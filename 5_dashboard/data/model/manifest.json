@@ -1,0 +1,14 @@
+{
+  "built_at": "2026-05-01 19:56:38",
+  "seed": 42,
+  "n_folds": 5,
+  "risk_percentile": 0.95,
+  "n_features": 573,
+  "n_features_in_xs": 564,
+  "outputs": {
+    "fold_metrics.json": "fold별 RMSE",
+    "feature_importance.csv": "5-fold 평균 LGBM gain (mu/pi)",
+    "psi.csv": "train ↔ validation 분포 변화",
+    "var_compare.csv": "위험 vs 정상 unit 변수 비교 (t-test + Cohen's d)"
+  }
+}

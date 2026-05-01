@@ -61,6 +61,57 @@ from .feature_select import select_top_k, remove_zero_variance
 
 
 # ═════════════════════════════════════════════════════════════
+# 진단 metric — trial.user_attrs에 보조 지표 기록
+# ═════════════════════════════════════════════════════════════
+def _record_val_diagnostics(trial, y_val, val_pred):
+    """val 보조 metric을 trial.user_attrs에 기록.
+
+    Optuna objective(OOF RMSE)는 그대로 두고, trial 간 비교를 다축으로
+    만들기 위한 진단 지표만 추가한다. 호출 측에서 try/except로 감쌀 것.
+
+    기록 항목:
+      val_rmse        : 전체 val RMSE
+      val_skill       : 1 - val_rmse / predict-zero baseline (split 분포 차이 정규화)
+      val_corr        : Pearson corr(y, pred) — 단조성/순위 학습
+      val_rmse_ypos   : Y>0 서브셋 RMSE — Stage 2 회귀 신호
+      val_rmse_q90plus: Y > q90 tail RMSE — 큰 y 학습력
+      val_rmse_trim99 : Y < q99 trimmed RMSE — 극단값 1~2개 영향 제거
+    """
+    y_val = np.asarray(y_val, dtype=np.float64)
+    val_pred = np.asarray(val_pred, dtype=np.float64)
+
+    val_rmse_score = float(rmse(y_val, val_pred))
+    trial.set_user_attr("val_rmse", val_rmse_score)
+
+    val_baseline = float(np.sqrt((y_val ** 2).mean()))
+    if val_baseline > 0:
+        trial.set_user_attr("val_skill", 1.0 - val_rmse_score / val_baseline)
+
+    if np.std(val_pred) > 1e-12 and np.std(y_val) > 1e-12:
+        trial.set_user_attr("val_corr", float(np.corrcoef(y_val, val_pred)[0, 1]))
+
+    mask_pos = y_val > 0
+    if mask_pos.sum() >= 10:
+        trial.set_user_attr(
+            "val_rmse_ypos", float(rmse(y_val[mask_pos], val_pred[mask_pos]))
+        )
+
+    q90 = float(np.quantile(y_val, 0.90))
+    mask_tail = y_val > q90
+    if mask_tail.sum() >= 10:
+        trial.set_user_attr(
+            "val_rmse_q90plus", float(rmse(y_val[mask_tail], val_pred[mask_tail]))
+        )
+
+    q99 = float(np.quantile(y_val, 0.99))
+    mask_trim = y_val < q99
+    if mask_trim.sum() >= 10:
+        trial.set_user_attr(
+            "val_rmse_trim99", float(rmse(y_val[mask_trim], val_pred[mask_trim]))
+        )
+
+
+# ═════════════════════════════════════════════════════════════
 # 기본 pipeline_config
 # ═════════════════════════════════════════════════════════════
 DEFAULT_CONFIG = dict(
@@ -1300,7 +1351,7 @@ def run_e2e_optimization(
         trial.set_user_attr("train_rmse", oof_rmse_score)
         trial.set_user_attr("n_features", len(selected_cols))
 
-        # val RMSE는 참고용으로만 기록 (Y가 있을 때)
+        # val RMSE + 보조 진단 metric 기록 (Y가 있을 때)
         try:
             y_val = unit_data["val"][TARGET_COL].values
             if cfg["reg_level"] == "position":
@@ -1310,7 +1361,7 @@ def run_e2e_optimization(
                     .first()
                     .values
                 )
-            trial.set_user_attr("val_rmse", rmse(y_val, reg_result["val_pred"]))
+            _record_val_diagnostics(trial, y_val, reg_result["val_pred"])
         except Exception:
             pass
 
@@ -2166,7 +2217,7 @@ def run_e2e_optimization_with_pp(
             {m: float(per_model_reg[m]["train_rmse"]) for m in reg_models_eff},
         )
 
-        # val RMSE는 참고용으로만 기록 (Y가 있을 때)
+        # val RMSE + 보조 진단 metric 기록 (Y가 있을 때)
         try:
             if cfg["reg_level"] == "position":
                 y_val = (
@@ -2177,7 +2228,7 @@ def run_e2e_optimization_with_pp(
                 )
             else:
                 y_val = unit_data["val"][TARGET_COL].values
-            trial.set_user_attr("val_rmse", rmse(y_val, reg_result["val_pred"]))
+            _record_val_diagnostics(trial, y_val, reg_result["val_pred"])
         except Exception:
             pass
 

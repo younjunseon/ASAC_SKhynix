@@ -1,0 +1,192 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: "Inter", "Segoe UI", "Malgun Gothic", sans-serif;
+  background: #fafafa;
+  color: #0f172a;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── 카드 ────────────────────────────────────── */
+.panel {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  border: 1px solid #eef2f7;
+  overflow: hidden;
+}
+.panel-title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 14px 18px 4px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.panel-body {
+  padding: 12px 18px 18px 18px;
+  background: #ffffff;
+}
+
+/* 강조 카드 — 거의 사용 X (호환용으로 평범한 카드와 동일하게 처리) */
+.panel-accent {
+  background: #ffffff;
+  color: #0f172a;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  border: 1px solid #eef2f7;
+}
+.panel-accent .panel-title { color: #0f172a; }
+.panel-accent .panel-body { background: #ffffff; }
+
+/* ─── 표 ──────────────────────────────────────── */
+table.spotfire {
+  font-size: 12px;
+  border-collapse: collapse;
+  width: 100%;
+}
+table.spotfire th {
+  background: #f8fafc;
+  border-bottom: 1px solid #eef2f7;
+  padding: 10px 14px;
+  font-weight: 600;
+  text-align: left;
+  font-size: 11px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+/* th에 Tailwind utility(text-right/text-center)를 쓸 수 있도록 specificity 보강 */
+table.spotfire th.text-right { text-align: right; }
+table.spotfire th.text-center { text-align: center; }
+table.spotfire td {
+  border-bottom: 1px solid #f1f5f9;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: #0f172a;
+}
+table.spotfire tr:hover td { background: #f8fafc; }
+table.spotfire tr.active td { background: #3b82f6; color: #ffffff; }
+
+/* ─── 버튼 ───────────────────────────────────── */
+.btn {
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+.btn:hover { background: #f8fafc; border-color: #cbd5e1; }
+.btn.btn-primary {
+  background: #3b82f6;
+  color: #ffffff;
+  border-color: #3b82f6;
+}
+.btn.btn-primary:hover { background: #2563eb; border-color: #2563eb; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ─── 스크롤바 ───────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* ─── 사이드바 (흰색 + 좌측 컬러 dot) ─────────── */
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 20px;
+  font-size: 13px;
+  color: #475569;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  transition: all 0.12s;
+  font-weight: 500;
+  position: relative;
+}
+.sidebar-link:hover {
+  color: #0f172a;
+  background: #f8fafc;
+}
+.sidebar-link.active {
+  color: #0f172a;
+  background: #eff6ff;
+  border-left-color: #3b82f6;
+  font-weight: 600;
+}
+.sidebar-link svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+/* 사이드바 메뉴별 dot 색 — 메뉴 hover/active 시 좌측 dot 강조 */
+.sidebar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ─── chip 유틸 ───────────────────────────────── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.chip-danger  { background: #fef2f2; color: #b91c1c; }
+.chip-warn    { background: #fffbeb; color: #b45309; }
+.chip-success { background: #ecfdf5; color: #047857; }
+.chip-info    { background: #eff6ff; color: #1d4ed8; }
+.chip-muted   { background: #f1f5f9; color: #475569; }
+.chip-tbd {
+  background: repeating-linear-gradient(
+    45deg, #fef3c7, #fef3c7 4px, #fde68a 4px, #fde68a 8px
+  );
+  color: #92400e;
+  border: 1px dashed #f59e0b;
+}
+.chip-sm { padding: 1px 6px; font-size: 10px; }
+
+/* TBD placeholder — "여기 실측값이 들어가야 함" 시각화 */
+.tbd-value {
+  display: inline-block;
+  min-width: 3em;
+  border-bottom: 2px dashed #f59e0b;
+  color: #b45309;
+  font-style: italic;
+  letter-spacing: 0.04em;
+}
+.tbd-block {
+  border: 1px dashed #f59e0b;
+  background: #fffbeb;
+  color: #92400e;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* status 전용 chip */
+.chip-today    { background: #fef3c7; color: #b45309; }  /* amber — 오늘 강조 */
+.chip-pending  { background: #eff6ff; color: #1d4ed8; }  /* blue — 대기 */
+.chip-completed{ background: #f1f5f9; color: #475569; }  /* gray — 완료 */
