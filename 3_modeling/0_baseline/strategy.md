@@ -21,8 +21,16 @@
 ## 2. 디렉토리 구조
 
 ```
-3_modeling_신규/0_baseline/
+3_modeling/0_baseline/
 ├── strategy.md                # 이 문서
+├── _modules/                  # 0_baseline 전용 격리 모듈 (3_modeling_이전자료/modules/ 복사 + 수정)
+│   ├── e2e_hpo.py             # baseline.ipynb 그대로 사용 (분기 추가 없음)
+│   ├── search_space.py
+│   ├── model_zoo.py           # ZITboost 의존 제거
+│   ├── aggregate.py           # Q25/Q75 분기 추가
+│   ├── feature_select.py
+│   ├── training.py
+│   └── __init__.py
 ├── axes.py                    # 축 정의 + reference + 그리드 생성 helper + run_one()
 ├── 01_oat.ipynb               # OAT 노트북 (한 축씩 흔들기)
 ├── 02_group_study.ipynb       # Group study 노트북 (Optuna multivariate)
@@ -33,17 +41,22 @@
 ```
 4_output/baseline/
 ├── oat/
-│   ├── master.csv             # cell × seed × fold RMSE 영구 박제
+│   ├── master.csv             # row 단위 영구 박제 (155 row, cfg 11축 컬럼 포함)
 │   ├── checkpoint.json        # 진행 상황 (재실행 시 이어서)
-│   └── plots/                 # tornado.png 등
+│   └── meta.json              # 실행 설정 + axis/PP/seed/exclude_cols (재현성)
 ├── group/
-│   ├── optuna.db              # study sqlite
+│   ├── optuna.db              # study sqlite (300 trial 누적)
 │   ├── trials.csv             # study.trials_dataframe() export
-│   └── plots/                 # contour, importance.png 등
+│   ├── param_importance.csv   # fANOVA importance
+│   └── meta.json              # 실행 설정 + sampler/pruner/study_name 등
 └── summary/
-    ├── comparison.csv         # OAT marginal vs Group best 비교표
-    └── summary_report.png     # 발표용 종합 1장
+    ├── tornado.png            # OAT 축별 RMSE range
+    ├── group_importance.png   # Group fANOVA importance
+    ├── comparison.csv         # OAT marginal best vs Group best (RMSE 값 포함)
+    └── summary_report.png     # 발표용 종합 1장 (tornado + importance)
 ```
+
+총 **11개 파일 고정** (oat 3 + group 4 + summary 4). 파일 개수는 trial/cell 수와 무관하게 일정 — master.csv는 row append, optuna.db는 sqlite 누적.
 
 ---
 
@@ -54,7 +67,7 @@
 ```
 [슬롯 A — 코어 7개]                [슬롯 B — 코어 7개]
 01_oat.ipynb                       02_group_study.ipynb
-  ├ 12축 × 옵션 × seed                ├ 12축 동시 Optuna 탐색
+  ├ 11축 × 옵션 × seed                ├ 11축 동시 Optuna 탐색
   ├ 한 번에 한 축만 흔듦               ├ TPE multivariate
   ├ marginal 효과 측정                ├ 상호작용 학습
   └ → master.csv                    └ → optuna.db
@@ -70,7 +83,7 @@
 | | OAT (01) | Group study (02) |
 |---|---|---|
 | **목적** | 축별 marginal 영향력 측정 | 축들 상호작용 + best 조합 탐색 |
-| **방식** | reference 1점에서 한 축씩 갈아끼움 | 12축 동시 샘플 (Optuna) |
+| **방식** | reference 1점에서 한 축씩 갈아끼움 | 11축 동시 샘플 (Optuna) |
 | **편향** | 없음 (모든 비교가 1:1) | 있음 (TPE가 좋은 영역 집중) — 의도된 편향 |
 | **발표 용도** | tornado plot ("이 축이 X 영향") | "최종 best 조합" |
 | **결과 저장** | csv | sqlite db |
@@ -96,7 +109,6 @@
 ```python
 REFERENCE = {
     'CLF':              'off',         # run_clf=False (xlsx best는 clf off)
-    'clf_level':        'die',         # CLF=off면 무관, conditional
     'reg_level':        'position',
     'TARGET_TRANSFORM': 'yeo-johnson',
     'CLIP_Y_EXTREME':   True,
@@ -110,26 +122,28 @@ REFERENCE = {
 }
 ```
 
-### 4.2 흔들 12축
+### 4.2 흔들 11축
 
-**baseline.ipynb의 실제 변수와 1:1 매핑**. xlsx 6축 + 추가 6축.
+**baseline.ipynb의 실제 변수와 1:1 매핑**. xlsx 6축(clf_output·clf_filter는 CLF에 통합) + 추가 5축.
+
+> **제외 결정**: `clf_level` (분류를 die-level vs unit-level) — 1차 실험에서 **집계 후 분류 성능이 안 좋았던 이력**이 있어 축 자체 제거. baseline은 die-level 분류만 사용 (baseline.ipynb 동작 그대로).
 
 | # | 축 | 옵션 | baseline.ipynb 위치 | 비고 |
 |---|---|---|---|---|
 | 1 | `CLF` | `off` / `proba` / `proba+filter` / `binary` | `pipeline_config.run_clf` × `clf_output` × `clf_filter` | xlsx 그대로 |
-| 2 | `clf_level` ★ | `die` / `unit` | (현재 미구현) | **코드 구현 필요** — `unit` 옵션은 e2e_hpo에 unit-level 분류 분기 추가. `CLF=off`면 무관 (conditional) |
-| 3 | `reg_level` | `unit` / `position` | `pipeline_config.reg_level` | xlsx 그대로 |
-| 4 | `TARGET_TRANSFORM` | `none` / `log1p` / `yeo-johnson` | `TARGET_TRANSFORM` | xlsx 그대로. sqrt는 코드 미지원이라 제외 |
-| 5 | `CLIP_Y_EXTREME` | `True` / `False` | `CLIP_Y_EXTREME` | xlsx 그대로 |
-| 6 | `loss` | `regression` / `poisson` / `tweedie` / `huber` | `e2e_params.reg_fixed = {'objective': ...}` | LGBM objective. `regression` = mse |
-| 7 | `impute` | `spatial` / `median` / `knn` | `PP_CLEAN_CANDIDATES.imputation_method` | baseline.ipynb 옵션 그대로 |
-| 8 | `outlier` ★ | `none` / `winsorize` / `iqr_clip` / `grubbs` / `lot_local` | `PP_OUTLIER_CANDIDATES.method` | **`none` 분기 코드 추가 필요** ([outlier.py:425](../../2_preprocessing/outlier.py#L425) `run_outlier_treatment`에 passthrough 추가) |
-| 9 | `agg_preset` | **12종 (§4.3)** | `AGG_PRESETS` | 확장 — `reg_level='unit'`일 때만 의미 |
-| 10 | `binarize` | `True` / `False` | `PP_BINARIZE_CANDIDATES.apply` | baseline.ipynb 그대로 |
-| 11 | `iso_anomaly` | `True` / `False` | `PP_ISO_ANOMALY_CANDIDATES.iso_enabled` | baseline.ipynb 그대로 |
-| 12 | `lds` | `True` / `False` | `PP_LDS_CANDIDATES.lds_enabled` | baseline.ipynb 그대로 (Label Distribution Smoothing — zero-inflation 대응) |
+| 2 | `reg_level` | `unit` / `position` | `pipeline_config.reg_level` | xlsx 그대로 |
+| 3 | `TARGET_TRANSFORM` | `none` / `log1p` / `yeo-johnson` | `TARGET_TRANSFORM` | xlsx 그대로. sqrt는 코드 미지원이라 제외 |
+| 4 | `CLIP_Y_EXTREME` | `True` / `False` | `CLIP_Y_EXTREME` | xlsx 그대로 |
+| 5 | `loss` | `regression` / `poisson` / `tweedie` / `huber` | `e2e_params.reg_fixed = {'objective': ...}` | LGBM objective. `regression` = mse. **`tweedie` 시 `TARGET_TRANSFORM` 자동 OFF** ([02_reg_single/strategy.md §4](../02_reg_single/strategy.md), EXPERIMENT_LOG §5.1 — Tweedie + log1p 충돌 방지). poisson은 ON 유지 |
+| 6 | `impute` | `spatial` / `median` / `knn` | `PP_CLEAN_CANDIDATES.imputation_method` | baseline.ipynb 옵션 그대로 |
+| 7 | `outlier` | `none` / `winsorize` / `iqr_clip` / `grubbs` / `lot_local` | `PP_OUTLIER_CANDIDATES.method` | `none` 분기 [outlier.py:449](../../2_preprocessing/outlier.py#L449)에 이미 구현됨 |
+| 8 | `agg_preset` | **12종 (§4.3)** | `AGG_PRESETS` | 확장 — `reg_level='unit'`일 때만 의미 |
+| 9 | `binarize` | `True` / `False` | `PP_BINARIZE_CANDIDATES.apply` | baseline.ipynb 그대로 |
+| 10 | `iso_anomaly` | `True` / `False` | `PP_ISO_ANOMALY_CANDIDATES.iso_enabled` | baseline.ipynb 그대로 |
+| 11 | `lds` | `True` / `False` | `PP_LDS_CANDIDATES.lds_enabled` | baseline.ipynb 그대로 (Label Distribution Smoothing — zero-inflation 대응) |
 
-**제외한 축** (코드 미지원 또는 효과 미미):
+**제외한 축** (코드 미지원, 효과 미미, 또는 명시 제외):
+- `clf_level` — 1차 실험에서 집계 후 분류 성능 나쁨 → 제거
 - `scaling` — `HybridScaler`가 컬럼별 자동 분기, 외부에서 강제 못 흔듦
 - `zero_clip` — 사용자 지시로 제외
 - `path` (회귀) — `reg_level=position` vs `unit`이 사실상 동일 역할
@@ -139,7 +153,7 @@ REFERENCE = {
 
 baseline.ipynb 4종 + 추가 8종. die→unit 집계 함수 조합 다양성 확보.
 
-**코드 수정 필요**: [aggregate.py:65](../../3_modeling/modules/aggregate.py#L65) `aggregate_die_to_unit`에 `Q25, Q75` 분기 추가 (현재 native 지원: `mean / std / cv / range / min / max / median` 7종만). `CV`는 이미 지원.
+**코드 수정 완료**: [_modules/aggregate.py](_modules/aggregate.py) `aggregate_die_to_unit`에 `Q25, Q75` 분기 추가됨. native 지원 함수 = `mean / std / cv / range / min / max / median / Q25 / Q75` 9종.
 
 ```python
 AGG_PRESET_LIB = {
@@ -158,7 +172,7 @@ AGG_PRESET_LIB = {
     'P09_quartiles': ['Q25', 'median', 'Q75'],
     # ── 풀세트 ──
     'P10_full8':     ['mean', 'std', 'range', 'min', 'max', 'median', 'Q25', 'Q75'],
-    'P11_full9_cv':  ['mean', 'std', 'range', 'min', 'max', 'median', 'Q25', 'Q75', 'CV'],
+    'P11_full9_cv':  ['mean', 'std', 'range', 'min', 'max', 'median', 'Q25', 'Q75', 'cv'],
 }
 ```
 
@@ -171,7 +185,6 @@ AGG_PRESET_LIB = {
 | 축 | 옵션 수 | 변형 cell |
 |---|---|---|
 | CLF | 4 | 3 |
-| clf_level | 2 | 1 |
 | reg_level | 2 | 1 |
 | TARGET_TRANSFORM | 3 | 2 |
 | CLIP_Y_EXTREME | 2 | 1 |
@@ -182,29 +195,46 @@ AGG_PRESET_LIB = {
 | binarize | 2 | 1 |
 | iso_anomaly | 2 | 1 |
 | lds | 2 | 1 |
-| **합계** | | **31 변형** + 1 reference = **32 cell** |
+| **합계** | | **30 변형** + 1 reference = **31 cell** |
 
-× 5 seed = **160 cell-seed**
-× 5 fold = **800 model fit**
+× 5 seed = **155 cell-seed**
+× 5 fold = **775 model fit**
 
-LGBM default + position pivot 기준 fit당 4~6분 가정 → **53~80시간 ≈ 2.5~3.5일** (단일 슬롯).
+LGBM default + position pivot 기준 fit당 4~6분 가정 → **52~78시간 ≈ 2~3.5일** (단일 슬롯).
 
 ### 4.5 출력 — master.csv
 
 row 단위 영구 박제. 발표 시 csv 로딩 → tornado plot 즉석 생성.
 
-| 컬럼 | 예시 |
-|---|---|
-| `axis` | `TARGET_TRANSFORM` |
-| `option` | `log1p` |
-| `seed` | 42 |
-| `fold` | 0 |
-| `val_rmse` | 0.005442 |
-| `is_reference` | False |
-| `elapsed_sec` | 187.3 |
-| `timestamp` | 2026-05-08T14:23:01 |
+**한 row = 한 (axis, option, seed) 셀의 5-fold 평균 결과**. fold별 분리는 안 함 (변동성은 seed 5개로 측정).
 
-`is_reference=True`인 row가 5 seed × 5 fold = 25개 (모든 축에서 reference 옵션과 같은 셀 1개).
+| 컬럼 | 예시 | 비고 |
+|---|---|---|
+| `axis` | `TARGET_TRANSFORM` | reference 셀은 `'reference'` |
+| `option` | `log1p` | 그 축의 옵션 값 |
+| `seed` | 42 | 5개 중 1개 |
+| `is_reference` | False | reference 셀 식별 |
+| `oof_rmse` | 0.008275 | 5-fold OOF RMSE |
+| `val_rmse` | 0.005442 | 5-fold val 평균 RMSE |
+| `test_rmse` | 0.008446 | 5-fold test 평균 RMSE |
+| `elapsed_sec` | 187.3 | |
+| `effective_target_transform` | `none` | ★ 학습에 실제 적용된 변환. cfg와 다를 수 있음 (loss=tweedie 시 자동 'none' override — [02_reg_single/strategy.md §4](../02_reg_single/strategy.md) 룰) |
+| `timestamp` | 2026-05-08T14:23:01 | |
+| `cfg_CLF` | `off` | ★ 셀 cfg 11축 풀어 저장 (재현/복원용) |
+| `cfg_reg_level` | `position` | |
+| `cfg_TARGET_TRANSFORM` | `log1p` | (이 row의 axis와 일치) |
+| ... (총 11개 cfg_* 컬럼) | | |
+
+`is_reference=True`인 row가 5 seed = **5개** (cfg는 모두 REFERENCE). 변형 cell × 5 seed = 150 row + reference 5 = **155 row**.
+
+### 4.5b 메타 산출물 — meta.json (재현성)
+
+`oat/meta.json`, `group/meta.json` 각 디렉토리에 1개. run마다 덮어쓰기. 내용:
+- 실행 설정: `n_jobs`, `n_estimators`, `n_trials` (group)
+- axis 정의: `reference`, `axes`, `seeds`, `agg_preset_lib`
+- PP pin 값: `pp_pin.{cleaning, outlier, binarize, iso, lds, ge}`
+- `exclude_cols` (54개)
+- `master_cols` (oat) / `study_name`, `sampler`, `pruner` (group)
 
 ### 4.6 Checkpoint — 끊겨도 이어서
 
@@ -221,7 +251,7 @@ for cell in oat_grid:
 
 ## 5. Group Study 설계 (02_group_study.ipynb)
 
-### 5.1 Search space — OAT의 12축 그대로
+### 5.1 Search space — OAT의 11축 그대로
 
 axes.py의 `AXES` dict를 그대로 Optuna `suggest_categorical`로 변환:
 
@@ -234,7 +264,7 @@ def objective(trial):
     return run_one(cfg, seed=42)   # 5-fold mean RMSE
 ```
 
-LGBM HP는 default 고정. **축 12개만 흔듦** (HP 같이 흔들면 축 효과와 섞여 발표 일관성 깨짐).
+LGBM HP는 default 고정. **축 11개만 흔듦** (HP 같이 흔들면 축 효과와 섞여 발표 일관성 깨짐).
 
 ### 5.2 Sampler
 
@@ -244,11 +274,11 @@ LGBM HP는 default 고정. **축 12개만 흔듦** (HP 같이 흔들면 축 효�
 TPESampler(
     seed=None,            # 다양성
     multivariate=True,    # ★ 축들의 결합 분포 학습 = 상호작용
-    group=True,           # ★ 자연 블록 (예: CLF=off면 clf_level 무관)
+    group=True,           # ★ 자연 블록 (예: CLF=off면 clf_output/clf_filter 무관)
 )
 ```
 
-`group=True`로 `CLF=off`일 때 `clf_level` 미샘플 등 conditional 처리.
+`group=True`로 `CLF=off`일 때 clf 관련 sub-옵션 미샘플 등 conditional 처리.
 
 ### 5.3 Pruner
 
@@ -256,7 +286,7 @@ LGBM default fit + 5-fold라 fold별 중간값 잘 안 나옴. **MedianPruner는
 
 ### 5.4 Trial 예산
 
-- 12축 카르테시안 = 4×2×2×3×2×4×3×5×12×2×2×2 ≈ **552,960 조합**
+- 11축 카르테시안 = 4×2×3×2×4×3×5×12×2×2×2 ≈ **276,480 조합**
 - 모두 못 보니까 TPE로 좋은 영역 학습
 
 | trial | fit | 예상 시간 (5-fold, fit당 ~5분) | 발표 적합성 |
@@ -297,14 +327,13 @@ N_JOBS = 7
 ## 7. axes.py — 두 노트북 공통 모듈
 
 ```python
-# 3_modeling_신규/0_baseline/axes.py
+# 3_modeling/0_baseline/axes.py
 
 REFERENCE = { ... }     # §4.1
 AGG_PRESET_LIB = { ... } # §4.3
 
 AXES = {
     'CLF':              ['off', 'proba', 'proba+filter', 'binary'],
-    'clf_level':        ['die', 'unit'],   # CLF=off면 conditional skip
     'reg_level':        ['unit', 'position'],
     'TARGET_TRANSFORM': ['none', 'log1p', 'yeo-johnson'],
     'CLIP_Y_EXTREME':   [True, False],
@@ -338,8 +367,8 @@ def run_one(cfg: dict, seed: int) -> dict:
     """단일 cell 학습 + 5-fold val RMSE 반환.
 
     1) cfg를 baseline.ipynb의 PP_*_CANDIDATES / pipeline_config / e2e_params 형태로 매핑
-    2) baseline.ipynb의 run_e2e_optimization_with_pp() 와 동일 함수 호출 (단, n_trials=1, default HP)
-    3) 5-fold OOF RMSE 반환
+    2) baseline.ipynb의 rerun_best_trial_with_pp() 호출 (best_params=defaults, n_folds=5)
+    3) OOF + val + test RMSE 반환
     """
     ...
 ```
@@ -380,10 +409,10 @@ def run_one(cfg: dict, seed: int) -> dict:
 ## 9. 발표 스토리
 
 ```
-"우리는 베이스라인 단계에서 12개 축의 효과를 측정했다.
+"우리는 베이스라인 단계에서 11개 축의 효과를 측정했다.
 
 1) OAT (편향 없는 marginal):
-   - 32 cell × 5 seed = 160 fit
+   - 31 cell × 5 seed = 155 fit
    - tornado plot: TARGET_TRANSFORM이 가장 큰 축 (Δ 0.0044)
    - scaling은 거의 무영향 (트리 모델이라 예상대로)
 
@@ -393,7 +422,7 @@ def run_one(cfg: dict, seed: int) -> dict:
    - param importance ranking이 OAT tornado와 일치
    → 상호작용 효과 작음 = OAT marginal이 충분 신뢰 가능
 
-3) 결론: 12개 축 중 X개가 RMSE 좌우.
+3) 결론: 11개 축 중 X개가 RMSE 좌우.
    나머지는 default 그대로 가도 안전 → 모델링 단계로 진입할 때
    탐색 공간을 X축으로 좁혀 효율화."
 ```
@@ -417,10 +446,7 @@ def run_one(cfg: dict, seed: int) -> dict:
 |---|---|---|---|
 | 1 | Group study trial 수 | 300 | 노트북 작성 전 |
 | 2 | seed 5개 (`42, 7, 123, 2024, 31415`) OK? | OK | 노트북 작성 전 |
-| 3 | `clf_level='unit'` 코드 구현 | e2e_hpo.py에 분기 추가 | **`clf_level` 축 켜기 전 필수** |
-| 4 | LGBM default HP — `n_estimators` 명시 | sklearn default(100) | 노트북 작성 전 |
-| 5 | `outlier` 'none' 분기 추가 | outlier.py `run_outlier_treatment`에 passthrough | 노트북 작성 전 |
-| 6 | `agg_preset` Q25/Q75 분기 추가 | aggregate.py `aggregate_die_to_unit`에 quantile 분기 | 노트북 작성 전 |
+| 3 | LGBM default HP — `n_estimators` 명시 | sklearn default(100) | 노트북 작성 전 |
 
 ---
 
@@ -430,15 +456,13 @@ def run_one(cfg: dict, seed: int) -> dict:
 - **OAT 한계 (상호작용)**: xlsx 데이터에서 CLIP 효과가 TARGET에 따라 큰 차이 (yeo-johnson + CLIP=F: Δ +0.00001 vs none + CLIP=F: Δ +0.00273) → OAT만으로는 못 잡음 → Group study로 보완
 - **공정 비교 핵심**: 같은 5-fold split + 같은 PP pin + 같은 LGBM default HP로만 축 효과 분리 가능. axes.py의 `run_one()`이 단일 entrypoint
 - **재현성**: master.csv에 모든 fit row 박제 → 발표 자료 png는 매번 csv에서 즉석 생성. 다음에 축 추가해도 csv 합치면 됨
-- **baseline.ipynb 정합**: 모든 축이 baseline.ipynb의 실제 변수(`pipeline_config`, `PP_*_CANDIDATES`, `AGG_PRESETS`, `TARGET_TRANSFORM`, `CLIP_Y_EXTREME`)와 1:1 매핑. `clf_level='unit'`만 코드 추가 필요
+- **baseline.ipynb 정합**: 모든 축이 baseline.ipynb의 실제 변수(`pipeline_config`, `PP_*_CANDIDATES`, `AGG_PRESETS`, `TARGET_TRANSFORM`, `CLIP_Y_EXTREME`)와 1:1 매핑. 코드 수정은 `_modules/aggregate.py`의 Q25/Q75 분기 추가뿐 (e2e_hpo.py는 손 안 댐)
 
 ---
 
 ## 13. 실행 순서
 
-1. 사용자 §11 결정 사항 확인
-2. `clf_level='unit'` 코드 구현 (e2e_hpo.py 분기)
-3. axes.py 작성 (`run_one()` 포함)
-4. 02_group_study.ipynb 시작 (코어 7) — 먼저 (시간 김)
-5. 01_oat.ipynb 시작 (코어 7) — 동시
-6. 둘 다 끝나면 03_summary.ipynb 1회 실행 → 발표 자료
+1. axes.py 작성 (`run_one()` 포함)
+2. 02_group_study.ipynb 시작 (코어 7) — 먼저 (시간 김)
+3. 01_oat.ipynb 시작 (코어 7) — 동시
+4. 둘 다 끝나면 03_summary.ipynb 1회 실행 → 발표 자료

@@ -57,20 +57,37 @@ cross-wafer 이웃은 보지 않음. lot에 train 데이터 없으면 자동으�
 
 ---
 
-## 3. ElasticNet — PP + scaling + HP joint Optuna
+## 3. ElasticNet — PP + X scaling + y transform + HP joint Optuna
 
-**대상**: `02_reg_single/reg_single.ipynb` (MODEL_NAME='enet'), `03_two_stage`의 enet 변형
+**대상**: `02_reg_single/enet.ipynb`, `03_two_stage/default/reg/enet.ipynb`
 
-**근거**: 선형 모델은 스케일/분포에 민감 → PP 영향이 트리보다 큼
+**근거**: 선형 모델은 스케일/분포에 민감 → PP·X scaling·y 변환 모두 학습 결과에 직접 영향. 트리(split 기반)와 달리 ENet은 **OLS 가정(잔차 정규성·등분산성)**의 영향을 받으므로 y 변환이 의미 있음.
 
 **탐색 축**:
 - PP 8축 (PP_FIXED 키와 동일, 단 범위로 탐색)
-- scaling: `StandardScaler` / `RobustScaler` / `Yeo-Johnson` / `Quantile` / **`HybridScaler`** (categorical)
+- **X scaling** (categorical): `StandardScaler` / `RobustScaler` / `Yeo-Johnson` / `Quantile` / **`HybridScaler`**
+- **y target_transform** (categorical, 신규): `none` / `log1p` / `yeo-johnson` / `quantile`
 - ElasticNet HP: `alpha`, `l1_ratio` (0.1~0.9, 0/1 양 끝 제외), `max_iter`
 
 `l1_ratio` 양 끝(순수 Lasso/Ridge)은 제외 — 약신호(EDA max\|r\|=0.037) + 다중공선성 환경에서 위험.
 
 **HybridScaler**: 자체 구현 ([2_preprocessing/scaling.py:155](../2_preprocessing/scaling.py)). `skew_threshold` 기준으로 컬럼별 다른 스케일러 자동 선택 (high-skew → Yeo-Johnson, low-skew → Robust 등). 2차 funnel에서 만든 우리만의 스케일러. ElasticNet 탐색 후보로 반드시 포함.
+
+**target_transform 후보**:
+| 후보 | 처리 |
+|---|---|
+| `none` | identity (변환 없음) |
+| `log1p` | `np.log1p` / `np.expm1` — 1차 enet best 검증된 변환 |
+| `yeo-johnson` | `PowerTransformer(method='yeo-johnson')` — `lambda` 자동 추정 |
+| `quantile` | `QuantileTransformer(output_distribution='normal')` — rank 기반 정규 매핑 |
+
+→ 우리 데이터(y 0~0.097, zero-inflated 70.8%)에서 어떤 변환이 best인지 **Optuna가 자동 탐색**.
+
+**구현 주의**:
+- **fold별로 train fold y에만 transformer fit** (val/test의 y가 transformer에 새어들면 leakage)
+- predict → `inverse_transform` → `np.clip(0, None)` (선형 모델은 음수 예측 가능)
+- 후처리 `zero_clip_log_space`는 best `target_transform`에 맞춰 분기: `'log1p'`이면 `True`, 그 외(`none`/`yeo`/`quantile`)면 `False`
+- `target_transform`이 trial 축에 들어가므로 `best_params.json`에 기록 필수 — refit 시 동일 변환 적용
 
 ---
 
@@ -329,6 +346,8 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 | 11. Position 가중치 | APPLY | APPLY | APPLY | APPLY | APPLY |
 | 12. zero_clip | APPLY | APPLY | APPLY | APPLY | APPLY |
 | 14. 노트북 작성 규칙 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **24. y target_transform** | **`'none'` (이미)** | **`'none'` 통일** | **Optuna 카테고리 (§3)** | **트리=`'none'`, ENet=Optuna** | N/A |
+| 25. study timeout (N_TIMEOUT_SEC) | ✅ | ✅ | ✅ | ✅ | N/A (Optuna 없음) |
 
 ---
 
@@ -391,3 +410,174 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 | `zit.py`, `models.py`, `hpo.py`, `postprocess.py`, `blending.py`, `preprocess.py`, `scaler.py` | `3_modeling/modules/`로 이동 | 모델링 전용 |
 
 `scaler.py`(enet 한정 RobustScaler 래퍼)는 `2_preprocessing/scaling.py`의 `maybe_scale` / `HybridScaler`로 흡수 가능하면 통합. 시그니처 차이 있으면 사용자 보고.
+
+---
+
+## 23. 노트북 검수 체크리스트
+
+매 노트북 작성·수정 후 5개 항목을 점검한다. 위반 발견 시 strategy.md 수정 또는 사용자 보고.
+
+### 23.1 설계 문서 일관성
+
+노트북 폴더의 `strategy.md` (또는 본 `strategy_common.md`)에 명시된 사항이 노트북에 **그대로** 반영됐는가?
+
+- [ ] `PP_FIXED` 키/값 (또는 PP joint search range)
+- [ ] HP search range — narrow ±n% (anchor 기반) 또는 evidence-driven wide (1차 분포 기반)
+- [ ] `N_TRIALS`, `N_FOLDS`, `N_JOBS`, `N_STARTUP_TRIALS`
+- [ ] sampler 설정 (`TPESampler(seed=None, multivariate=True, group=True)`)
+- [ ] pruner 설정 (예: `MedianPruner`)
+- [ ] anchor enqueue (`study.enqueue_trial(anchor)` 첫 trial 강제)
+- [ ] 후처리 매트릭스 (집계 8후보, position Optuna sub-study, zero_clip log_space, π threshold APPLY/SKIP)
+- [ ] 출력 경로 패턴
+
+### 23.2 기존 코드 컨셉/기능 보존
+
+- [ ] 모듈 함수의 시그니처·리턴 구조가 기존 호출부와 호환 (default 인자로 backward-compat 유지)
+- [ ] 기존 핵심 로직 누락 없음 — 예:
+  - τ_π 적용 위치 (die-level → unit 집계)
+  - fold split 메커니즘 (unit-level KFold, seed 고정)
+  - EM 수렴 검증 (`em_history_` 단조감소)
+  - target_inverse_fn 적용 시점 (refit 후 die-level로 복원)
+- [ ] 함수 default 변경 시 영향 범위 점검 (기존 호출부에서 명시 전달 안 하면 동작 변경 가능)
+
+### 23.3 재현성 — 산출물의 완전성
+
+`best_params.json` 검증:
+- [ ] `best_params_resolved` — 모델 HP 전체 + `random_state` 포함
+- [ ] `effective_pp_params` — 실제 적용된 PP 8축 (joint trial인 경우 best 값)
+- [ ] `feature_names` — 전처리 후 살아남은 feature 리스트
+- [ ] `n_folds`, `unit_ids_hash`, `n_units_train` — fold 분할 재현 가능
+- [ ] `study_meta` — sampler/pruner/anchor/CLIP_Y_EXTREME/SEED/N_JOBS
+- [ ] `postprocess` 메타 — best_agg, pos_weights, best_zero_clip, zero_clip_log_space, position_method, agg_rmses
+
+기타:
+- [ ] `fold_models.pkl` — 모든 fold 모델 + feature_names + (ZIT는 `em_history_per_fold` 포함)
+- [ ] `optuna_*.db` — OUT_DIR에 저장 (storage URL은 절대경로 권장)
+- [ ] CSV health 컬럼 — val/test 미공개라도 train의 `health`는 반드시 merge
+
+### 23.4 입출력 경로
+
+- [ ] 입력: `utils.config`의 상수만 사용 (`DATA_DIR`, `XS_PATH`, `YS_*_PATH`, `OUTPUT_DIR`) — 하드코딩 금지
+- [ ] 출력: §17의 패턴(`4_output/final/{exp_name}/`) 준수
+- [ ] Colab 분기: `GDRIVE_CODE_ID` / `GDRIVE_DATASET_ID` / `GDRIVE_PREPROCESSING_ID` / `GDRIVE_MODELING_ID` 4종 정의 (modeling은 신규)
+- [ ] `sys.path` 등록 순서: `2_preprocessing` → `3_modeling` (전처리/모델링 모듈 import)
+
+### 23.5 1차 실험 결과 반영 점검
+
+신규 노트북이 1차 실험 DB·산출물에서 도출된 사실과 모순되지 않는지 확인.
+
+- [ ] anchor가 1차 best HP와 정확히 일치 (다른 컨텍스트에서 fork한 경우 출처·차이 명시)
+- [ ] search range가 1차 top-N 분포의 **p5~p95**를 커버 (Evidence-driven Wide 채택 시)
+- [ ] `PP_FIXED`가 1차 PP joint 분포의 mode와 일치 — 보수적 fix면 근거 명시 (예: "ZIT context"라 reg와 다름)
+- [ ] 손실함수 후보가 1차 DB top 분포와 일치 — 명백히 worse(`Δ > 0.0001`) 옵션은 search space에서 제거
+- [ ] 과거 발견된 충돌 조합 회피 — 예: log1p × tweedie (EXPERIMENT_LOG §5.1), `corr_keep_by='target_corr'` (plan.md L9.5 leakage)
+
+### 23.6 데이터 누수(leakage) 점검 — Critical
+
+| 점검 | 위반 시 영향 |
+|---|---|
+| KFold 분할이 **unit-level**인가 (die-level 직접 분할 금지, §6) | 같은 unit 4 die가 train/val에 섞여 OOF 부풀림 |
+| Imputation·scaler `fit()`이 **train_mask만** 사용하는가 | val/test 정보 새어 들어가 OOF가 비현실적으로 좋아짐 |
+| Target encoding이 **fold-out**(K-fold에서 자기 fold 제외) 방식인가 | self-target leak |
+| `corr_keep_by='target_corr'` / `post_impute_corr_keep_by='target_corr'` 회피 (§22, plan.md L9.5) | KFold 안에서 train target 전체 사용 → supervised leak |
+| 후처리 best 탐색 시 train OOF만 사용 (val/test 미참조) | val/test 직접 fit 시 cherry-picking |
+
+---
+
+### 검수 실행 프로토콜
+
+**노트북/모듈 작업 완료 시점에 사용자에게 다음과 같이 묻는다**:
+
+> "01_zit 작업 완료. **§23 검수 6항목 실행할까요?**"
+
+사용자가 **"진행"** 또는 동의 신호를 주면:
+1. §23.1~23.6 6항목을 순서대로 점검
+2. 각 항목별 통과/미통과 + 근거(파일 라인 번호) 보고
+3. 미통과 항목 발견 시 작업 중단·사용자 결정 받기 (§13 원칙)
+
+사용자가 검수 스킵 지시(예: "그냥 커밋해", "다음으로 가자")를 주면 검수 생략 가능 — 단 strategy.md에 "23 검수 미수행" 메모.
+
+자동 검수 진행 금지 — 항상 사용자 확인 후 실행.
+
+---
+
+## 24. 트리계열 y target_transform — `'none'` 통일
+
+**대상**: LGBM, XGBoost, CatBoost, ExtraTrees (모든 트리계열, 모든 학습 컨텍스트 — die broadcast / y>0 only / Two-Stage clf · reg / reverse)
+
+**근거 (실측 검증)**: [`3_modeling/log1p_check.ipynb`](log1p_check.ipynb) — LGBM 단일 회귀, 1차 best HP 고정, 4 loss × 4 transform = **16조합 직접 비교** (die broadcast, 5-fold OOF unit RMSE, 80 모델 학습)
+
+| loss \ transform | none | log1p | yeo-johnson | quantile |
+|---|---|---|---|---|
+| regression | **0.005523** | **0.005523** | 0.005814 | 0.006123 |
+| poisson | **0.005521** | **0.005521** | 0.005785 | INCOMPAT |
+| tweedie_1.2 | **0.005522** | **0.005522** | 0.005788 | INCOMPAT |
+| tweedie_1.5 | **0.005527** | **0.005527** | 0.005801 | INCOMPAT |
+
+**핵심 발견**:
+1. **`none` = `log1p` (모든 손실에서 소수점 6자리까지 정확히 동일)** — y가 0~0.097 영역이라 `log1p ≈ identity` (Taylor: `log1p(0.1)=0.0953` ≈ y)
+2. **`yeo-johnson` 평균 +0.00027 악화** — 변환이 너무 강해 정보 손실
+3. **`quantile` 분포 손실에서 INCOMPAT** — LightGBM `poisson`/`tweedie`는 음수 target 거부, `QuantileTransformer(output_distribution='normal')`은 음수 매핑 발생
+4. **`quantile` regression에서 +0.000600 악화** — 분포 변형이 y의 의미 왜곡
+
+**정책: 트리계열 `TARGET_TRANSFORM = 'none'` 고정**
+
+이유:
+1. **`none` = `log1p` 동등** → 단순한 쪽 채택 (분기 코드 불필요)
+2. **분포 손실 충돌 회피** — `tweedie`/`poisson` objective는 분포 가정 자체 모델링하므로 변환 시 충돌 (실측: y broadcast 컨텍스트에서 yeo/quantile 모두 악화)
+3. **모든 손실(regression/poisson/tweedie/binary)에 일관 적용** — 분기 없는 단일 룰
+4. **후처리 `zero_clip_log_space=False` 통일** — 학습 공간(original)과 일치
+
+**주의 — y>0 only 컨텍스트의 1차 결과**:
+- 1차 `ts-reg-{lgbm,xgb,catboost}` best는 모두 `log1p ON + tweedie_X` 조합 (`y_positive_only=True` 컨텍스트)
+- log1p_check은 die broadcast 컨텍스트라 직접 비교는 아님
+- 그러나 **`none` = `log1p`라 수치적으로 동일하므로 y>0 only 컨텍스트에서도 영향 거의 없을 것** (이론적으로도 y 작은 영역이라 log1p ≈ identity 동일 적용)
+- 정책 통일성 + 코드 단순성 우선 → 트리는 모든 컨텍스트에서 `'none'`
+
+**적용 대상 노트북**:
+- `01_zit/01_zit_only.ipynb`, `02_bag_zit.ipynb` — 이미 `TARGET_TRANSFORM='none'` (변경 불필요)
+- `02_reg_single/{lgbm, xgb, catboost, et}.ipynb` — 신규 작성 시 `'none'` 적용
+- `03_two_stage/default/clf/{lgbm, xgb, catboost, et}.ipynb` — binary 분류, transform 무관 (`'none'` 명시)
+- `03_two_stage/default/reg/{lgbm, xgb, catboost, et}.ipynb` — 신규 작성 시 `'none'` 적용
+- `03_two_stage/reverse/ts_reverse.ipynb` — 1차 코드는 `log1p ON` → 정책 따라 `'none'`으로 수정 필요
+
+**ENet은 별개** (§3 참조): PP joint Optuna에 `target_transform` 카테고리 4종 (`none/log1p/yeo-johnson/quantile`) 자동 탐색. 선형 모델은 OLS 가정 (잔차 정규성·등분산성)의 영향을 받아 변환 효과가 데이터 의존적.
+
+---
+
+## 25. Optuna study timeout — Colab 세션 끊김 대응
+
+Colab은 24시간 강제 세션 종료. 학원 환경도 장시간 실행 시 세션 타임아웃 위험. **`study.optimize` timeout으로 명시적 제한** + sqlite storage로 다음 세션 resume.
+
+**선언 위치 — 노트북 최상단 (환경 설정 셀)**:
+
+```python
+N_TIMEOUT_SEC = 82800   # ★ 23시간 default (Colab 24시간 마진 1시간)
+                        #    None → 무제한 (로컬 무한 실행 등)
+```
+
+**사용 위치 — Optuna study.optimize**:
+
+```python
+study.optimize(
+    objective,
+    n_trials=N_TRIALS,
+    n_jobs=1,
+    timeout=N_TIMEOUT_SEC,   # ★ 시간 도달 시 진행 중 trial 완료 후 종료
+)
+```
+
+**동작**:
+- `N_TRIALS` 또는 `N_TIMEOUT_SEC` 중 **먼저 도달하는 시점에 종료**
+- 종료 시 진행 중인 trial은 완료까지 기다림 (Optuna가 강제 kill 안 함)
+- sqlite storage + `load_if_exists=True`이면 다음 세션에서 자동 resume
+
+**default 결정 원칙**:
+- Colab: **82800초 (23시간)** — 24시간 마진 1시간
+- 로컬 무한 실행: `None`
+- 노트북 작성 시 환경에 맞춰 override 가능
+
+**주의**:
+- `timeout=None` 사용 가능 — **무조건 걸지 않음**. 노트북별 선택사항
+- 노트북 안에서 hard-coded 숫자 (`timeout=82800` 직접 작성) 금지 — 항상 `N_TIMEOUT_SEC` 변수 참조 (§8 동일 원칙)
+- **trial별 timeout은 Optuna 미지원** — 무거운 trial 보호는 별도 메커니즘 필요 (signal/multiprocessing). 예: 0_baseline의 `impute='knn'` cell이 20분+ 걸리는 사례
