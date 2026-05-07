@@ -1,0 +1,33 @@
+{
+  "trial_number": 103,
+  "oof_rmse": 0.005501282150648275,
+  "val_rmse": 0.005708930144414587,
+  "test_rmse": 0.00840979359300136,
+  "max_corr_vs_11base": 0.9984797010863146,
+  "hp_lgbm": {
+    "n_estimators": 2280,
+    "learning_rate": 0.006259289912777751,
+    "num_leaves": 96,
+    "max_depth": 9,
+    "min_child_samples": 208,
+    "subsample": 0.9966117094083761,
+    "subsample_freq": 1,
+    "colsample_bytree": 0.8934440629955043,
+    "reg_alpha": 0.3464255563112981,
+    "reg_lambda": 4.864220900351441e-05,
+    "min_split_gain": 0.31585780171052624,
+    "path_smooth": 6.852578054863785,
+    "random_state": 42,
+    "n_jobs": 7,
+    "verbose": -1
+  },
+  "w0": 0.19228851496312402,
+  "reg_objective": "poisson",
+  "clf_scale_pos_weight": 2.43,
+  "feat_subset": "top_100",
+  "n_features_used": 100,
+  "CLIP_Y_EXTREME": true,
+  "feat_cols_clean_n": 568,
+  "SEED": 42,
+  "elapsed_seconds": 390.49516916275024
+}

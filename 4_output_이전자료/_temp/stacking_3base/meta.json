@@ -1,0 +1,70 @@
+{
+  "base_models": [
+    "zit_bag",
+    "lgbm",
+    "enet"
+  ],
+  "base_paths": {
+    "zit_bag": "c:\\Users\\Dell5371\\Desktop\\기업연계프로젝트\\4_output\\_temp\\bag_zit_combined_best",
+    "lgbm": "c:\\Users\\Dell5371\\Desktop\\기업연계프로젝트\\4_output\\final\\reg_only\\lgbm",
+    "enet": "c:\\Users\\Dell5371\\Desktop\\기업연계프로젝트\\4_output\\final\\reg_only\\enet"
+  },
+  "zit_bag_chosen": "bag_zit_combined_best",
+  "zit_bag_priority": [
+    "bag_zit_combined_best",
+    "bag_zit_combined_best_xy",
+    "bag_zit_pp_hpo",
+    "bag_zit_hpo",
+    "bag_zit_fixed_ge"
+  ],
+  "override_zit_bag": null,
+  "meta_learner": {
+    "type": "ElasticNetCV(StandardScaler)",
+    "alpha": 2.8072162039411757e-05,
+    "l1_ratio": 0.9,
+    "coef": {
+      "zit_bag": 0.000788779438332439,
+      "lgbm": 0.00017075924781271998,
+      "enet": -0.0
+    },
+    "intercept": 0.00251524589210751,
+    "positive": false,
+    "max_iter": 20000
+  },
+  "blending_slsqp": {
+    "weights": {
+      "zit_bag": 0.3333333333333333,
+      "lgbm": 0.3333333333333333,
+      "enet": 0.3333333333333333
+    },
+    "rmse_oof": 0.00825558790396917,
+    "rmse_val": 0.005729627480905033,
+    "rmse_test": 0.008425426674994036
+  },
+  "stacking": {
+    "rmse_oof": 0.008249180481702765,
+    "rmse_val": 0.005713071785072638,
+    "rmse_test": 0.008413407235544427
+  },
+  "single_base": [
+    {
+      "model": "zit_bag",
+      "oof": 0.008250703897255685,
+      "val": 0.005710229169982951,
+      "test": 0.008411808811143538
+    },
+    {
+      "model": "lgbm",
+      "oof": 0.00825712768424227,
+      "val": 0.005731161224522776,
+      "test": 0.00842864713398163
+    },
+    {
+      "model": "enet",
+      "oof": 0.008285523037170617,
+      "val": 0.005781420938297365,
+      "test": 0.008459072810923498
+    }
+  ],
+  "SEED": 42
+}

@@ -1,0 +1,67 @@
+{
+  "segments_definition": {
+    "y=0": "y == 0",
+    "very_small": "(0, 0.005]",
+    "small": "(0.005, 0.01]",
+    "medium": "(0.01, 0.05]",
+    "large": "(0.05, 0.5]",
+    "extreme": "> 0.5"
+  },
+  "base_models": [
+    "zit_only",
+    "bag_zit_combined_best",
+    "bag_zit_combined_best_xy",
+    "bag_zit_pp_hpo",
+    "bag_zit_hpo",
+    "bag_zit_fixed_ge",
+    "lgbm",
+    "enet",
+    "et",
+    "catboost"
+  ],
+  "hypothesis_1_se_decomposition": {
+    "val_stacking_pct_se_zero": 14.466006113333751,
+    "oof_stacking_pct_se_zero": 6.955430983667756,
+    "verdict": "rejected"
+  },
+  "top_segment_by_se_share_stacking": {
+    "val": {
+      "segment": "medium",
+      "pct": 58.903331749858374,
+      "n": 771
+    },
+    "oof": {
+      "segment": "extreme",
+      "pct": 56.041854661245175,
+      "n": 1
+    }
+  },
+  "best_per_segment_correction_stacking": {
+    "val": {
+      "split": "val",
+      "model": "_stacking",
+      "segment": "medium",
+      "n_corrected": 771,
+      "bias": -0.013423749594103137,
+      "rmse_orig": 0.005701225411726696,
+      "rmse_corr": 0.004072369124551839,
+      "delta": -0.0016288562871748574
+    },
+    "oof": {
+      "split": "oof",
+      "model": "_stacking",
+      "segment": "extreme",
+      "n_corrected": 1,
+      "bias": -0.9978814496160188,
+      "rmse_orig": 0.008237204070188847,
+      "rmse_corr": 0.0054613436592954295,
+      "delta": -0.002775860410893418
+    }
+  },
+  "full_segment_correction_stacking": {
+    "val_delta": -0.0033013368435699303,
+    "oof_delta": -0.00600455348187535,
+    "val_rmse_corrected": 0.0023998885681567658,
+    "oof_rmse_corrected": 0.0022326505883134983
+  }
+}
