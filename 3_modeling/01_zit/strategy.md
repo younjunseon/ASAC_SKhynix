@@ -16,7 +16,7 @@ ZITboost 변형 2종을 narrow HPO + 후처리로 마무리:
 
 ## 2. 원본 파일 매핑
 
-| 신규 (3_modeling/01_zit/) | 원본 (3_modeling_이전자료/) | 결과 (4_output/final/zit_only/) |
+| 신규 (3_modeling/01_zit/) | 원본 (모델링_이전자료/3_modeling_이전자료/) | 결과 (모델링_이전자료/4_output_이전자료/final/zit_only/) |
 |---|---|---|
 | `01_zit_only.ipynb` | `_temp_bagzit/zit_only_hpo.ipynb` | `zit_only_hpo.txt` |
 | `02_bag_zit.ipynb` | `_temp_bagzit/zit_bag_hpo.ipynb` | `zit_bag_hpo.txt` |
@@ -50,7 +50,7 @@ zit_only / bag_zit 두 노트북 동일하게 적용.
 
 ## 4. Anchor — 01_zit_only HP
 
-[zit_only_hpo.txt](../../4_output/final/zit_only/zit_only_hpo.txt) trial 99 best:
+[zit_only_hpo.txt](../../모델링_이전자료/4_output_이전자료/final/zit_only/zit_only_hpo.txt) trial 99 best:
 - OOF=0.005496, val=0.005707, test=0.008410, τ_π=0.944
 - n_feats=714 (PP 후 살아남은 feature)
 - elapsed=1281s/trial
@@ -103,7 +103,7 @@ trial 99(공식 best)는 OOF 기준 선정. trial 76이 val 더 낮지만 anchor
 
 ## 5. Anchor — 02_bag_zit HP
 
-[zit_bag_hpo.txt](../../4_output/final/zit_only/zit_bag_hpo.txt) best:
+[zit_bag_hpo.txt](../../모델링_이전자료/4_output_이전자료/final/zit_only/zit_bag_hpo.txt) best:
 - OOF=0.005497, val=0.005705, test=0.008410, τ_π=0.8246
 - trial history는 txt에 없음 (best 1개만 저장)
 
@@ -196,7 +196,7 @@ def narrow_around(anchor: dict, log_keys: set) -> dict:
 | `sampler` | TPESampler(seed=None, multivariate=True, group=True) | strategy_common §4 |
 | `pruner` | MedianPruner(n_warmup_steps=10) | EM 수렴 모니터링용 |
 | `direction` | 'minimize' | OOF unit RMSE |
-| `study_name` | `zit_only` / `bag_zit` | 기존 4_output/final/은 이전자료로 백업되므로 별도 suffix 불필요 |
+| `study_name` | `zit_only` / `bag_zit` | 기존 `4_output/final/`은 `모델링_이전자료/4_output_이전자료/`로 백업되므로 별도 suffix 불필요 |
 
 `zeta`는 Tweedie compound Poisson-Gamma 유효 범위가 (1, 2)이므로 [1.05, 1.95] hard limit 내에서만.
 
@@ -204,14 +204,14 @@ def narrow_around(anchor: dict, log_keys: set) -> dict:
 
 ## 8. 후처리 적용 매트릭스
 
-[strategy_common.md §8~11](../strategy_common.md) 준수. ZIT 한정 SKIP/APPLY:
+[strategy_common.md §9~12](../strategy_common.md) 준수. ZIT 한정 SKIP/APPLY:
 
 | 룰 | 적용? | 비고 |
 |---|---|---|
-| 분류 threshold (§8) | **SKIP** | `τ_π`가 die-level threshold 역할 — ZIT 모델 내부에서 처리 |
-| die→unit 집계 다양성 (§9) | **APPLY** | mean/median/max/min/trimmed_mean/weighted/Q25/Q75 8후보 |
-| Position 가중치 (§10) | **APPLY** | Optuna sub-study 50 trial로 w1~w4 |
-| zero_clip (§11) | **APPLY** | 0.001~0.015 step 0.001 |
+| 분류 threshold (§9) | **SKIP** | `τ_π`가 die-level threshold 역할 — ZIT 모델 내부에서 처리 |
+| die→unit 집계 다양성 (§10) | **APPLY** | mean/median/max/min/trimmed_mean/weighted/Q25/Q75 8후보 |
+| Position 가중치 (§11) | **APPLY** | Optuna sub-study 50 trial로 w1~w4 |
+| zero_clip (§12) | **APPLY** | 0.001~0.015 step 0.001 |
 
 `τ_π`는 별도 HP로 ZIT search space에 포함 (위 §6 anchor에 포함시키거나 별도 sub-search). 기존 best τ_π:
 - zit_only: 0.944
@@ -225,12 +225,12 @@ def narrow_around(anchor: dict, log_keys: set) -> dict:
 
 | 노트북 | OUT_DIR |
 |---|---|
-| 01_zit_only | `4_output/final/zit_only/` |
-| 02_bag_zit | `4_output/final/bag_zit/` |
+| 01_zit_only | `4_output/01_zit/zit_only/` |
+| 02_bag_zit | `4_output/01_zit/bag_zit/` |
 
-산출물 9개 + 메타: [strategy_common.md §14](../strategy_common.md) 참조.
+산출물 9개 + 메타: [strategy_common.md §15](../strategy_common.md) 참조.
 
-기존 [4_output/final/zit_only/](../../4_output/final/zit_only/)와 동일 경로 — 백업 후 새 결과로 덮어씀(=백업 폴더 별도 보관 후 깨끗한 디렉토리에 새로 작성).
+기존 1차 결과(`모델링_이전자료/4_output_이전자료/final/zit_only/`)는 `모델링_이전자료/4_output_이전자료/`로 백업됐고, 신규 결과는 위 미러링 경로에 새로 생성된다.
 
 ---
 
@@ -252,28 +252,15 @@ BagZIT가 EM iter 더 많음(18 vs 13) — 시간 더 걸림 → 먼저 시작 �
 - zit_only: ~17분/trial → 80 trial × 5fold ≈ 23시간
 - bag_zit: ~25분/trial → 80 trial × 5fold ≈ 33시간
 
-→ trial 예산 80은 23~33시간 단위. 시간 부족하면 50 trial로 축소 가능 (결정 필요).
+→ trial 예산 80은 23~33시간 단위. 시간 부족하면 50 trial로 축소 가능.
 
 ---
 
-## 11. 결정 필요 사항
+## 11. 검증 — 노트북 실행 시 확인 사항
 
-다음 항목은 노트북 작성 시 사용자 확인 또는 strategy.md 수정 후 진행:
-
-| # | 사항 | default | 결정 시점 |
-|---|---|---|---|
-| 1 | `N_TRIALS` (50/80/100) | 80 | 학원 시간 예산 확정 후 |
-| 2 | narrow 폭 (±20%/30%/50%) | ±30% | trial 분포 보고 결정. 너무 좁으면 다양성 ↓, 넓으면 trial 낭비 |
-| 3 | τ_π search 범위 | anchor ±0.10 | bag_zit는 0.825 → [0.72, 0.95] |
-| 4 | bag_zit OUT_DIR 이름 | `bag_zit` | 변경 원하면 알려주기 |
-
----
-
-## 12. 검증 — 노트북 작성 시 확인 사항
-
-[strategy_common.md §12](../strategy_common.md) 구현 문제 보고 원칙 준수.
+[strategy_common.md §13](../strategy_common.md) 구현 문제 보고 원칙 준수.
 
 특히 ZIT 관련:
-- `BagZITboostRegressor.fit(X, y, unit_id)` 시그니처 — `unit_id` 인자 필수. 기존 `hpo.refit_best`가 이 인자 전달하는지 확인 필요. 안 되면 사용자에게 보고.
-- `τ_π` 적용 위치 — die-level pred에 적용 후 unit 집계인지, unit pred에 적용인지 확인 (기존 코드 기준 die-level)
+- `BagZITboostRegressor.fit(X, y, unit_id)` 시그니처 — `unit_id` 인자 필수. `hpo.refit_best`가 이 인자 전달하는지 확인.
+- `τ_π` 적용 위치 — die-level pred에 적용 후 unit 집계 (기존 코드 기준)
 - EM 수렴 여부 — `em_history_`에서 unit_rmse 단조감소 확인. 발산하면 학습 중단

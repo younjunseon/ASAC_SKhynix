@@ -178,7 +178,7 @@ def fit_position_weights_optuna(
         w = raw / raw.sum()
         return float(np.sqrt(np.mean((pred_mat @ w - y) ** 2)))
 
-    sampler = optuna.samplers.TPESampler(seed=seed, multivariate=True)
+    sampler = optuna.samplers.TPESampler(seed=seed, multivariate=True, group=True)   # strategy_common §4 정합
     study = optuna.create_study(direction="minimize", sampler=sampler)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)

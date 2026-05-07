@@ -30,18 +30,6 @@ from utils.config import SEED
 from .zit import ZITboostRegressor
 
 
-# ─── LightGBM GPU 자동 감지 ────────────────────────────────────
-def _detect_lgbm_device():
-    """LightGBM GPU 지원 여부 감지. GPU 빌드가 아니거나 실패하면 'cpu'."""
-    try:
-        ds = lgb.Dataset(np.zeros((10, 2)), label=np.zeros(10))
-        lgb.train({"device": "gpu", "verbose": -1, "objective": "regression"},
-                  ds, num_boost_round=1)
-        return "gpu"
-    except Exception:
-        return "cpu"
-
-
 DEVICE = "cpu"  # 노트북에서 원하면 `models.DEVICE = 'gpu'` 로 override
 
 
@@ -527,6 +515,10 @@ def resolve_clf_imbalance(model_name, params, y_train_bin):
         p.setdefault("scale_pos_weight", spw)
     elif model_name == "catboost":
         p.setdefault("auto_class_weights", "Balanced")
+        if p.get("auto_class_weights") == "None":
+            p["auto_class_weights"] = None
     elif model_name == "et":
         p.setdefault("class_weight", "balanced")
+        if p.get("class_weight") == "None":
+            p["class_weight"] = None
     return p

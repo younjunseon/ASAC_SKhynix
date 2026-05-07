@@ -235,15 +235,6 @@ def fit_model(model, X_train, y_train, X_val=None, y_val=None, early_stop=50,
     return model
 
 
-def get_best_iteration(model):
-    """학습된 모델의 best iteration 반환 (없으면 None)"""
-    model_cls = type(model).__name__.lower()
-
-    if "lgbm" in model_cls:
-        return getattr(model, "best_iteration_", None)
-    return None
-
-
 def supports_early_stopping(name):
     """해당 모델이 early stopping을 지원하는지 여부"""
     if name not in MODEL_REGISTRY:

@@ -9,7 +9,7 @@
 발표/기록용 베이스라인 ablation. **계획했던 베이스라인 실험들을 깨끗하게 한 번 더 정리**해 발표 자료 + 영구 기록 남기기.
 
 **문제 의식**:
-- [optuna_merged.db](../../4_output/experiments/1차%20실험/optuna_merged.db)는 1차 실험 trial 모음이지만 (a) 계획했던 실험을 다 한 게 아님 (b) 변환된 환경에서 찍힌 값이라 절대값 의미 없고 참고용
+- [optuna_merged.db](../../모델링_이전자료/4_output_이전자료/experiments/1차%20실험/optuna_merged.db)는 1차 실험 trial 모음이지만 (a) 계획했던 실험을 다 한 게 아님 (b) 변환된 환경에서 찍힌 값이라 절대값 의미 없고 참고용
 - 한 study에 모든 축을 때려넣으면 TPE가 좋은 영역에 trial 몰아주므로 **조합 간 공정 비교 불가** (편향)
 
 **해결 방향**: **OAT(One-At-A-Time) + Group Study 2단계**, 7+7 코어 병렬
@@ -23,7 +23,7 @@
 ```
 3_modeling/0_baseline/
 ├── strategy.md                # 이 문서
-├── _modules/                  # 0_baseline 전용 격리 모듈 (3_modeling_이전자료/modules/ 복사 + 수정)
+├── _modules/                  # 0_baseline 전용 격리 모듈 (모델링_이전자료/3_modeling_이전자료/modules/ 복사 + 수정)
 │   ├── e2e_hpo.py             # baseline.ipynb 그대로 사용 (분기 추가 없음)
 │   ├── search_space.py
 │   ├── model_zoo.py           # ZITboost 의존 제거
@@ -104,7 +104,7 @@
 
 ### 4.1 Reference 1점
 
-[experiment_status_summary.xlsx](../../4_output/experiments/1차%20실험/experiment_status_summary.xlsx) val_rmse 최소 셀(0.001141) + baseline.ipynb의 sensible default를 종합:
+[experiment_status_summary.xlsx](../../모델링_이전자료/4_output_이전자료/experiments/1차%20실험/experiment_status_summary.xlsx) val_rmse 최소 셀(0.001141) + baseline.ipynb의 sensible default를 종합:
 
 ```python
 REFERENCE = {
@@ -227,7 +227,7 @@ row 단위 영구 박제. 발표 시 csv 로딩 → tornado plot 즉석 생성.
 
 `is_reference=True`인 row가 5 seed = **5개** (cfg는 모두 REFERENCE). 변형 cell × 5 seed = 150 row + reference 5 = **155 row**.
 
-### 4.5b 메타 산출물 — meta.json (재현성)
+### 4.6 메타 산출물 — meta.json (재현성)
 
 `oat/meta.json`, `group/meta.json` 각 디렉토리에 1개. run마다 덮어쓰기. 내용:
 - 실행 설정: `n_jobs`, `n_estimators`, `n_trials` (group)
@@ -236,7 +236,7 @@ row 단위 영구 박제. 발표 시 csv 로딩 → tornado plot 즉석 생성.
 - `exclude_cols` (54개)
 - `master_cols` (oat) / `study_name`, `sampler`, `pruner` (group)
 
-### 4.6 Checkpoint — 끊겨도 이어서
+### 4.7 Checkpoint — 끊겨도 이어서
 
 `checkpoint.json`에 완료한 (axis, option, seed) 튜플 기록. 재실행 시 master.csv에 이미 있으면 skip.
 
@@ -440,17 +440,7 @@ def run_one(cfg: dict, seed: int) -> dict:
 
 ---
 
-## 11. 결정 필요 사항
-
-| # | 사항 | 제안 default | 결정 시점 |
-|---|---|---|---|
-| 1 | Group study trial 수 | 300 | 노트북 작성 전 |
-| 2 | seed 5개 (`42, 7, 123, 2024, 31415`) OK? | OK | 노트북 작성 전 |
-| 3 | LGBM default HP — `n_estimators` 명시 | sklearn default(100) | 노트북 작성 전 |
-
----
-
-## 12. 검증 근거
+## 11. 검증 근거
 
 - **편향 우려**: TPE는 좋은 영역에 trial 몰아주므로 한 study 다축 학습 시 조합 간 trial 수 불균형 → 비교 불가. OAT는 reference 1점에서 1:1 비교라 편향 없음
 - **OAT 한계 (상호작용)**: xlsx 데이터에서 CLIP 효과가 TARGET에 따라 큰 차이 (yeo-johnson + CLIP=F: Δ +0.00001 vs none + CLIP=F: Δ +0.00273) → OAT만으로는 못 잡음 → Group study로 보완
@@ -460,7 +450,7 @@ def run_one(cfg: dict, seed: int) -> dict:
 
 ---
 
-## 13. 실행 순서
+## 12. 실행 순서
 
 1. axes.py 작성 (`run_one()` 포함)
 2. 02_group_study.ipynb 시작 (코어 7) — 먼저 (시간 김)

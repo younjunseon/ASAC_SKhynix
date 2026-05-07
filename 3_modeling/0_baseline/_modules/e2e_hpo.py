@@ -498,7 +498,8 @@ def _run_clf_single(pos_data, feat_cols, clf_params, model_name,
 def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
                     early_stop, use_clf=True, clf_filter=False,
                     clf_filter_threshold=0.5, es_holdout=0.1,
-                    target_transform_fn=None, target_inverse_fn=None):
+                    target_transform_fn=None, target_inverse_fn=None,
+                    target_transformer_factory=None):
     """
     Unit-level 회귀 단일 학습 (KFold 없음, train 100% 사용)
 
@@ -506,11 +507,17 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
         clf_filter=True일 때 회귀 학습에서 제외할 proba 임계값
         (clf_proba_mean <= threshold → 제외)
     target_transform_fn : callable, optional
-        모델 학습 직전에 y에 적용할 변환 함수 (예: np.log1p, yeo transform).
+        모델 학습 직전에 y에 적용할 stateless 변환 함수 (예: np.log1p).
         None이면 변환 없음. 변환/역변환은 **내부에서만** 일어나고
         unit_data의 y, 반환되는 예측값은 항상 **원본 스케일**이다.
+        target_transformer_factory가 not None이면 무시된다.
     target_inverse_fn : callable, optional
         모델 예측 직후에 적용할 역변환 함수. target_transform_fn을 쓸 때 반드시 같이 지정.
+        target_transformer_factory가 not None이면 무시된다.
+    target_transformer_factory : callable, optional (★ leakage fix)
+        callable(y_fit_array) -> (fwd_local, inv_local). 지정하면 학습 직전에
+        y_fit에 fit하여 fwd/inv를 만들어 사용한다. KFold가 없으므로 단일 학습이지만
+        API 일관성을 위해 동일 인자를 받는다.
     """
     X_train = unit_data["train"][feat_cols].values
     y_train = unit_data["train"][TARGET_COL].values
@@ -538,8 +545,15 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
         y_fit_pool = y_train[mask]
 
         # ── 타깃 변환: 모델 학습용으로만 변환 (y_train 원본은 건드리지 않음) ──
-        if target_transform_fn is not None:
-            y_fit_pool = target_transform_fn(y_fit_pool)
+        # factory 모드: y_fit_pool에 fit하여 fold/single-local fwd/inv 생성 (leakage fix)
+        if target_transformer_factory is not None:
+            local_fwd, local_inv = target_transformer_factory(y_fit_pool)
+            y_fit_pool = local_fwd(y_fit_pool)
+            effective_inverse_fn = local_inv
+        else:
+            if target_transform_fn is not None:
+                y_fit_pool = target_transform_fn(y_fit_pool)
+            effective_inverse_fn = target_inverse_fn
 
         use_es = (
             supports_early_stopping(model_name)
@@ -566,11 +580,11 @@ def _run_reg_single(unit_data, feat_cols, reg_params, model_name,
         val_reg = reg.predict(X_val)
         test_reg = reg.predict(X_test)
 
-        # ── 예측 즉시 원본 스케일로 역변환 ──
-        if target_inverse_fn is not None:
-            oof_reg = target_inverse_fn(oof_reg)
-            val_reg = target_inverse_fn(val_reg)
-            test_reg = target_inverse_fn(test_reg)
+        # ── 예측 즉시 원본 스케일로 역변환 (factory 모드면 local_inv, 아니면 stateless inv) ──
+        if effective_inverse_fn is not None:
+            oof_reg = effective_inverse_fn(oof_reg)
+            val_reg = effective_inverse_fn(val_reg)
+            test_reg = effective_inverse_fn(test_reg)
 
     # two-stage 곱셈
     if use_clf and "clf_proba_mean" in unit_data["train"].columns:
@@ -601,7 +615,8 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
                  n_folds, early_stop, use_clf=True, clf_filter=False,
                  clf_filter_threshold=0.5,
                  target_transform_fn=None, target_inverse_fn=None,
-                 sample_weight=None):
+                 sample_weight=None,
+                 target_transformer_factory=None):
     """
     Unit-level 회귀 OOF
 
@@ -616,15 +631,22 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         clf_filter=True일 때 회귀 학습에서 제외할 proba 임계값
         (clf_proba_mean <= threshold → 제외)
     target_transform_fn : callable, optional
-        모델 학습 직전에 y_fit에 적용할 변환 함수 (예: np.log1p, yeo transform).
+        모델 학습 직전에 y_fit에 적용할 stateless 변환 함수 (예: np.log1p).
         None이면 변환 없음. 변환/역변환은 **내부에서만** 일어나고
         unit_data의 y, fallback_val, 반환되는 예측값은 항상 **원본 스케일**이다.
+        target_transformer_factory가 not None이면 무시된다.
     target_inverse_fn : callable, optional
         모델 예측 직후에 적용할 역변환 함수. target_transform_fn을 쓸 때 반드시 같이 지정.
+        target_transformer_factory가 not None이면 무시된다.
     sample_weight : array-like or None (★ 2차 신규)
         X_train과 같은 길이의 sample weight (LDS 가중치 등).
         fold tr_idx + (pos_tr / tr_keep) + inner_tr 인덱싱을 거쳐 fit에 전달.
         None이면 균등 가중치.
+    target_transformer_factory : callable, optional (★ leakage fix)
+        callable(y_fold_train) -> (fwd_local, inv_local). 지정하면 fold 안에서
+        fold-train y에만 fit한 transformer를 새로 만들어 사용한다 (yeo-johnson 등
+        stateful transformer의 fold-leakage 차단). None이면 target_transform_fn /
+        target_inverse_fn 인자를 그대로 쓴다.
     """
     X_train = unit_data["train"][feat_cols].values
     y_train = unit_data["train"][TARGET_COL].values
@@ -652,6 +674,7 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         split_iter = kf.split(X_train)
     oof_reg = np.full(len(X_train), fallback_val, dtype=float)  # 0 대신 fallback 초기화
     fold_models = []
+    fold_inverse_fns = []  # ★ factory 모드 전용: fold 별 inverse_fn 보관 (fold_models와 길이 동일)
     skipped_folds = 0
 
     for tr_idx, va_idx in split_iter:
@@ -678,8 +701,14 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
             w_fit = sample_weight[tr_idx] if sample_weight is not None else None
 
         # ── 타깃 변환: 모델 학습용으로만 변환 ──
-        if target_transform_fn is not None:
-            y_fit = target_transform_fn(y_fit)
+        # factory가 있으면 fold-train y에만 fit (leakage fix). 아니면 stateless fwd 사용.
+        if target_transformer_factory is not None:
+            fold_fwd, fold_inv = target_transformer_factory(y_fit)
+            y_fit = fold_fwd(y_fit)
+        else:
+            fold_inv = target_inverse_fn  # legacy stateless inv (None이면 None)
+            if target_transform_fn is not None:
+                y_fit = target_transform_fn(y_fit)
 
         # ─── 2단계: inner holdout 분리 (ES용, va_idx 누수 방지) ───
         reg = create_model(model_name, "reg", reg_params)
@@ -700,12 +729,13 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         else:
             fit_model(reg, X_fit, y_fit, sample_weight=w_fit)
 
-        # 예측 즉시 원본 스케일로 역변환
+        # 예측 즉시 원본 스케일로 역변환 (factory면 fold-local inv, 아니면 stateless inv)
         pred_va = reg.predict(X_train[va_idx])
-        if target_inverse_fn is not None:
-            pred_va = target_inverse_fn(pred_va)
+        if fold_inv is not None:
+            pred_va = fold_inv(pred_va)
         oof_reg[va_idx] = pred_va
         fold_models.append(reg)
+        fold_inverse_fns.append(fold_inv)  # legacy 모드면 모두 동일 ref/None
 
     # fold skip 경고 (일부 fold만 스킵된 경우)
     if skipped_folds > 0:
@@ -726,10 +756,25 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
         # fallback_val은 이미 원본 스케일이므로 역변환 없음
         val_reg = np.full(len(X_val), fallback_val, dtype=float)
         test_reg = np.full(len(X_test), fallback_val, dtype=float)
+    elif target_transformer_factory is not None:
+        # factory 모드: fold마다 transformer가 다르므로 fold별 inverse 후 평균
+        # (transformed 공간에서 평균 → 단일 inverse 는 leakage-free에서는 의미가 다름)
+        val_per_fold = []
+        test_per_fold = []
+        for m, inv_fn in zip(fold_models, fold_inverse_fns):
+            v = m.predict(X_val)
+            t = m.predict(X_test)
+            if inv_fn is not None:
+                v = inv_fn(v)
+                t = inv_fn(t)
+            val_per_fold.append(v)
+            test_per_fold.append(t)
+        val_reg = np.mean(val_per_fold, axis=0)
+        test_reg = np.mean(test_per_fold, axis=0)
     else:
         val_reg = np.mean([m.predict(X_val) for m in fold_models], axis=0)
         test_reg = np.mean([m.predict(X_test) for m in fold_models], axis=0)
-        # 앙상블 평균 후 원본 스케일로 역변환
+        # 앙상블 평균 후 원본 스케일로 역변환 (legacy stateless 경로)
         if target_inverse_fn is not None:
             val_reg = target_inverse_fn(val_reg)
             test_reg = target_inverse_fn(test_reg)
@@ -764,7 +809,8 @@ def _run_reg_oof_multi(unit_data, feat_cols, reg_params_by_model, reg_models,
                        use_clf=True, clf_filter=False, clf_filter_threshold=0.5,
                        target_transform_fn=None, target_inverse_fn=None,
                        sample_weight=None,
-                       add_clf_proba_to_reg=False):
+                       add_clf_proba_to_reg=False,
+                       target_transformer_factory=None):
     """
     여러 회귀 모델의 OOF 예측을 만들고 단순 평균으로 앙상블.
 
@@ -809,6 +855,7 @@ def _run_reg_oof_multi(unit_data, feat_cols, reg_params_by_model, reg_models,
             target_transform_fn=target_transform_fn,
             target_inverse_fn=target_inverse_fn,
             sample_weight=sample_weight,
+            target_transformer_factory=target_transformer_factory,
         )
         per_model_reg[reg_m] = r
 
@@ -1063,9 +1110,9 @@ def _sync_inmemory_to_sqlite(in_mem_storage, db_path, exp_id, verbose=True):
         try:
             optuna.delete_study(study_name=exp_id, storage=storage_url)
         except KeyError:
-            pass
-        except Exception:
-            pass
+            pass  # study 없음 — 정상
+        except Exception as _e:
+            print(f"⚠ optuna.delete_study 실패: {_e}")
         optuna.copy_study(
             from_study_name=exp_id,
             from_storage=in_mem_storage,
@@ -1362,8 +1409,8 @@ def run_e2e_optimization(
                     .values
                 )
             _record_val_diagnostics(trial, y_val, reg_result["val_pred"])
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"⚠ val 진단 기록 실패 (objective): {_e}")
 
         return oof_rmse_score
 
@@ -1593,8 +1640,8 @@ def rerun_best_trial(
             y_val = unit_data["val"][TARGET_COL].values
         val_rmse_score = rmse(y_val, reg_result["val_pred"])
         print(f"Rerun Val RMSE: {val_rmse_score:.6f}  (참고용)")
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"⚠ rerun val RMSE 출력 실패: {_e}")
 
     result = {
         "unit_data": unit_data,
@@ -2004,6 +2051,8 @@ def run_e2e_optimization_with_pp(
     reg_models=None,               # list/tuple. None이면 (reg_model,)로 폴백
     calibration=None,              # dict {'method':'isotonic','models':[...]}
     add_clf_proba_to_reg=False,    # A4: clf_proba_mean을 reg feature로 추가
+    # ★ leakage fix: yeo-johnson 등 stateful target transform용 fold-local factory
+    target_transformer_factory=None,
 ):
     """
     전처리(cleaning/outlier/집계) + CLF + FS + REG 을 모두 포함한
@@ -2177,6 +2226,7 @@ def run_e2e_optimization_with_pp(
             target_inverse_fn=target_inverse_fn,
             sample_weight=sample_weight,
             add_clf_proba_to_reg=add_clf_proba_to_reg,
+            target_transformer_factory=target_transformer_factory,
         )
 
         # ── ⑤ RMSE ──
@@ -2229,16 +2279,16 @@ def run_e2e_optimization_with_pp(
             else:
                 y_val = unit_data["val"][TARGET_COL].values
             _record_val_diagnostics(trial, y_val, reg_result["val_pred"])
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"⚠ val 진단 기록 실패 (objective): {_e}")
 
         # CLF 성능 지표 (참고용)
         if clf_result is not None:
             try:
                 for k, v in _compute_clf_metrics(clf_result, pos_data, label_col).items():
                     trial.set_user_attr(k, v)
-            except Exception:
-                pass
+            except Exception as _e:
+                print(f"⚠ CLF 성능 지표 기록 실패: {_e}")
 
         return oof_rmse_score
 
@@ -2270,7 +2320,7 @@ def run_e2e_optimization_with_pp(
                     )
                     print(f"[Colab] 기존 DB에서 trial 로드 완료: {db_path}")
                 except (KeyError, Exception) as _e:
-                    pass
+                    print(f"⚠ Colab DB 로드 실패 — 새로 시작: {_e}")
         else:
             storage = f"sqlite:///{db_path}"
     else:
@@ -2408,6 +2458,8 @@ def rerun_best_trial_with_pp(
     add_clf_proba_to_reg=False,     # A4: clf_proba_mean을 reg feature로 추가
     save_per_model_oof=False,       # True면 die-level OOF CSV 7개 저장
     oof_dir=None,                   # save_per_model_oof=True일 때 필수
+    # ★ leakage fix: yeo-johnson 등 stateful target transform용 fold-local factory
+    target_transformer_factory=None,
 ):
     """
     best_params에서 pp_*, clf_*, reg_*, top_k 를 복원하여
@@ -2415,6 +2467,11 @@ def rerun_best_trial_with_pp(
 
     기본 흐름은 기존 rerun_best_trial과 동일하되,
     맨 앞에 "best_pp_params → cleaning/outlier/pos_data" 단계가 추가됨.
+
+    target_transformer_factory : callable, optional
+        callable(y) -> (fwd_local, inv_local). 지정하면 _run_reg_single /
+        _run_reg_oof_multi가 fold/학습 시점에 fold-train y로 transformer를 fit한다.
+        yeo-johnson 같은 stateful 변환의 fold-leakage 차단용.
     """
     if mode not in ("single", "kfold"):
         raise ValueError(f"mode must be 'single' or 'kfold', got '{mode}'")
@@ -2568,6 +2625,7 @@ def rerun_best_trial_with_pp(
             es_holdout=es_holdout,
             target_transform_fn=target_transform_fn,
             target_inverse_fn=target_inverse_fn,
+            target_transformer_factory=target_transformer_factory,
         )
     else:
         # kfold: multi-model + sample_weight + A4
@@ -2596,6 +2654,7 @@ def rerun_best_trial_with_pp(
             target_inverse_fn=target_inverse_fn,
             sample_weight=sample_weight,
             add_clf_proba_to_reg=add_clf_proba_to_reg,
+            target_transformer_factory=target_transformer_factory,
         )
 
     # 모델 객체 추출 (SHAP / feature importance 사후 분석용)
@@ -2702,8 +2761,8 @@ def rerun_best_trial_with_pp(
             y_val = unit_data["val"][TARGET_COL].values
         val_rmse_score = rmse(y_val, reg_result["val_pred"])
         print(f"Rerun Val RMSE: {val_rmse_score:.6f}  (참고용)")
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"⚠ rerun val RMSE 출력 실패: {_e}")
 
     # ── ★ 2차: OOF CSV 7개 저장 (save_per_model_oof=True + kfold + multi) ──
     oof_files = []

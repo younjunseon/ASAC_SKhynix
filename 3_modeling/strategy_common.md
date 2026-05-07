@@ -285,7 +285,7 @@ N_JOBS = 7   # ★ 이 값 하나만 바꾸면 모든 모델 fit/predict 병렬�
 ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 
 - **입력**: `0_data/compet_xs_data.csv`, `compet_ys_train_data.csv`
-- **출력**: `4_output/final/zit_only/{best_params.json, fold_models.pkl, optuna_*.db, oof|val|test_die.csv, oof|val|test_unit.csv}`
+- **출력**: `4_output/01_zit/zit_only/{best_params.json, fold_models.pkl, optuna_*.db, oof|val|test_die.csv, oof|val|test_unit.csv}`
 - **PP**: 트리 공통 `PP_FIXED` (strategy_common.md §1)
 - **HPO**: 100 trial, anchor=trial 99 best, ±30% narrow
 ```
@@ -320,15 +320,26 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 
 ## 17. 출력 경로 정책
 
-- 기존 `4_output/` 디렉토리는 통째 백업 (`4_output_이전자료/`로 rename)
-- 새 모델링 출력은 깨끗한 `4_output/`로 들어감
-- 노트북 내부 `OUT_DIR` 패턴은 이전과 동일 유지:
-  - `4_output/final/zit_only/`
-  - `4_output/final/reg_only/{MODEL_NAME}/`
-  - `4_output/final/two_stage/clf/{MODEL_NAME}/`
-  - 등
+**원칙**: `4_output/` 하위 구조를 `3_modeling/` 폴더 구조와 **동일한 깊이로 미러링**. 1차의 `4_output/final/...` 한 단계는 **제거**.
 
-코드 변경 0줄 — `config.py`의 `OUTPUT_DIR` 상수만 `4_output/`을 가리키면 OK.
+- 기존 `4_output/` 디렉토리는 통째 백업 (`모델링_이전자료/4_output_이전자료/`)
+- 새 모델링 출력은 깨끗한 `4_output/`로 들어감
+
+### 미러링 매핑
+
+| 노트북 | OUT_DIR |
+|---|---|
+| `3_modeling/01_zit/01_zit_only.ipynb` | `4_output/01_zit/zit_only/` |
+| `3_modeling/01_zit/02_bag_zit.ipynb` | `4_output/01_zit/bag_zit/` |
+| `3_modeling/02_reg_single/{model}.ipynb` | `4_output/02_reg_single/{model}/` |
+| `3_modeling/03_two_stage/default/clf/{model}.ipynb` | `4_output/03_two_stage/default/clf/{model}/` |
+| `3_modeling/03_two_stage/default/reg/{model}.ipynb` | `4_output/03_two_stage/default/reg/{model}/` |
+| `3_modeling/03_two_stage/default/combine.ipynb` | `4_output/03_two_stage/default/combined/` |
+| `3_modeling/03_two_stage/reverse/ts_reverse.ipynb` | `4_output/03_two_stage/reverse/` |
+| `3_modeling/04_stacking/stacking.ipynb` | `4_output/04_stacking/{exp_tag}/` |
+| `3_modeling/05_diagnostics/*.ipynb` | `4_output/05_diagnostics/{exp_name}/` |
+
+`config.py`의 `OUTPUT_DIR`는 `4_output/` 가리킴. 노트북은 `OUT_DIR = os.path.join(OUTPUT_DIR, '<모델링폴더>', ...)` 형태로 직접 매핑.
 
 ---
 
@@ -383,8 +394,8 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 
 ## 21. 검증 근거
 
-- **PP importance 3% 검증**: [4_output/experiments/1차 실험/optuna_merged.db](../4_output/experiments/1차%20실험/optuna_merged.db) 12 study × 평균 330 trial RF feature importance
-- **HP가 PP의 3배**: [4_output/_temp/bag_zit_hpo](../4_output/_temp/bag_zit_hpo) (HP only 30trial) vs [4_output/_temp/bag_zit_pp_hpo](../4_output/_temp/bag_zit_pp_hpo) (PP only 30trial) RMSE range 비교
+- **PP importance 3% 검증**: [4_output/experiments/1차 실험/optuna_merged.db](../모델링_이전자료/4_output_이전자료/experiments/1차%20실험/optuna_merged.db) 12 study × 평균 330 trial RF feature importance
+- **HP가 PP의 3배**: [4_output/_temp/bag_zit_hpo](../모델링_이전자료/4_output_이전자료/_temp/bag_zit_hpo) (HP only 30trial) vs [4_output/_temp/bag_zit_pp_hpo](../모델링_이전자료/4_output_이전자료/_temp/bag_zit_pp_hpo) (PP only 30trial) RMSE range 비교
 - **PP_FIXED 값**: zit_only joint best PP 기준 + 사용자 결정 (corr 0.9, missing 0.3, **spatial 6** [10→6 조정, wafer y축 20칸 대비 반경 10이 과대], indicator_thr 0.05, post_impute 0.96)
 
 ---
@@ -394,7 +405,7 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 | 종류 | 위치 | 내용 |
 |---|---|---|
 | **전처리 모듈** | `2_preprocessing/*.py` | cleaning / outlier / scaling (HybridScaler 포함) / encoding / group_encoder / meta_features / feature_selection / sample_weight / aggregation |
-| **모델링 모듈** | `3_modeling/modules/*.py` | zit / models / hpo / postprocess / blending / preprocess(파이프라인 wrapper) |
+| **모델링 모듈** | `3_modeling/modules/*.py` | zit / models / hpo / postprocess / preprocess(파이프라인 wrapper) / scaler |
 
 **원칙**:
 - **전처리 모듈을 모델링 폴더로 복사하지 않는다** — 한쪽만 수정되어 동기화 사고 발생.
@@ -407,7 +418,7 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 | 기존 파일 | 신규 위치 | 비고 |
 |---|---|---|
 | `cleaning.py`, `outlier.py`, `scaling.py` | **삭제** — `2_preprocessing/` 동명 파일 직접 사용 | 복사본이었음 |
-| `zit.py`, `models.py`, `hpo.py`, `postprocess.py`, `blending.py`, `preprocess.py`, `scaler.py` | `3_modeling/modules/`로 이동 | 모델링 전용 |
+| `zit.py`, `models.py`, `hpo.py`, `postprocess.py`, `preprocess.py`, `scaler.py` | `3_modeling/modules/`로 이동 | 모델링 전용 (blending.py는 04_stacking이 노트북 인라인으로 처리하여 dead → 삭제, 이전자료 사본은 `모델링_이전자료/3_modeling_이전자료/final/modules/blending.py` 보존) |
 
 `scaler.py`(enet 한정 RobustScaler 래퍼)는 `2_preprocessing/scaling.py`의 `maybe_scale` / `HybridScaler`로 흡수 가능하면 통합. 시그니처 차이 있으면 사용자 보고.
 
@@ -458,7 +469,7 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 ### 23.4 입출력 경로
 
 - [ ] 입력: `utils.config`의 상수만 사용 (`DATA_DIR`, `XS_PATH`, `YS_*_PATH`, `OUTPUT_DIR`) — 하드코딩 금지
-- [ ] 출력: §17의 패턴(`4_output/final/{exp_name}/`) 준수
+- [ ] 출력: §17의 미러링 패턴(`4_output/<모델링폴더>/...`) 준수 — `final` 토큰 사용 금지
 - [ ] Colab 분기: `GDRIVE_CODE_ID` / `GDRIVE_DATASET_ID` / `GDRIVE_PREPROCESSING_ID` / `GDRIVE_MODELING_ID` 4종 정의 (modeling은 신규)
 - [ ] `sys.path` 등록 순서: `2_preprocessing` → `3_modeling` (전처리/모델링 모듈 import)
 
@@ -484,7 +495,7 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 
 ---
 
-### 검수 실행 프로토콜
+### 23.7 검수 실행 프로토콜
 
 **노트북/모듈 작업 완료 시점에 사용자에게 다음과 같이 묻는다**:
 
@@ -539,7 +550,7 @@ ZITboost 단독 (joint EM, π·μ·φ 동시 학습) HPO + refit + 후처리.
 - `02_reg_single/{lgbm, xgb, catboost, et}.ipynb` — 신규 작성 시 `'none'` 적용
 - `03_two_stage/default/clf/{lgbm, xgb, catboost, et}.ipynb` — binary 분류, transform 무관 (`'none'` 명시)
 - `03_two_stage/default/reg/{lgbm, xgb, catboost, et}.ipynb` — 신규 작성 시 `'none'` 적용
-- `03_two_stage/reverse/ts_reverse.ipynb` — 1차 코드는 `log1p ON` → 정책 따라 `'none'`으로 수정 필요
+- `03_two_stage/reverse/ts_reverse.ipynb` — `'none'` 적용
 
 **ENet은 별개** (§3 참조): PP joint Optuna에 `target_transform` 카테고리 4종 (`none/log1p/yeo-johnson/quantile`) 자동 탐색. 선형 모델은 OLS 가정 (잔차 정규성·등분산성)의 영향을 받아 변환 효과가 데이터 의존적.
 

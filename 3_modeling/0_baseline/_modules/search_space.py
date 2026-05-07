@@ -261,7 +261,7 @@ PP_CLEAN_CANDIDATES = {
     "missing_threshold":          [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
     "remove_duplicates":          [True],
     "corr_threshold":             [0.90, 0.94, 0.98],
-    "corr_keep_by":               ["std", "target_corr"],
+    "corr_keep_by":               ["std"],
     "add_indicator":              [True, False],
     "indicator_threshold":        [0.01, 0.05, 0.10, 0.15, 0.20, 0.25],
     "imputation_method":          ["spatial"],
@@ -269,7 +269,7 @@ PP_CLEAN_CANDIDATES = {
     "spatial_max_dist":           [1.0, 2.0, 3.0, 4.0, 5.0],
     # imputation 후 2차 corr 제거 (인공 상관 제거 목적, 보수적)
     "post_impute_corr_threshold": [0.97, 0.98, 0.99],
-    "post_impute_corr_keep_by":   ["std", "target_corr"],
+    "post_impute_corr_keep_by":   ["std"],
 }
 
 # ── 이상치 후보 ───────────────────────────────────────────────

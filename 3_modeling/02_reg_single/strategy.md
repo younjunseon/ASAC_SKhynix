@@ -16,13 +16,13 @@
 | `et.ipynb` | ExtraTrees | 베깅 트리 | Evidence-driven Wide |
 | `enet.ipynb` | ElasticNet | 선형 | Evidence-driven Wide + PP/scaling joint |
 
-원본 [02_reg_only.ipynb](../../3_modeling_이전자료/final/02_reg_only.ipynb)의 `MODEL_NAME` 스위치 구조를 모델별로 분리.
+원본 [02_reg_only.ipynb](../../모델링_이전자료/3_modeling_이전자료/final/02_reg_only.ipynb)의 `MODEL_NAME` 스위치 구조를 모델별로 분리.
 
 ---
 
 ## 2. 원본 파일 매핑
 
-| 신규 (`3_modeling/02_reg_single/`) | 원본 (`3_modeling_이전자료/final/`) | 1차 산출물 (`4_output_이전자료/final/reg_only/`) |
+| 신규 (`3_modeling/02_reg_single/`) | 원본 (`모델링_이전자료/3_modeling_이전자료/final/`) | 1차 산출물 (`모델링_이전자료/4_output_이전자료/final/reg_only/`) |
 |---|---|---|
 | `lgbm.ipynb` | `02_reg_only.ipynb` | `lgbm/best_params.json` |
 | `xgb.ipynb` | 동일 | (없음 — 1차 미실행) |
@@ -49,29 +49,20 @@
 
 ---
 
-## 4. Target Transform — log1p 기본 + tweedie 시 자동 OFF
+## 4. Target Transform — `'none'` 통일 (strategy_common §24)
 
-| 손실함수 | log1p 적용 |
-|---|---|
-| RMSE / squarederror / regression / poisson | **ON** (학습 시 log1p, 평가/저장 시 expm1) |
-| **tweedie / Tweedie / reg:tweedie** | **OFF** (Tweedie 분포가 right-skew 자체 모델링 — 이중 변환 방지) |
+트리계열 4종(LGBM/XGBoost/CatBoost/ExtraTrees)은 **모든 손실(regression/poisson/tweedie)에서 `TARGET_TRANSFORM='none'` 고정**.
 
-**근거**: [EXPERIMENT_LOG §5.1](../../3_modeling_이전자료/final/EXPERIMENT_LOG.md) — Tweedie objective와 log1p 충돌. 조건부 분기 처리.
+**근거**: [strategy_common.md §24](../strategy_common.md) — `log1p_check.ipynb` 16조합 직접 비교에서 `none = log1p` 동등(소수점 6자리), `tweedie`/`poisson` objective는 분포 가정 자체 모델링하므로 변환 시 충돌.
 
 ```python
-TARGET_TRANSFORM = 'log1p'  # 디폴트
-CLIP_Y_EXTREME   = True      # train의 max=1.0 한 샘플 → 두 번째로 큰 값으로 clip
-
-# trial별 분기 (loss가 tweedie 계열이면 log1p 비활성화)
-if loss in TWEEDIE_NAMES:
-    target_transform_fn = None
-    target_inverse_fn   = None
-else:
-    target_transform_fn = np.log1p
-    target_inverse_fn   = lambda y: np.clip(np.expm1(y), 0, None)
+TARGET_TRANSFORM = 'none'    # 트리 4종 통일 (strategy_common §24)
+CLIP_Y_EXTREME   = True       # train의 max=1.0 한 샘플 → 두 번째로 큰 값으로 clip
+target_transform_fn = None
+target_inverse_fn   = None
 ```
 
-> 노트북 작성 시 [hpo.py:run_hpo](../modules/hpo.py)의 `target_transform_fn` 인자를 trial 안에서 동적으로 결정하도록 변경 필요. 현재 코드는 study 단위 고정 — 분기 추가.
+ENet은 별개 — `target_transform`을 Optuna 카테고리 4종(`none/log1p/yeo-johnson/quantile`)으로 자동 탐색 ([strategy_common §3](../strategy_common.md)).
 
 ---
 
@@ -168,11 +159,6 @@ XGB_ANCHOR = {  # ⚠ Y>0 subset에서 학습 — narrow ±50%로 탐색
 | enet | (옵션 없음 — L1+L2 고정) | — |
 
 **근거**: 1차 reg_only DB top-2가 박빙(차이 <0.000005), top-3부터 명백히 worse. xgb는 1차 데이터 없어 통일성 + power 연속(1.05~1.95) 통합 탐색.
-
-> **모듈 코드 변경 필요** ([models.py](../modules/models.py)):
-> - xgb space에 `count:poisson` 추가 (현재 미포함)
-> - catboost space에 `Poisson` 추가 (현재 미포함)
-> - tweedie_1.2 / tweedie_1.5 categorical 분기 → `suggest_float(1.05, 1.95)` 통합
 
 ---
 
@@ -278,7 +264,7 @@ XGB_ANCHOR = {  # ⚠ Y>0 subset에서 학습 — narrow ±50%로 탐색
 |---|---|---|
 | `missing_threshold` | `float(0.30, 0.90)` | p25=0.4, p50=0.7 |
 | `corr_threshold` | `float(0.88, 0.98)` | p50=0.9 |
-| `corr_keep_by` | **`'std'` 고정** | leakage 회피 ([plan.md §9.5](../../3_modeling_이전자료/final/plan.md)) |
+| `corr_keep_by` | **`'std'` 고정** | leakage 회피 ([plan.md §9.5](../../모델링_이전자료/3_modeling_이전자료/final/plan.md)) |
 | `add_indicator` | `[True, False]` | True 우세 |
 | `indicator_threshold` | `float(0.05, 0.20)` | p25=0.05, p50=0.10, p75=0.15 |
 | `spatial_max_dist` | `float(1.0, 6.0)` | top max=5 + 트리 6 일치 |
@@ -312,19 +298,11 @@ trial당 cleaning + scaling 새로 돌아 비용 큼 → N_TRIALS 200 부여.
 | 분류 threshold (§9) | N/A | 회귀 단독 |
 | die→unit 집계 다양성 (§10) | APPLY | 8후보: mean/median/max/min/trimmed_mean/weighted/Q25/Q75 |
 | Position 가중치 (§11) | APPLY | Optuna sub-study 50 trial로 w1~w4 (Dirichlet) |
-| zero_clip (§12) | APPLY | 0.001~0.015 step 0.001, **log space에서 비교** |
+| zero_clip (§12) | APPLY | 0.001~0.015 step 0.001 |
 
-**zero_clip log space 적용** (전략 common §12 보강):
-- 모델 출력 = log1p(y) space
-- 임계값 비교: `pred_log < log1p(th)` 인 unit → 0
-- 이후 `np.expm1(pred_log_clipped)` → original space로 복원
-- target_transform이 'none' 또는 'tweedie' 분기에서 OFF인 경우 기존(original space) 흐름
+**zero_clip 적용 공간**: 트리 4종은 `TARGET_TRANSFORM='none'` 통일이라 학습 공간 = original space. 임계값 비교도 original space에서 직접 수행. ENet만 trial별 best `target_transform`에 맞춰 자동 분기 (`zero_clip_log_space = (best_target_transform == 'log1p')`).
 
 원칙: train OOF best 탐색 → val 적용 → val 개선 시만 채택.
-
-> **모듈 코드 변경 필요**:
-> - [postprocess.py](../modules/postprocess.py) `apply_zero_clip` — log space 입력 받도록 분기 추가 (5~10줄)
-> - [postprocess.py](../modules/postprocess.py) 집계 후보에 `Q25`, `Q75` 추가 (1차 6종 → 신규 8종)
 
 **1차 후처리 best (참고)**:
 
@@ -341,11 +319,11 @@ trial당 cleaning + scaling 새로 돌아 비용 큼 → N_TRIALS 200 부여.
 
 | 노트북 | OUT_DIR |
 |---|---|
-| lgbm | `4_output/final/reg_only/lgbm/` |
-| xgb | `4_output/final/reg_only/xgb/` |
-| catboost | `4_output/final/reg_only/catboost/` |
-| et | `4_output/final/reg_only/et/` |
-| enet | `4_output/final/reg_only/enet/` |
+| lgbm | `4_output/02_reg_single/lgbm/` |
+| xgb | `4_output/02_reg_single/xgb/` |
+| catboost | `4_output/02_reg_single/catboost/` |
+| et | `4_output/02_reg_single/et/` |
+| enet | `4_output/02_reg_single/enet/` |
 
 산출물 9개 ([strategy_common.md §15](../strategy_common.md)) 표준화.
 
@@ -367,37 +345,10 @@ trial당 cleaning + scaling 새로 돌아 비용 큼 → N_TRIALS 200 부여.
 
 ---
 
-## 13. 모듈 코드 변경 요약 (노트북 작성 전 사전 작업)
-
-| # | 파일 | 변경 |
-|---|---|---|
-| 1 | [models.py](../modules/models.py) | xgb space에 `count:poisson` 추가 |
-| 2 | [models.py](../modules/models.py) | catboost space에 `Poisson` 추가 |
-| 3 | [models.py](../modules/models.py) | tweedie_1.2/1.5 categorical → `suggest_float(1.05, 1.95)` |
-| 4 | [hpo.py](../modules/hpo.py) | trial 안에서 `target_transform_fn` 분기 (tweedie 시 None) |
-| 5 | [hpo.py](../modules/hpo.py) | `study.enqueue_trial(anchor)` 헬퍼 추가 |
-| 6 | [postprocess.py](../modules/postprocess.py) | `apply_zero_clip` log space 분기 |
-| 7 | [postprocess.py](../modules/postprocess.py) | 집계 후보 8종으로 확장 (Q25/Q75 추가) |
-
-→ 모듈 작업 끝나면 노트북 5개 작성 들어감.
-
----
-
-## 14. 결정 필요 사항 (노트북 작성 시)
-
-| # | 항목 | default |
-|---|---|---|
-| 1 | xgb `count:poisson` + `log1p=ON` 학습 가능 여부 | 첫 fold 학습 후 확인 |
-| 2 | catboost `Poisson` loss 학습 안정성 | 첫 fold 학습 후 확인 |
-| 3 | enet `Yeo-Johnson` + 낮은 `corr_threshold` 조합 학습 발산 가능 | trial 실패 처리 후 사용자 보고 |
-
----
-
-## 15. 검증 — 노트북 작성 시 확인
+## 13. 검증 — 노트북 실행 시 확인
 
 [strategy_common.md §13](../strategy_common.md) 구현 문제 보고 원칙 준수.
 
 특히:
-- tweedie 선택 시 log1p가 진짜 OFF되는지 trial별 user_attr 로깅
-- log space zero_clip 적용 후 RMSE가 original space보다 개선되는지 비교 측정
 - 모든 anchor가 첫 trial로 enqueue 되었는지 확인 (Optuna study trial[0]의 params == ANCHOR)
+- ENet trial 실패 (Yeo-Johnson + 낮은 corr_threshold 조합) 시 사용자 보고

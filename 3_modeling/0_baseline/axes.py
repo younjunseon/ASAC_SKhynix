@@ -320,39 +320,56 @@ def _effective_target_transform(cfg: dict) -> str:
 
 
 def _make_target_transformers(cfg: dict, ys: dict, target_col: str = "health"):
-    """effective_target_transform에 따라 (target_transform_fn, target_inverse_fn) 반환.
+    """effective_target_transform에 따라 (target_transform_fn, target_inverse_fn, factory) 반환.
+
+    yeo-johnson은 fold-train y에만 fit해야 leakage가 없으므로 pre-fit하지 않고
+    factory(y_fold_train)를 반환. _run_reg_oof / _run_reg_single이 fold 안에서
+    factory를 호출해 fold-local fwd/inv를 만들어 사용한다.
+
+    Returns
+    -------
+    (fwd, inv, factory) :
+      - fwd, inv : pre-fit 변환 함수 (stateless transform 전용). yeo-johnson은 None.
+      - factory  : callable(y_array) -> (fwd_local, inv_local) 또는 None.
+                   factory가 not None이면 fwd/inv는 무시된다.
 
     baseline.ipynb cell 7과 동일 로직 + tweedie 자동 OFF 분기.
     """
     tt = _effective_target_transform(cfg)
     if tt == "none":
-        return None, None
+        return None, None, None
 
     if tt == "log1p":
         return (
             lambda y: np.log1p(np.asarray(y)),
             lambda y: np.clip(np.expm1(np.asarray(y)), 0.0, None),
+            None,
         )
 
     if tt == "yeo-johnson":
         from sklearn.preprocessing import PowerTransformer
-        pt = PowerTransformer(method="yeo-johnson", standardize=False)
-        train_y = np.asarray(ys["train"][target_col]).reshape(-1, 1)
-        pt.fit(train_y)
-        train_y_trans = pt.transform(train_y).ravel()
-        tt_min = float(train_y_trans.min())
-        tt_max = float(train_y_trans.max())
 
-        def fwd(y):
-            return pt.transform(np.asarray(y).reshape(-1, 1)).ravel()
+        def factory(y_fit_array):
+            """fold-train y에만 fit한 PowerTransformer로 (fwd, inv) 빌드. (leakage 차단)"""
+            pt = PowerTransformer(method="yeo-johnson", standardize=False)
+            y_arr = np.asarray(y_fit_array).reshape(-1, 1)
+            pt.fit(y_arr)
+            y_trans = pt.transform(y_arr).ravel()
+            tt_min = float(y_trans.min())
+            tt_max = float(y_trans.max())
 
-        def inv(y):
-            y_clip = np.clip(np.asarray(y), tt_min, tt_max)
-            out = pt.inverse_transform(y_clip.reshape(-1, 1)).ravel()
-            out = np.clip(out, 0.0, None)
-            return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+            def fwd_local(y):
+                return pt.transform(np.asarray(y).reshape(-1, 1)).ravel()
 
-        return fwd, inv
+            def inv_local(y):
+                y_clip = np.clip(np.asarray(y), tt_min, tt_max)
+                out = pt.inverse_transform(y_clip.reshape(-1, 1)).ravel()
+                out = np.clip(out, 0.0, None)
+                return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+            return fwd_local, inv_local
+
+        return None, None, factory
 
     raise ValueError(f"Unknown TARGET_TRANSFORM: {tt}")
 
@@ -446,7 +463,7 @@ def run_one(cfg: dict, seed: int, n_jobs: int = 7,
     clf_fixed = {}   # baseline은 clf default
 
     # 3) target transform / clip
-    target_fwd, target_inv = _make_target_transformers(cfg, ys, target_col)
+    target_fwd, target_inv, target_factory = _make_target_transformers(cfg, ys, target_col)
     ys_input = _prepare_ys_input(cfg, ys, target_col)
 
     # 4) best_params (LGBM default — 빈 dict로 default get_default_params 활용)
@@ -479,6 +496,7 @@ def run_one(cfg: dict, seed: int, n_jobs: int = 7,
         reg_fixed=reg_fixed,
         target_transform_fn=target_fwd,
         target_inverse_fn=target_inv,
+        target_transformer_factory=target_factory,
         exclude_cols=EXCLUDE_COLS,
     )
 

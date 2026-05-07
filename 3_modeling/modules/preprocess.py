@@ -29,7 +29,7 @@ from outlier import run_outlier_treatment
 # ─── 수정 가능한 기본값 (노트북에서 params dict로 override) ─────
 DEFAULT_PARAMS = {
     "const_threshold":            1e-6,          # std ≤ 이 값 → 제거
-    "missing_threshold":          0.4,           # 결측률 ≥ 이 값 → 제거
+    "missing_threshold":          0.30,          # 결측률 ≥ 이 값 → 제거 (strategy_common §1)
     "corr_threshold":             0.90,          # 1차 |r| > 이 값 → 제거
     # corr_keep_by: 'std' 기본. 'target_corr' 는 KFold 바깥에서 전체 train
     # target 으로 feature 를 고르기 때문에 OOF 평가가 낙관적으로 편향될 수
@@ -38,8 +38,8 @@ DEFAULT_PARAMS = {
     "corr_winsorize_pct":         0.0,           # std 계산 전 분위수 clip
     "add_indicator":              True,         # 결측 indicator 컬럼 추가
     "indicator_threshold":        0.05,          # indicator 생성 결측률 기준
-    "spatial_max_dist":           5.0,           # spatial 보간 거리
-    "post_impute_corr_threshold": 0.98,          # 2차 |r| 제거 임계값
+    "spatial_max_dist":           6.0,           # spatial 보간 거리 (strategy_common §1)
+    "post_impute_corr_threshold": 0.96,          # 2차 |r| 제거 임계값 (strategy_common §1)
     "post_impute_corr_keep_by":   "std",         # 2차 동률 기준
 }
 

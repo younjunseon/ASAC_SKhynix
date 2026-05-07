@@ -84,6 +84,37 @@ def _aggregate_die_to_unit(xs, die_pred):
 # Fit + Predict (모델별 분기 처리)
 # ═════════════════════════════════════════════════════════════
 
+# ═════════════════════════════════════════════════════════════
+# N_JOBS 주입 헬퍼 (strategy_common §8 정책 정상화)
+# ═════════════════════════════════════════════════════════════
+# 노트북 최상단의 단일 N_JOBS 변수를 모델별 적절한 키(`n_jobs` / `thread_count`)로
+# 주입한다. n_jobs=None이면 라이브러리 default(보통 -1, 전체 코어)로 폴백 →
+# 기존 (호출자가 미전달) 동작과 호환.
+
+_NJOBS_KEYED   = {"lgbm", "xgb", "et", "zitboost"}     # n_jobs 키 사용
+_THREADCOUNT   = {"catboost"}                          # thread_count 키 사용
+# enet (sklearn ElasticNet) 은 n_jobs 파라미터 자체가 없음 → 무시
+
+
+def _inject_n_jobs(model_name, params, n_jobs):
+    """모델별 적절한 키로 N_JOBS 덮어쓰기 (override).
+
+    - None이면 무처리 (search_space의 -1 또는 라이브러리 default 유지)
+    - lgbm/xgb/et/zitboost: params['n_jobs'] = n_jobs
+    - catboost: params['thread_count'] = n_jobs (n_jobs 키가 있으면 제거)
+    - enet: 무시
+    """
+    if n_jobs is None:
+        return params
+    p = dict(params)
+    if model_name in _THREADCOUNT:
+        p["thread_count"] = int(n_jobs)
+        p.pop("n_jobs", None)   # 혹시 베이크된 n_jobs는 catboost와 충돌하지 않지만 정리
+    elif model_name in _NJOBS_KEYED:
+        p["n_jobs"] = int(n_jobs)
+    return p
+
+
 def _fit_predict_fold(
     model_name, hp,
     X_tr, y_tr, X_vl,
@@ -127,17 +158,6 @@ def _build_X(xs_split, feat_cols, extra_feature=None):
     return X
 
 
-def _scale_fold_if_needed(model_name, X_tr, X_vl):
-    """enet이면 fold-local RobustScaler, 아니면 pass-through."""
-    if not _scaler.needs_scaling(model_name):
-        return X_tr, X_vl
-    med = np.median(X_tr, axis=0)
-    q75 = np.quantile(X_tr, 0.75, axis=0)
-    q25 = np.quantile(X_tr, 0.25, axis=0)
-    iqr = np.maximum(q75 - q25, 1e-8)
-    return (X_tr - med) / iqr, (X_vl - med) / iqr
-
-
 # ═════════════════════════════════════════════════════════════
 # Optuna HPO
 # ═════════════════════════════════════════════════════════════
@@ -157,6 +177,12 @@ def run_hpo(
     show_progress_bar=True,
     user_attrs=None,
     space_variant="default",      # 'default' | 'zitreg' — models.get_search_space 의 variant
+    # ── strategy_common §4·§5·§25 ──
+    sampler=None,                 # None이면 TPESampler(seed=seed). §4: TPESampler(seed=None, multivariate=True, group=True)
+    pruner=None,                  # None이면 사용 안 함. §4: MedianPruner(n_warmup_steps=...)
+    enqueue_trials=None,          # list[dict] — anchor 첫 trial 강제 (§5)
+    timeout=None,                 # 초 단위, None=무제한 (§25)
+    n_jobs=None,                  # 모델 학습 병렬도 (strategy_common §8). None이면 라이브러리 default(-1)
     # ── trial별 holdout 평가 (옵션) ──
     # xs_val/ys_val_unit 둘 다 주면 매 trial 마다 fold-평균 val 예측 → val_rmse 기록.
     # extra_feature_val/multiplier_val 은 *_train 과 동일한 의미로 val 측에 적용.
@@ -266,6 +292,8 @@ def run_hpo(
 
     def objective(trial):
         hp = space_fn(trial)
+        # N_JOBS 주입 (strategy_common §8): search_space의 -1 베이크값을 노트북 N_JOBS로 override
+        hp = _inject_n_jobs(model_name, hp, n_jobs)
 
         # ── trial별 target_transform 분기 (strategy.md §4, EXPERIMENT_LOG §5.1) ──
         # tweedie 계열 loss가 sample되면 log1p OFF (이중 변환 방지)
@@ -346,22 +374,34 @@ def run_hpo(
 
     # resume_study=False 기본: 같은 study_name/storage 조합이 이미 있으면 에러를
     # 명시적으로 내어 trial 누적으로 best 값이 오염되는 것을 막는다.
+    # sampler default: strategy_common §4에 따라 multivariate=True, group=True 적용.
+    # seed는 함수 인자 그대로 (None 권장 — 다양성 확보; 노트북이 명시 주입 권장).
     study = optuna.create_study(
         direction=direction,
         study_name=study_name,
         storage=storage,
         load_if_exists=bool(storage and resume_study),
-        sampler=optuna.samplers.TPESampler(seed=seed),
+        sampler=sampler if sampler is not None else optuna.samplers.TPESampler(
+            seed=seed, multivariate=True, group=True
+        ),
+        pruner=pruner,    # None이면 NopPruner default (Optuna 자동)
     )
     if user_attrs:
         for k, v in user_attrs.items():
             study.set_user_attr(k, v)
 
+    # ── anchor enqueue (§5): 첫 trial(들) 강제 ──
+    if enqueue_trials:
+        for anchor in enqueue_trials:
+            study.enqueue_trial(dict(anchor))
+        print(f"[enqueue] {len(enqueue_trials)} anchor trial(s) 강제")
+
     if _scaler.needs_scaling(model_name):
         print(f"[scaler] {model_name} → fold-local RobustScaler 적용 "
               f"(매 fold train 기준 fit, holdout/val/test 동일 변환)")
 
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=show_progress_bar)
+    study.optimize(objective, n_trials=n_trials, timeout=timeout,
+                   show_progress_bar=show_progress_bar)
 
     return {
         "study":            study,
@@ -375,7 +415,7 @@ def run_hpo(
 # Best Trial Refit (K-fold)
 # ═════════════════════════════════════════════════════════════
 
-def _hp_from_best(best_params, model_name):
+def _hp_from_best(best_params, model_name, n_jobs=None):
     """Optuna best_params dict → MODEL_REGISTRY에 전달할 kwargs.
 
     새 search space (strategy.md §6):
@@ -421,6 +461,8 @@ def _hp_from_best(best_params, model_name):
         hp.setdefault("selection", "random")
         hp.setdefault("precompute", True)
 
+    # N_JOBS override (strategy_common §8): n_jobs 인자가 들어왔으면 모델별 키로 덮어쓰기
+    hp = _inject_n_jobs(model_name, hp, n_jobs)
     return hp
 
 
@@ -439,6 +481,7 @@ def refit_best(
     target_transform_fn=None,
     target_inverse_fn=None,
     already_resolved=False,
+    n_jobs=None,
 ):
     """Best trial HP로 K-fold 재학습. die-level OOF + val/test 예측 (fold 평균) 생성.
 
@@ -468,7 +511,11 @@ def refit_best(
     if (target_transform_fn is None) != (target_inverse_fn is None):
         raise ValueError("target_transform_fn / target_inverse_fn은 쌍으로 제공")
     # REUSE 모드: best_params_resolved(JSON)를 그대로 받은 경우 재변환 스킵
-    hp = dict(best_params) if already_resolved else _hp_from_best(best_params, model_name)
+    if already_resolved:
+        hp = dict(best_params)
+        hp = _inject_n_jobs(model_name, hp, n_jobs)   # REUSE도 N_JOBS override 보장
+    else:
+        hp = _hp_from_best(best_params, model_name, n_jobs=n_jobs)
 
     # ── refit도 HPO와 동일하게 tweedie 계열 시 transform OFF (EXPERIMENT_LOG §5.1) ──
     _obj_or_loss = str(hp.get("objective") or hp.get("loss_function") or "")
@@ -713,10 +760,12 @@ def save_artifacts(
         pickle.dump(pkl_payload, f)
 
     # 2) best_params (JSON) + study 메타 + fold 재현성 정보
+    # strategy_common.md §23.3 키 위치 정합: effective_pp_params를 study_meta 하위가 아닌 top-level로
     meta = {
         "exp_id":                exp_id,
         "model_name":            refit_result["model_name"],
         "best_params_resolved":  refit_result["best_params_resolved"],
+        "effective_pp_params":   (study_meta or {}).get("effective_pp_params"),
         "feature_names":         list(feature_names) if feature_names is not None else None,
         "n_features":            len(feature_names) if feature_names is not None else None,
         "extra_feature_name":    extra_feature_name,
@@ -909,6 +958,12 @@ def run_clf_hpo(
     seed=SEED,
     show_progress_bar=True,
     user_attrs=None,
+    # ── strategy_common §4·§5·§25 ──
+    sampler=None,                 # None이면 TPESampler(seed=seed). §4
+    pruner=None,                  # None이면 사용 안 함. §4
+    enqueue_trials=None,          # list[dict] — anchor 첫 trial 강제 (§5)
+    timeout=None,                 # 초 단위, None=무제한 (§25)
+    n_jobs=None,                  # 모델 학습 병렬도 (strategy_common §8). None이면 라이브러리 default(-1)
     xs_val=None, ys_val_unit=None,
     xs_test=None, ys_test_unit=None,
 ):
@@ -959,6 +1014,8 @@ def run_clf_hpo(
 
     def objective(trial):
         params = space_fn(trial)
+        # N_JOBS 주입 (strategy_common §8): clf search_space의 -1 베이크값 override
+        params = _inject_n_jobs(model_name, params, n_jobs)
         oof_proba = np.full(len(xs_train), np.nan)
         val_proba_accum  = (np.zeros(len(xs_val))  if xs_val  is not None else None)
         test_proba_accum = (np.zeros(len(xs_test)) if xs_test is not None else None)
@@ -992,12 +1049,16 @@ def run_clf_hpo(
 
         return train_rmse
 
+    # sampler default: strategy_common §4 (multivariate=True, group=True) 정합
     study = optuna.create_study(
         direction="minimize",
         study_name=study_name,
         storage=storage,
         load_if_exists=bool(storage and resume_study),
-        sampler=optuna.samplers.TPESampler(seed=seed),
+        sampler=sampler if sampler is not None else optuna.samplers.TPESampler(
+            seed=seed, multivariate=True, group=True
+        ),
+        pruner=pruner,
     )
     if user_attrs:
         for k, v in user_attrs.items():
@@ -1006,7 +1067,13 @@ def run_clf_hpo(
     study.set_user_attr("clf_objective_recipe",
                         "unit_RMSE(unit_mean(die_proba) * y_pos_const)")
 
-    study.optimize(objective, n_trials=n_trials,
+    # ── anchor enqueue (§5) ──
+    if enqueue_trials:
+        for anchor in enqueue_trials:
+            study.enqueue_trial(dict(anchor))
+        print(f"[enqueue] {len(enqueue_trials)} anchor trial(s) 강제")
+
+    study.optimize(objective, n_trials=n_trials, timeout=timeout,
                    show_progress_bar=show_progress_bar)
 
     return {
@@ -1018,7 +1085,7 @@ def run_clf_hpo(
     }
 
 
-def _clf_hp_with_defaults(model_name, best_params):
+def _clf_hp_with_defaults(model_name, best_params, n_jobs=None):
     """best_params dict 에 모델별 search space 고정값 보강 (REUSE 모드 호환)."""
     hp = dict(best_params)
     if model_name == "lgbm":
@@ -1044,6 +1111,8 @@ def _clf_hp_with_defaults(model_name, best_params):
         hp.setdefault("random_state", SEED)
         hp.setdefault("n_jobs",       -1)
         hp.setdefault("bootstrap",    True)
+    # N_JOBS override (strategy_common §8)
+    hp = _inject_n_jobs(model_name, hp, n_jobs)
     return hp
 
 
@@ -1053,6 +1122,7 @@ def refit_clf_best(
     model_name, best_params,
     n_folds=5, seed=SEED,
     already_resolved=False,
+    n_jobs=None,
 ):
     """Best CLF HP 로 K-fold 재학습. die-level prob (OOF/val/test) 반환.
 
@@ -1065,7 +1135,11 @@ def refit_clf_best(
         'model_name': str,
     }
     """
-    hp = dict(best_params) if already_resolved else _clf_hp_with_defaults(model_name, best_params)
+    if already_resolved:
+        hp = dict(best_params)
+        hp = _inject_n_jobs(model_name, hp, n_jobs)   # REUSE도 N_JOBS override
+    else:
+        hp = _clf_hp_with_defaults(model_name, best_params, n_jobs=n_jobs)
 
     unit_ids = ys_train_unit[KEY_COL].unique()
     folds = _make_unit_folds(unit_ids, n_folds, seed)
@@ -1176,15 +1250,31 @@ def save_clf_artifacts(
     with open(os.path.join(out_dir, "fold_models.pkl"), "wb") as f:
         pickle.dump(refit_result["fold_models"], f)
 
+    # strategy_common.md §23.3 검수 체크리스트 6필드 top-level 보강
+    # - effective_pp_params: study_meta에서 끌어올려 top-level로 (회귀 save_artifacts와 키 위치 정합)
+    # - n_folds / unit_ids_hash / n_units_train: fold split 재현성 (zit↔reg↔stacking alignment)
+    # - postprocess: clf 단독은 후처리 없음 — None + 사유 명시
     meta = {
-        "exp_id":         exp_id,
-        "model_name":     refit_result["model_name"],
+        "exp_id":               exp_id,
+        "model_name":           refit_result["model_name"],
         "best_params_resolved": refit_result["best_params_resolved"],
-        "feature_names":  feature_names,
-        "n_features":     len(feature_names) if feature_names else None,
-        "y_pos_const":    y_pos_const,
-        "study_meta":     study_meta,
+        "effective_pp_params":  (study_meta or {}).get("effective_pp_params"),
+        "feature_names":        feature_names,
+        "n_features":           len(feature_names) if feature_names else None,
+        "n_folds":              len(refit_result["fold_models"]),
+        "y_pos_const":          y_pos_const,
+        "postprocess":          None,  # clf 단독은 후처리 없음 (combine 단계에서 적용)
+        "study_meta":           study_meta,
     }
+    # fold 분할 재현성 (save_artifacts와 동일 패턴)
+    if y_train_unit is not None:
+        import hashlib
+        uid_arr = (y_train_unit[KEY_COL].unique()
+                   if isinstance(y_train_unit, pd.DataFrame) else np.unique(y_train_unit))
+        uid_bytes = ",".join(map(str, uid_arr)).encode("utf-8")
+        meta["unit_ids_hash"] = hashlib.sha1(uid_bytes).hexdigest()
+        meta["n_units_train"] = int(len(uid_arr))
+
     with open(os.path.join(out_dir, "best_params.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False, default=str)
 
