@@ -93,3 +93,7 @@ _scratch/
 # 자동클릭 도구 (프로젝트 무관)
 _autoclicker/
 _autoclicker/**
+
+# 모델링 일괄 실행 러너 (로컬 검증용, 다른 PC에서는 무관)
+3_modeling/_run/
+3_modeling/_run/**

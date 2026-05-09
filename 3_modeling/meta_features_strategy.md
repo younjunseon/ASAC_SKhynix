@@ -176,7 +176,7 @@ CLAUDE.md EDA 결과:
 
 ## 5. 헬퍼 모듈 시그니처
 
-[3_modeling/modules/meta_features.py](modules/meta_features.py) 신규 — 모든 노트북에서 한 줄 호출.
+[2_preprocessing/meta_features.py](../2_preprocessing/meta_features.py) — 기존 파일에 `add_meta_features()` 함수 추가 (이미 `parse_run_wf_xy()` 존재). 모든 노트북에서 한 줄 호출.
 
 ```python
 def add_meta_features(xs_train, xs_val, xs_test, feat_cols,

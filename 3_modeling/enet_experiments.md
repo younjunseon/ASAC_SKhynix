@@ -311,6 +311,8 @@ X_vl_s = ct.transform(xs_train_c.loc[vl_mask, feat_cols_clean])
 > n_features 는 **추정값** (anchor PP 결과 + 단계 누적 가정). 실측은 측정 후 채움.
 > reg_only / ts_reg 별도 기록 — **두 노트북 anchor 값이 다르면 RMSE 절대값 비교 불가**, Δval 만 비교.
 
+> **현재 코드 상태 (2026-05-09)**: 영구본 양쪽 노트북에 단계 1+2c+2a+2b 모두 적용 완료. 단계별 marginal 측정용 temp 노트북은 reg_only 한정으로 2개 작성 — [02_reg_single/temp/enet_step1.ipynb](02_reg_single/temp/enet_step1.ipynb) (단계 1만, loc_x 비활성), [02_reg_single/temp/enet_step12a.ipynb](02_reg_single/temp/enet_step12a.ipynb) (단계 1+2c+2a, X1073 만 OHE). EXP_ID 분리되어 영구본 산출물과 충돌 없음. **단계 2c marginal 측정은 생략** — preprocess.py 영구 수정으로 자동 적용 + md §2c "변화 없음" 평가. 측정 권장 순서: temp/step1 → temp/step12a → 영구본 (= step12b). Δ 계산: (temp/step12a − temp/step1) ≈ 단계 2a marginal, (영구본 − temp/step12a) = 단계 2b marginal.
+
 ### 3.1 reg_only (`02_reg_single/enet.ipynb`)
 
 | 단계 | 추가 피처 | n_features (추정) | OOF RMSE | val RMSE | test RMSE | Δval | 채택? | 메모 |
@@ -375,7 +377,7 @@ X_vl_s = ct.transform(xs_train_c.loc[vl_mask, feat_cols_clean])
 
 ## 5. 헬퍼 모듈 사용 예시
 
-[3_modeling/modules/meta_features.py](modules/meta_features.py) (신설 예정) 한 줄 호출 — 양쪽 노트북에 동일:
+[2_preprocessing/meta_features.py](../2_preprocessing/meta_features.py) 의 `add_meta_features()` (신규 함수) 한 줄 호출 — 양쪽 노트북에 동일:
 
 ```python
 from modules.meta_features import add_meta_features

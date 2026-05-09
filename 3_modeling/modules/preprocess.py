@@ -70,6 +70,9 @@ EXCLUDE_COLS = [
     "X1041", "X1074", "X1078",
     # X1086
     "X1086",
+    # 위치기반 추가 제외 (이전자료 strategy_2nd_ensemble.md 결정, enet_experiments.md §2c)
+    "X1056",   # Ring (타원 고리) — 기여 모호
+    "X1072",   # Radial gradient — X708과 r=0.997 (사실상 중복)
 ]
 
 
