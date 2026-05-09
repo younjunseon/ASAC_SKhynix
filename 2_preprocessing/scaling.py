@@ -24,6 +24,7 @@ v3 대비 변경사항 (2026-04-16, strategy_2nd_preprocessing.md §3):
 """
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import PowerTransformer, QuantileTransformer
 
 
@@ -152,7 +153,7 @@ def scale(xs, feat_cols, train_mask=None, transform='robust'):
 # 2차 funnel — HybridScaler (sklearn fit/transform 패턴)
 # ============================================================
 
-class HybridScaler:
+class HybridScaler(BaseEstimator, TransformerMixin):
     """
     Skew 기반 하이브리드 스케일러 (2차 funnel 앙상블 전용)
 
@@ -167,7 +168,12 @@ class HybridScaler:
       - 0/1 원본 유지가 선형 모델 해석/수렴에 유리
       - 트리 모델에도 무영향 (분기 1개로 처리)
 
-    sklearn 표준 fit/transform 패턴 — 객체 보관 후 대시보드/예측 파이프라인 재사용 가능.
+    sklearn 표준 fit/transform 패턴 (BaseEstimator + TransformerMixin 상속) —
+    fit_transform 자동 제공. 객체 보관 후 대시보드/예측 파이프라인 재사용 가능.
+
+    입력 타입 (2026-05-09 추가):
+      - DataFrame  → DataFrame 반환 (기존 패턴, inplace 옵션 유효)
+      - numpy 2D   → numpy 반환 (sklearn 호환, fit_transform/CV 파이프라인 동작)
     """
 
     def __init__(self, skew_threshold=10.0, n_quantiles=1000,
@@ -179,19 +185,30 @@ class HybridScaler:
         self.random_state = random_state
         self.binary_passthrough = binary_passthrough
 
-    def fit(self, X, feat_cols=None):
+    def fit(self, X, y=None, feat_cols=None):
         """
         Parameters
         ----------
-        X : DataFrame (train only)
+        X : DataFrame or ndarray (train only)
+            DataFrame이면 컬럼명 사용, numpy면 자동으로 임시 컬럼명 부여
+        y : ignored
+            sklearn 호환용(fit_transform이 y=None을 forward). 사용하지 않음
         feat_cols : list, optional
-            스케일링 대상. None이면 X의 모든 컬럼
+            스케일링 대상. None이면 X의 모든 컬럼.
+            DataFrame 입력 시 부분 컬럼만 fit하려면 명시.
 
         Returns
         -------
         self
         """
-        if feat_cols is None:
+        # numpy 입력이면 임시 DataFrame으로 승격 (내부 컬럼 처리 통일)
+        if isinstance(X, np.ndarray):
+            if X.ndim != 2:
+                raise ValueError(f"HybridScaler: numpy 입력은 2D여야 함 (got ndim={X.ndim})")
+            if feat_cols is None:
+                feat_cols = [f'_col_{i}' for i in range(X.shape[1])]
+            X = pd.DataFrame(X, columns=list(feat_cols))
+        elif feat_cols is None:
             feat_cols = list(X.columns)
         self.feat_cols_ = list(feat_cols)
 
@@ -240,19 +257,33 @@ class HybridScaler:
         """
         Parameters
         ----------
-        X : DataFrame (train/val/test 중 하나)
+        X : DataFrame or ndarray (train/val/test 중 하나)
+            numpy 입력 시 fit과 동일한 컬럼 수여야 함
         inplace : bool, default True
-            True면 X를 직접 수정(동일 객체 반환), False면 복사본 반환
+            DataFrame 입력에만 의미. True면 X 직접 수정, False면 복사본 반환.
+            numpy 입력은 항상 새 ndarray 반환
 
         Returns
         -------
-        X_transformed : DataFrame
+        X_transformed : DataFrame (입력이 DataFrame이면) / ndarray (입력이 numpy면)
 
         Notes
         -----
         binary_cols_는 건드리지 않음 (passthrough). quantile/power 그룹만 변환.
         """
-        if not inplace:
+        # numpy 입력 처리: 임시 DataFrame으로 변환 → 처리 → numpy 반환
+        is_numpy = isinstance(X, np.ndarray)
+        in_dtype_np = X.dtype if is_numpy else None
+        if is_numpy:
+            if X.ndim != 2:
+                raise ValueError(f"HybridScaler: numpy 입력은 2D여야 함 (got ndim={X.ndim})")
+            if X.shape[1] != len(self.feat_cols_):
+                raise ValueError(
+                    f"HybridScaler: 입력 컬럼 수 불일치 (expected {len(self.feat_cols_)}, got {X.shape[1]})"
+                )
+            X = pd.DataFrame(X, columns=self.feat_cols_, copy=True)
+            inplace = True  # 임시 df라 inplace 무방
+        elif not inplace:
             X = X.copy()
 
         # Quantile 그룹
@@ -272,6 +303,12 @@ class HybridScaler:
             X[self.power_cols_] = arr
 
         # Binary 그룹은 건드리지 않음 (passthrough)
+
+        if is_numpy:
+            out = X.values
+            if in_dtype_np == np.float32:
+                out = out.astype('float32', copy=False)
+            return out
         return X
 
     @property
@@ -312,7 +349,7 @@ def hybrid_scale(xs_train, xs_val, xs_test, feat_cols, skew_threshold=10.0,
         n_quantiles=n_quantiles,
         quantile_output=quantile_output,
         random_state=random_state,
-    ).fit(xs_train, feat_cols)
+    ).fit(xs_train, feat_cols=feat_cols)   # y=None 자리 충돌 방지 — 키워드 명시
 
     scaler.transform(xs_train, inplace=True)
     scaler.transform(xs_val,   inplace=True)
