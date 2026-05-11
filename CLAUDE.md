@@ -733,7 +733,26 @@ except ImportError:
 |------|-----|------|
 | `code.zip` | `1AD4PDBnDVjp-LSna6puB7qLnpBqB7j_I` | setup.py, requirements.txt, utils/ |
 | `preprocessing.zip` | `1Rh0ByOS4Gama8XHuvY7KkOHo278H9YLr` | cleaning.py, outlier.py, aggregation.py |
+| `modeling.zip` (= modules.zip) | `1Vrn5LBl611rWbag7d09LZH68_lfpu6wP` | 3_modeling/modules/ (hpo, models, zit, postprocess, ...) |
 | `dataset.zip` | `1yOUo0_wPLcuZBSJIK592b00YkSIlk4zO` | CSV 4개 (1.2GB) |
+| `4_output.zip` | `1ts73qEMmjX8cKIb-QeDQ-TMeyudFGWzs` | 4_output/ 통째 (실험 산출물 + optuna db). RESUME용. ~2.5GB |
+
+> ⚠️ **코드/모듈 수정 시 zip 재업로드**: `utils/` 수정 → `code.zip`, `2_preprocessing/` 수정 → `preprocessing.zip`, `3_modeling/modules/` 수정 → `modeling.zip` 재생성·재업로드 (같은 ID 유지). 노트북(.ipynb) 자체는 zip에 포함 안 됨 — VSCode 코랩 익스텐션이 로컬 파일을 직접 사용.
+
+#### 이어서 학습 (RESUME)
+
+각 모델링 노트북 첫 셀에 `RESUME` (T/F) + `GDRIVE_OUTPUT_ID` 변수가 있다. Optuna study를 기존 db에 이어서 돌릴지 결정한다.
+
+| 환경 | `RESUME = True` | `RESUME = False` |
+|------|-----------------|------------------|
+| **Colab** | `4_output.zip` Drive에서 다운 → `/content/project/4_output/`에 압축 해제 → 해당 EXP_ID db 있으면 이어서, 없으면 새로 | 다운 안 함 → db 없음 → 새 study |
+| **Local** | 디스크의 `4_output/` 그대로 사용 (다운 불필요) → 이어서 | 같은 EXP_ID db가 디스크에 있으면 **`DuplicatedStudyError` 발생** → 사용자가 직접 db 삭제 후 재실행 |
+
+- 동작 원리:
+  - inline `optuna.create_study(..., load_if_exists=RESUME)` (zit_only / bag_zit / ts_reverse / enet ×2)
+  - `hpo.run_hpo(..., resume_study=RESUME)` / `hpo.run_clf_hpo(..., resume_study=RESUME)` (트리 모델들) — 내부에서 `load_if_exists = bool(storage and resume_study)`
+  - `hpo.enqueue_anchor()` 와 `run_hpo`/`run_clf_hpo`의 `enqueue_trials`는 **기존 trial이 있으면 anchor를 재enqueue하지 않음** (RESUME 시 중복 trial 0 방지)
+- **RESUME=False는 의도적으로 에러**: trial 누적으로 best 값이 오염되는 것을 막기 위해. 처음부터 다시 하려면 해당 `optuna_*.db` 파일을 먼저 지운다.
 
 #### 환경 판별 원리
 

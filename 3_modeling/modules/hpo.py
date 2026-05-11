@@ -391,10 +391,13 @@ def run_hpo(
             study.set_user_attr(k, v)
 
     # ── anchor enqueue (§5): 첫 trial(들) 강제 ──
-    if enqueue_trials:
+    # RESUME(기존 db에 trial 존재) 시에는 재enqueue하지 않는다.
+    if enqueue_trials and len(study.trials) == 0:
         for anchor in enqueue_trials:
             study.enqueue_trial(dict(anchor))
         print(f"[enqueue] {len(enqueue_trials)} anchor trial(s) 강제")
+    elif enqueue_trials:
+        print(f"[enqueue skip] 기존 trial {len(study.trials)}개 — resume 모드")
 
     if _scaler.needs_scaling(model_name):
         print(f"[scaler] {model_name} → fold-local RobustScaler 적용 "
@@ -1068,10 +1071,13 @@ def run_clf_hpo(
                         "unit_RMSE(unit_mean(die_proba) * y_pos_const)")
 
     # ── anchor enqueue (§5) ──
-    if enqueue_trials:
+    # RESUME(기존 db에 trial 존재) 시에는 재enqueue하지 않는다.
+    if enqueue_trials and len(study.trials) == 0:
         for anchor in enqueue_trials:
             study.enqueue_trial(dict(anchor))
         print(f"[enqueue] {len(enqueue_trials)} anchor trial(s) 강제")
+    elif enqueue_trials:
+        print(f"[enqueue skip] 기존 trial {len(study.trials)}개 — resume 모드")
 
     study.optimize(objective, n_trials=n_trials, timeout=timeout,
                    show_progress_bar=show_progress_bar)
@@ -1404,6 +1410,13 @@ def enqueue_anchor(study, anchor):
     study : optuna.Study
     anchor : dict[str, value]
         narrow_around()의 anchor와 동일 키/값. categorical은 choices 안의 값이어야.
+
+    Notes
+    -----
+    RESUME 모드(기존 db에 trial이 있는 경우)에는 anchor를 다시 enqueue하지 않는다.
     """
-    study.enqueue_trial(dict(anchor))
-    print(f"[enqueue] anchor 첫 trial로 강제 ({len(anchor)} HP)")
+    if len(study.trials) == 0:
+        study.enqueue_trial(dict(anchor))
+        print(f"[enqueue] anchor 첫 trial로 강제 ({len(anchor)} HP)")
+    else:
+        print(f"[enqueue skip] 기존 trial {len(study.trials)}개 — resume 모드")
