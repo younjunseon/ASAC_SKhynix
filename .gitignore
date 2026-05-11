@@ -97,3 +97,7 @@ _autoclicker/**
 # 모델링 일괄 실행 러너 (로컬 검증용, 다른 PC에서는 무관)
 3_modeling/_run/
 3_modeling/_run/**
+
+# Colab 부트스트랩용 zip 산출물 (Drive 업로드 후 폐기)
+_dist/
+_dist/**

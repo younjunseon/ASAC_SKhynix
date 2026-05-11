@@ -72,6 +72,8 @@ def aggregate(xs, die_pred, method="mean", pos_weights=None):
     """
     if method == "mean":
         return _agg_simple(xs, die_pred, "mean")
+    if method == "sum":
+        return _agg_simple(xs, die_pred, "sum")
     if method == "median":
         return _agg_simple(xs, die_pred, "median")
     if method == "max":
@@ -364,6 +366,7 @@ def tune_and_apply(
     zero_clip_log_space=False,
     position_method="optuna",
     position_optuna_n_trials=50,
+    baseline_agg="mean",
 ):
     """전체 후처리 파이프라인 — strategy_common.md §10·§11·§12 원칙:
 
@@ -396,12 +399,12 @@ def tune_and_apply(
     def _val_rmse_or_none(unit_df):
         return _unit_rmse(unit_df, y_val_unit) if has_val else None
 
-    # ── Baseline (mean 집계 + 미적용) ──
-    train_unit = aggregate(xs_train, die_pred_train, "mean")
-    val_unit   = aggregate(xs_val,   die_pred_val,   "mean")
-    test_unit  = aggregate(xs_test,  die_pred_test,  "mean")
+    # ── Baseline (baseline_agg 집계 + 미적용) ──
+    train_unit = aggregate(xs_train, die_pred_train, baseline_agg)
+    val_unit   = aggregate(xs_val,   die_pred_val,   baseline_agg)
+    test_unit  = aggregate(xs_test,  die_pred_test,  baseline_agg)
     cur_val_rmse = _val_rmse_or_none(val_unit)
-    val_rmse_history.append(("baseline_mean", cur_val_rmse))
+    val_rmse_history.append((f"baseline_{baseline_agg}", cur_val_rmse))
 
     # ── 1. 집계 (§10) — best vs mean baseline ──
     agg_res = find_best_aggregation(
@@ -413,11 +416,11 @@ def tune_and_apply(
     best_agg_cand = agg_res["best_method"]
     pos_w_cand    = agg_res["pos_weights"]
 
-    if best_agg_cand == "mean":
-        # 이미 baseline이 mean
-        best_agg = "mean"
+    if best_agg_cand == baseline_agg:
+        # 이미 baseline과 동일
+        best_agg = baseline_agg
         pos_w    = None
-        decisions["aggregation"] = "mean is best on train OOF — kept"
+        decisions["aggregation"] = f"{baseline_agg} is best on train OOF — kept"
     else:
         cand_train = aggregate(xs_train, die_pred_train, best_agg_cand, pos_w_cand)
         cand_val   = aggregate(xs_val,   die_pred_val,   best_agg_cand, pos_w_cand)
@@ -438,9 +441,9 @@ def tune_and_apply(
             cur_val_rmse = cand_val_rmse
         else:
             decisions["aggregation"] = (
-                f"{best_agg_cand} rejected (val {cur_val_rmse:.6f} <= {cand_val_rmse:.6f}) -> keep mean"
+                f"{best_agg_cand} rejected (val {cur_val_rmse:.6f} <= {cand_val_rmse:.6f}) -> keep {baseline_agg}"
             )
-            best_agg, pos_w = "mean", None
+            best_agg, pos_w = baseline_agg, None
     val_rmse_history.append((f"after_agg({best_agg})", cur_val_rmse))
 
     # ── 2. π threshold (§9, ZIT τ_π는 호출부에서 use_pi_threshold=False) ──
