@@ -65,12 +65,12 @@ def lgbm_space(trial):
     - tweedie_variance_power: suggest_float(1.05, 1.95) — strategy.md §6
     """
     params = dict(
-        n_estimators=trial.suggest_int("n_estimators", 400, 2500),
-        learning_rate=trial.suggest_float("learning_rate", 0.005, 0.05, log=True),
-        num_leaves=trial.suggest_int("num_leaves", 64, 384),
-        max_depth=trial.suggest_int("max_depth", 7, 14),
+        n_estimators=trial.suggest_int("n_estimators", 200, 4000),
+        learning_rate=trial.suggest_float("learning_rate", 0.003, 0.08, log=True),
+        num_leaves=trial.suggest_int("num_leaves", 64, 600),
+        max_depth=trial.suggest_int("max_depth", 7, 18),
         min_child_samples=trial.suggest_int("min_child_samples", 50, 380),
-        subsample=trial.suggest_float("subsample", 0.60, 0.95),
+        subsample=trial.suggest_float("subsample", 0.50, 1.0),
         subsample_freq=trial.suggest_int("subsample_freq", 0, 5),
         colsample_bytree=trial.suggest_float("colsample_bytree", 0.20, 0.80),
         reg_alpha=trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
@@ -90,7 +90,7 @@ def lgbm_space(trial):
     elif obj_choice == "tweedie":
         params["objective"] = "tweedie"
         params["tweedie_variance_power"] = trial.suggest_float(
-            "tweedie_variance_power", 1.05, 1.95
+            "tweedie_variance_power", 1.05, 1.99
         )
     # 'regression' 선택 시 기본값(MSE) 유지
     return params
@@ -103,15 +103,15 @@ def xgb_space(trial):
     - tweedie_variance_power: suggest_float(1.05, 1.95)
     """
     params = dict(
-        n_estimators=trial.suggest_int("n_estimators", 700, 2200),
-        learning_rate=trial.suggest_float("learning_rate", 0.018, 0.073, log=True),
-        max_depth=trial.suggest_int("max_depth", 7, 14),
-        min_child_weight=trial.suggest_float("min_child_weight", 0.31, 1.24, log=True),
+        n_estimators=trial.suggest_int("n_estimators", 400, 3000),
+        learning_rate=trial.suggest_float("learning_rate", 0.005, 0.10, log=True),
+        max_depth=trial.suggest_int("max_depth", 7, 18),
+        min_child_weight=trial.suggest_float("min_child_weight", 0.1, 5.0, log=True),
         subsample=trial.suggest_float("subsample", 0.55, 0.95),
-        colsample_bytree=trial.suggest_float("colsample_bytree", 0.45, 0.95),
-        reg_alpha=trial.suggest_float("reg_alpha", 0.0084, 0.0336, log=True),
-        reg_lambda=trial.suggest_float("reg_lambda", 1.95e-6, 7.78e-6, log=True),
-        gamma=trial.suggest_float("gamma", 1.92e-6, 7.67e-6, log=True),
+        colsample_bytree=trial.suggest_float("colsample_bytree", 0.30, 0.95),
+        reg_alpha=trial.suggest_float("reg_alpha", 1e-4, 0.1, log=True),
+        reg_lambda=trial.suggest_float("reg_lambda", 1e-7, 1e-4, log=True),
+        gamma=trial.suggest_float("gamma", 1e-7, 1e-4, log=True),
         random_state=SEED,
         n_jobs=-1,
         tree_method="hist",
@@ -123,7 +123,7 @@ def xgb_space(trial):
     if obj_choice == "reg:tweedie":
         params["objective"] = "reg:tweedie"
         params["tweedie_variance_power"] = trial.suggest_float(
-            "tweedie_variance_power", 1.05, 1.95
+            "tweedie_variance_power", 1.05, 1.99
         )
     else:
         # reg:squarederror / count:poisson 그대로
@@ -138,11 +138,11 @@ def catboost_space(trial):
     - Tweedie variance_power: suggest_float(1.05, 1.95)
     """
     params = dict(
-        iterations=trial.suggest_int("iterations", 800, 2000),
-        learning_rate=trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-        depth=trial.suggest_int("depth", 6, 10),
-        l2_leaf_reg=trial.suggest_float("l2_leaf_reg", 5.0, 30.0, log=True),
-        random_strength=trial.suggest_float("random_strength", 0.1, 5.0, log=True),
+        iterations=trial.suggest_int("iterations", 800, 3500),
+        learning_rate=trial.suggest_float("learning_rate", 0.003, 0.2, log=True),
+        depth=trial.suggest_int("depth", 6, 12),
+        l2_leaf_reg=trial.suggest_float("l2_leaf_reg", 1.0, 60.0, log=True),
+        random_strength=trial.suggest_float("random_strength", 0.05, 5.0, log=True),
         bagging_temperature=trial.suggest_float("bagging_temperature", 0.0, 1.0),
         border_count=trial.suggest_int("border_count", 64, 254),
         rsm=trial.suggest_float("rsm", 0.4, 1.0),
@@ -158,21 +158,24 @@ def catboost_space(trial):
     elif loss_choice == "Poisson":
         params["loss_function"] = "Poisson"
     elif loss_choice == "Tweedie":
-        power = trial.suggest_float("tweedie_variance_power", 1.05, 1.95)
+        power = trial.suggest_float("tweedie_variance_power", 1.05, 1.99)
         params["loss_function"] = f"Tweedie:variance_power={power}"
     return params
 
 
 def et_space(trial):
     """ExtraTrees 회귀 탐색 공간 (strategy.md §7.3 Evidence-driven Wide)."""
+    mf_kind = trial.suggest_categorical("max_features_kind", ["sqrt", "frac"])
+    if mf_kind == "sqrt":
+        max_features_val = "sqrt"
+    else:
+        max_features_val = trial.suggest_float("max_features_frac", 0.03, 0.5)
     return dict(
-        n_estimators=trial.suggest_int("n_estimators", 300, 800),
-        max_depth=trial.suggest_int("max_depth", 15, 25),
-        min_samples_leaf=trial.suggest_int("min_samples_leaf", 2, 20),
-        min_samples_split=trial.suggest_int("min_samples_split", 15, 50),
-        max_features=trial.suggest_categorical(
-            "max_features", ["sqrt"]
-        ),
+        n_estimators=trial.suggest_int("n_estimators", 300, 1500),
+        max_depth=trial.suggest_int("max_depth", 10, 40),
+        min_samples_leaf=trial.suggest_int("min_samples_leaf", 2, 60),
+        min_samples_split=trial.suggest_int("min_samples_split", 2, 100),
+        max_features=max_features_val,
         bootstrap=True,
         random_state=SEED,
         n_jobs=-1,
@@ -388,9 +391,9 @@ def lgbm_clf_space(trial):
     """
     return dict(
         n_estimators=trial.suggest_int("n_estimators", 100, 2000),
-        learning_rate=trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
-        num_leaves=trial.suggest_int("num_leaves", 8, 320),
-        max_depth=trial.suggest_int("max_depth", 3, 14),
+        learning_rate=trial.suggest_float("learning_rate", 0.003, 0.15, log=True),
+        num_leaves=trial.suggest_int("num_leaves", 8, 512),
+        max_depth=trial.suggest_int("max_depth", 3, 18),
         min_child_samples=trial.suggest_int("min_child_samples", 30, 400),
         subsample=trial.suggest_float("subsample", 0.5, 1.0),
         subsample_freq=1,
@@ -417,9 +420,9 @@ def xgb_clf_space(trial):
     """
     return dict(
         n_estimators=trial.suggest_int("n_estimators", 100, 1500),
-        learning_rate=trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
-        max_depth=trial.suggest_int("max_depth", 3, 10),
-        min_child_weight=trial.suggest_float("min_child_weight", 0.5, 30.0, log=True),
+        learning_rate=trial.suggest_float("learning_rate", 0.003, 0.15, log=True),
+        max_depth=trial.suggest_int("max_depth", 3, 14),
+        min_child_weight=trial.suggest_float("min_child_weight", 0.5, 100.0, log=True),
         subsample=trial.suggest_float("subsample", 0.5, 1.0),
         colsample_bytree=trial.suggest_float("colsample_bytree", 0.3, 1.0),
         reg_alpha=trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
@@ -443,11 +446,11 @@ def catboost_clf_space(trial):
     분류 친화 조정: lr 상한 0.15, depth 상한 10, auto_class_weights categorical.
     """
     p = dict(
-        iterations=trial.suggest_int("iterations", 100, 2500),
-        learning_rate=trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
-        depth=trial.suggest_int("depth", 3, 10),
-        l2_leaf_reg=trial.suggest_float("l2_leaf_reg", 1.0, 30.0, log=True),
-        random_strength=trial.suggest_float("random_strength", 0.1, 10.0, log=True),
+        iterations=trial.suggest_int("iterations", 100, 3000),
+        learning_rate=trial.suggest_float("learning_rate", 0.003, 0.15, log=True),
+        depth=trial.suggest_int("depth", 3, 12),
+        l2_leaf_reg=trial.suggest_float("l2_leaf_reg", 1.0, 60.0, log=True),
+        random_strength=trial.suggest_float("random_strength", 0.05, 10.0, log=True),
         bagging_temperature=trial.suggest_float("bagging_temperature", 0.0, 1.0),
         border_count=trial.suggest_int("border_count", 32, 192),
         rsm=trial.suggest_float("rsm", 0.3, 1.0),
@@ -466,12 +469,17 @@ def et_clf_space(trial):
 
     분류 친화 조정: n_estimators 상한 800, class_weight categorical.
     """
+    mf_kind = trial.suggest_categorical("max_features_kind", ["sqrt", "frac"])
+    if mf_kind == "sqrt":
+        max_features_val = "sqrt"
+    else:
+        max_features_val = trial.suggest_float("max_features_frac", 0.03, 0.5)
     p = dict(
-        n_estimators=trial.suggest_int("n_estimators", 300, 800),
-        max_depth=trial.suggest_int("max_depth", 10, 22),
-        min_samples_leaf=trial.suggest_int("min_samples_leaf", 5, 40),
+        n_estimators=trial.suggest_int("n_estimators", 300, 1500),
+        max_depth=trial.suggest_int("max_depth", 10, 40),
+        min_samples_leaf=trial.suggest_int("min_samples_leaf", 2, 40),
         min_samples_split=trial.suggest_int("min_samples_split", 2, 40),
-        max_features=trial.suggest_categorical("max_features", ["sqrt"]),
+        max_features=max_features_val,
         bootstrap=True,
         random_state=SEED,
         n_jobs=-1,
