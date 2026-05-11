@@ -1,30 +1,33 @@
 """
-Final 파이프라인 — HPO (Optuna) + Best Trial Refit
+HPO (Optuna) + Best Trial Refit + 산출물 저장.
 
-- die-level 학습, unit-level RMSE objective (OOF 예측을 unit 집계 후 RMSE)
-- KFold split은 반드시 **unit 단위** (같은 unit의 4 die가 train/val에 섞이면 leakage)
-- 모델 선택(categorical) + HP 동시 탐색 지원 (models_to_search 리스트)
-- extra_feature 지원: 경로 B에서 `(1-π_zit)` 컬럼을 OOF 기반으로 삽입
-- refit_best: best trial을 K-fold로 재학습, OOF/val/test 예측 저장
-- ZITboost 한정: π/μ 컴포넌트도 함께 반환 (predict_components 호출)
+이 모듈이 하는 일:
+- die-level로 모델을 학습하되, objective는 unit-level RMSE다 (die 예측을 unit으로 집계한 뒤 RMSE).
+- KFold split은 항상 unit ID 단위 — 같은 unit의 4 die가 train/val에 섞이면 leakage라서 절대 금지.
+- run_hpo: 한 모델의 HP를 Optuna로 탐색 (objective = train OOF unit RMSE), 옵션으로 매 trial의 val/test RMSE도 기록.
+- refit_best: best HP로 n_folds(기본 5)-fold 재학습 → die-level OOF / val / test 예측 (val·test는 fold 평균) 생성. ZITboost면 π·μ도 함께.
+- save_artifacts: refit 결과를 디스크에 저장 (fold_models.pkl + best_params.json + die/unit CSV 6개), postprocess 튜닝도 옵션.
+- run_clf_hpo / refit_clf_best / save_clf_artifacts: Two-Stage Stage 1(분류) 버전. objective = unit RMSE(unit평균확률 × E[Y|Y>0]).
+- narrow_around / sample_from_space / enqueue_anchor: anchor(1차 best HP) 주변으로 좁힌 탐색 공간 만들기 + 첫 trial 강제 헬퍼.
+
+부가 기능 키워드:
+- extra_feature_* : reg 입력 X 뒤에 die-level 컬럼 1개를 더 붙임 (예: "1-π" 컬럼).
+- multiplier_*    : 최종 예측을 reg_pred × multiplier 로 만듦 (정석 Two-Stage 경로 B에서 (1-π)를 곱함). objective RMSE도 곱셈 후 값으로 계산 → "HPO가 최적화하는 식 == 최종 제출 식".
+- y_positive_only : fit 데이터에서 y==0 die를 제외 (Stage 2 회귀 = "Y>0만으로 학습 → E[Y|Y>0,x] 예측").
+- target_transform_fn/inverse_fn : 학습은 변환 공간(예: log1p), 출력은 원본 공간. 단 objective/loss_function 문자열이 tweedie 계열이면 자동 OFF (tweedie가 이미 right-skew를 모델링 → log1p와 이중 변환 방지). zitboost는 내부가 ZI-Tweedie라도 그 키가 hp에 없어 자동 OFF 대상이 아니므로, 같이 쓸 땐 호출부에서 transform을 직접 끄거나 켜야 한다.
 
 사용법
 ------
-    # HPO
     res = hpo.run_hpo(
         xs_train, ys_train_unit, feat_cols,
-        models_to_search=['lgbm', 'xgb', 'catboost', 'et', 'enet'],
-        n_trials=100, n_folds=5,
-        study_name='final-C',  storage=None,
+        model_name='lgbm', n_trials=100, n_folds=5,
+        study_name='exp', storage='sqlite:///...db',
     )
-    study       = res['study']
-    best_params = res['best_params']
-    best_model  = res['model_name']
+    study, best_params = res['study'], res['best_params']
 
-    # Refit
     final = hpo.refit_best(
         xs_train, xs_val, xs_test, ys_train_unit, feat_cols,
-        model_name=best_model, best_params=best_params, n_folds=5,
+        model_name='lgbm', best_params=best_params, n_folds=5,
     )
 """
 import numpy as np
@@ -38,19 +41,17 @@ from . import models as _models
 from . import scaler as _scaler
 
 
-# ═════════════════════════════════════════════════════════════
-# Unit-level KFold split → die-level index
-# ═════════════════════════════════════════════════════════════
+# ------------------------------------------------------------
+# unit 단위 KFold split → die-level mask
+# ------------------------------------------------------------
 
 def _make_unit_folds(unit_ids, n_splits, seed=SEED):
-    """unit id 배열을 n_splits fold로 나눔.
+    """unit ID 배열을 n_splits개 fold로 나눠 [(train_units, val_units), ...] 반환.
 
-    Returns
-    -------
-    list of (train_units, val_units) — 각 tuple은 np.array
+    여기서 나눈 건 unit이지 die가 아니다 — die mask는 _die_mask_from_units로 따로 만든다.
     """
     unique = np.asarray(unit_ids)
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)   # seed 고정 → trial 간 동일 분할
     folds = []
     for tr_idx, vl_idx in kf.split(unique):
         folds.append((unique[tr_idx], unique[vl_idx]))
@@ -58,58 +59,46 @@ def _make_unit_folds(unit_ids, n_splits, seed=SEED):
 
 
 def _die_mask_from_units(xs, unit_set):
-    """xs[KEY_COL]이 unit_set에 포함된 die-level mask."""
+    """xs(die-level)에서 ufs_serial이 unit_set에 들어 있는 행의 불리언 마스크."""
     return xs[KEY_COL].isin(unit_set).values
 
 
 def _broadcast_y_to_die(xs, ys_unit):
-    """unit-level y → die-level y (xs의 ufs_serial 순서 기준)."""
+    """unit-level y를 die-level로 펼침 — 각 die는 자기 unit의 health 값을 target으로 가짐 (xs 행 순서대로)."""
     y_map = ys_unit.set_index(KEY_COL)[TARGET_COL]
     return xs[KEY_COL].map(y_map).values.astype(float)
 
 
 def _aggregate_die_to_unit(xs, die_pred):
-    """die-level 예측 → unit-level (mean 집계).
-
-    Returns
-    -------
-    pd.DataFrame  columns=[KEY_COL, 'pred']  (원본 unit 순서 보존)
-    """
+    """die-level 예측 → unit-level (단순 평균). 반환: [KEY_COL, 'pred'] DataFrame (원본 unit 순서 보존)."""
     df = pd.DataFrame({KEY_COL: xs[KEY_COL].values, "pred": die_pred})
     grp = df.groupby(KEY_COL, sort=False)["pred"].mean().reset_index()
     return grp
 
 
-# ═════════════════════════════════════════════════════════════
-# Fit + Predict (모델별 분기 처리)
-# ═════════════════════════════════════════════════════════════
+# ------------------------------------------------------------
+# fit + predict (모델별 분기) / N_JOBS 주입 / X 행렬 구성
+# ------------------------------------------------------------
 
-# ═════════════════════════════════════════════════════════════
-# N_JOBS 주입 헬퍼 (strategy_common §8 정책 정상화)
-# ═════════════════════════════════════════════════════════════
-# 노트북 최상단의 단일 N_JOBS 변수를 모델별 적절한 키(`n_jobs` / `thread_count`)로
-# 주입한다. n_jobs=None이면 라이브러리 default(보통 -1, 전체 코어)로 폴백 →
-# 기존 (호출자가 미전달) 동작과 호환.
-
-_NJOBS_KEYED   = {"lgbm", "xgb", "et", "zitboost"}     # n_jobs 키 사용
-_THREADCOUNT   = {"catboost"}                          # thread_count 키 사용
-# enet (sklearn ElasticNet) 은 n_jobs 파라미터 자체가 없음 → 무시
+# 노트북 상단의 단일 N_JOBS 변수를 라이브러리마다 다른 키로 주입한다.
+_NJOBS_KEYED   = {"lgbm", "xgb", "et", "zitboost"}   # 'n_jobs' 키를 쓰는 모델들
+_THREADCOUNT   = {"catboost"}                        # CatBoost는 'thread_count'
+# enet(sklearn ElasticNet)은 병렬 인자가 아예 없음 → 무시
 
 
 def _inject_n_jobs(model_name, params, n_jobs):
-    """모델별 적절한 키로 N_JOBS 덮어쓰기 (override).
+    """모델별 적절한 키로 N_JOBS를 덮어쓴 새 dict 반환 (n_jobs=None이면 그대로).
 
-    - None이면 무처리 (search_space의 -1 또는 라이브러리 default 유지)
     - lgbm/xgb/et/zitboost: params['n_jobs'] = n_jobs
-    - catboost: params['thread_count'] = n_jobs (n_jobs 키가 있으면 제거)
-    - enet: 무시
+    - catboost: params['thread_count'] = n_jobs (혹시 들어 있던 n_jobs 키는 제거)
+    - enet: 아무것도 안 함
     """
     if n_jobs is None:
-        return params
+        return params   # 미지정 → search space의 -1(전체 코어) 등 기존 값 유지
     p = dict(params)
     if model_name in _THREADCOUNT:
         p["thread_count"] = int(n_jobs)
-        p.pop("n_jobs", None)   # 혹시 베이크된 n_jobs는 catboost와 충돌하지 않지만 정리
+        p.pop("n_jobs", None)
     elif model_name in _NJOBS_KEYED:
         p["n_jobs"] = int(n_jobs)
     return p
@@ -120,7 +109,7 @@ def _fit_predict_fold(
     X_tr, y_tr, X_vl,
     return_components=False,
 ):
-    """단일 fold 학습 + val 예측. ZITboost는 필요 시 (π, μ, pred) 추가 반환.
+    """fold 하나 학습 + val 예측. ZITboost면 return_components=True 시 (π, μ)도 같이.
 
     Returns
     -------
@@ -137,14 +126,9 @@ def _fit_predict_fold(
 
 
 def _build_X(xs_split, feat_cols, extra_feature=None):
-    """feat_cols 기반 X matrix 구성. extra_feature는 die 인덱스에 맞는 1D array.
+    """feat_cols로 X 행렬을 만들고, extra_feature((name, 1D array))가 있으면 한 컬럼 더 붙임.
 
-    Parameters
-    ----------
-    xs_split : DataFrame (die-level)
-    feat_cols : list[str]
-    extra_feature : (name, np.ndarray) or None
-        die-level 배열. len(extra_feature[1]) == len(xs_split).
+    extra_feature 배열 길이는 xs_split 행 수와 같아야 함 (die 단위로 정렬돼 있어야 함).
     """
     X = xs_split[feat_cols].values
     if extra_feature is not None:
@@ -154,86 +138,64 @@ def _build_X(xs_split, feat_cols, extra_feature=None):
             raise ValueError(
                 f"extra_feature length {arr.shape[0]} != xs_split length {len(xs_split)}"
             )
-        X = np.hstack([X, arr])
+        X = np.hstack([X, arr])   # X 오른쪽에 한 컬럼 추가
     return X
 
 
-# ═════════════════════════════════════════════════════════════
-# Optuna HPO
-# ═════════════════════════════════════════════════════════════
+# ------------------------------------------------------------
+# Optuna HPO (회귀)
+# ------------------------------------------------------------
 
 def run_hpo(
     xs_train, ys_train_unit, feat_cols,
     model_name,
     n_trials=100, n_folds=5,
-    extra_feature_train=None,     # (name, die-level array) or None  — reg 입력 피처로 추가
-    multiplier_train=None,        # die-level array or None  — 최종 예측 (1-π)×reg_pred 곱셈용
-    y_positive_only=False,        # True면 fit 데이터에서 y==0 필터링 (정석 Two-Stage)
-    target_transform_fn=None,     # y → y_transformed (fit 전 적용)
-    target_inverse_fn=None,       # y_transformed → y (predict 후 적용)
+    extra_feature_train=None,     # (name, die-level array) or None — reg 입력 X에 컬럼 추가
+    multiplier_train=None,        # die-level array or None — 최종 예측 = reg_pred × multiplier (예: 1-π)
+    y_positive_only=False,        # True면 fit 데이터에서 y==0 die 제외 (정석 Two-Stage Stage 2)
+    target_transform_fn=None,     # y → y_transformed (fit 전 적용, 예: np.log1p)
+    target_inverse_fn=None,       # y_transformed → y (predict 후 역변환, 예: np.expm1+clip)
     study_name=None, storage=None,
-    resume_study=False,           # True로 명시해야만 기존 study에 trial append
+    resume_study=False,           # True여야만 기존 study에 trial을 이어 붙임 (아니면 중복 study는 에러)
     seed=SEED, direction="minimize",
     show_progress_bar=True,
     user_attrs=None,
-    space_variant="default",      # 'default' | 'zitreg' — models.get_search_space 의 variant
-    # ── strategy_common §4·§5·§25 ──
-    sampler=None,                 # None이면 TPESampler(seed=seed). §4: TPESampler(seed=None, multivariate=True, group=True)
-    pruner=None,                  # None이면 사용 안 함. §4: MedianPruner(n_warmup_steps=...)
-    enqueue_trials=None,          # list[dict] — anchor 첫 trial 강제 (§5)
-    timeout=None,                 # 초 단위, None=무제한 (§25)
-    n_jobs=None,                  # 모델 학습 병렬도 (strategy_common §8). None이면 라이브러리 default(-1)
-    # ── trial별 holdout 평가 (옵션) ──
-    # xs_val/ys_val_unit 둘 다 주면 매 trial 마다 fold-평균 val 예측 → val_rmse 기록.
-    # extra_feature_val/multiplier_val 은 *_train 과 동일한 의미로 val 측에 적용.
+    space_variant="default",      # 'default' | 'zitreg' — models.get_search_space의 variant
+    sampler=None,                 # None이면 TPESampler(seed=seed, multivariate=True, group=True)
+    pruner=None,                  # None이면 pruning 없음
+    enqueue_trials=None,          # list[dict] — anchor(1차 best HP)를 첫 trial로 강제
+    timeout=None,                 # 초 단위, None=무제한 (Colab 타임아웃 대비)
+    n_jobs=None,                  # 모델 학습 병렬도. None이면 라이브러리 default(-1)
+    # 매 trial마다 holdout 평가 (옵션) — xs_val/ys_val_unit 둘 다 주면 fold 평균 val 예측 → val_rmse 기록.
     xs_val=None, ys_val_unit=None,
     extra_feature_val=None, multiplier_val=None,
     xs_test=None, ys_test_unit=None,
     extra_feature_test=None, multiplier_test=None,
 ):
-    """die-level KFold OOF → unit RMSE를 최소화하는 Optuna study 실행.
-
-    **단일 모델 HPO** — 모델 선택은 노트북 레벨에서 하고,
-    한 study는 한 모델의 HP만 탐색한다.
+    """die-level KFold OOF → unit RMSE를 최소화하는 Optuna study 실행 (단일 모델).
 
     Parameters
     ----------
     xs_train : DataFrame (die-level, KEY_COL 컬럼 포함)
-    ys_train_unit : DataFrame (unit-level, KEY_COL + TARGET_COL)  **원본 스케일**
+    ys_train_unit : DataFrame (unit-level, KEY_COL + TARGET_COL) — **원본 스케일**
     feat_cols : list[str]
-    model_name : str
-        MODEL_REGISTRY 이름 1개. 'lgbm' / 'xgb' / 'catboost' / 'et' / 'enet' / 'zitboost'.
+    model_name : str — 'lgbm' / 'xgb' / 'catboost' / 'et' / 'enet' / 'zitboost'
     n_trials, n_folds : int
-    extra_feature_train : (name, array) or None
-        reg 입력에 die-level 컬럼을 1개 추가.
-    multiplier_train : array or None
-        최종 예측을 `reg_pred × multiplier_train` 형태로 바꾼다. 경로 B 정석
-        Two-Stage 에서 `(1-π_zit)` 를 전달. objective RMSE 도 곱셈 후 값으로 계산 →
-        "HPO 가 최적화하는 수식 == 최종 제출 수식" 일관성 확보.
-    y_positive_only : bool
-        True 면 fold 학습 데이터에서 `y == 0` 인 die 를 제외. 정석 Two-Stage 의
-        Stage 2 회귀 정의(“Y>0 서브셋으로 학습 → E[Y|Y>0,x] 예측”)를 따름.
-        multiplier_train 과 함께 쓰면 최종 E[Y] = P(Y>0|x) × E[Y|Y>0,x].
-    target_transform_fn : callable or None
-        y → y_transformed (모델 fit 입력용). 예: np.log1p.
-        None이면 원본 그대로.
-    target_inverse_fn : callable or None
-        y_transformed → y (모델 predict 출력 역변환용). 예: np.expm1 + clip.
-        `target_transform_fn` 있으면 반드시 쌍으로 제공.
-    study_name, storage : Optuna study 옵션 (SQLite 경로 등)
-    user_attrs : dict 저장할 메타데이터
-    xs_val, ys_val_unit : DataFrame, DataFrame (optional, 짝)
-        주면 매 trial 마다 fold 평균 val 예측 → unit RMSE 계산하여
-        `trial.set_user_attr("val_rmse", ...)` 로 기록.
-    xs_test, ys_test_unit : (optional, 짝) 동일하게 test_rmse 기록.
-    extra_feature_val/test, multiplier_val/test :
-        *_train 과 동일한 의미로 val/test 측에 적용.
-        `extra_feature_train` 있을 때 *_val/test 도 모양/길이 맞춰 제공해야 함.
+    extra_feature_train : (name, array) or None — reg 입력에 die-level 컬럼 1개 추가
+    multiplier_train : array or None — 최종 예측을 reg_pred × multiplier로. (정석 Two-Stage 경로 B에서 (1-π)).
+    y_positive_only : bool — True면 fold 학습 데이터에서 y==0 die 제외 → E[Y|Y>0,x] 학습
+    target_transform_fn / target_inverse_fn : callable or None — 학습/출력 공간 변환쌍 (반드시 둘 다 주거나 둘 다 None)
+    study_name, storage : Optuna study 옵션
+    user_attrs : dict — study에 저장할 메타데이터
+    xs_val, ys_val_unit : (옵션, 짝) — 주면 매 trial의 val unit RMSE 기록
+    xs_test, ys_test_unit : (옵션, 짝) — 동일하게 test RMSE 기록
+    extra_feature_val/test, multiplier_val/test : *_train과 동일 의미로 val/test에 적용
 
     Returns
     -------
     dict  {'study', 'best_params', 'model_name', 'best_value'}
     """
+    # transform/inverse는 반드시 쌍으로, eval set들도 짝으로 — 한쪽만 주면 에러
     if (target_transform_fn is None) != (target_inverse_fn is None):
         raise ValueError("target_transform_fn / target_inverse_fn은 쌍으로 제공")
     if (xs_val is None) != (ys_val_unit is None):
@@ -242,22 +204,21 @@ def run_hpo(
         raise ValueError("xs_test / ys_test_unit 은 쌍으로 제공해야 함")
     space_fn = _models.get_search_space(model_name, variant=space_variant)
 
-    # unit 수준 KFold split을 trial 전체에서 재사용 (공정성)
+    # unit 단위 KFold를 한 번 만들어 모든 trial이 공유 (HP 비교의 공정성). die mask도 미리 계산해 둠 (속도).
     unit_ids = ys_train_unit[KEY_COL].unique()
     folds = _make_unit_folds(unit_ids, n_folds, seed)
-    # die-level mask 미리 계산 (성능)
     fold_masks = [
         (_die_mask_from_units(xs_train, set(tr)),
          _die_mask_from_units(xs_train, set(vl)))
         for tr, vl in folds
     ]
 
-    y_die_orig = _broadcast_y_to_die(xs_train, ys_train_unit)
-    # NOTE: y_die_fit은 trial 별로 결정 (tweedie 계열이면 transform OFF — strategy.md §4)
+    y_die_orig = _broadcast_y_to_die(xs_train, ys_train_unit)   # die-level 정답 (원본 스케일)
+    # 학습용 y(objective 안의 y_die_fit_local)는 trial별로 결정한다 — tweedie 계열 loss면 transform을 끄기 때문 (아래 objective 안에서)
     X_full      = _build_X(xs_train, feat_cols, extra_feature_train)
-    y_true_unit = ys_train_unit.set_index(KEY_COL)[TARGET_COL]   # 원본 스케일
+    y_true_unit = ys_train_unit.set_index(KEY_COL)[TARGET_COL]   # unit-level 정답 (원본 스케일)
 
-    # ── eval set X 사전 구성 (trial 전체에서 1회만) ──
+    # val/test의 X와 정답은 trial 전체에서 한 번만 구성
     X_val_full = (_build_X(xs_val, feat_cols, extra_feature_val)
                   if xs_val is not None else None)
     X_test_full = (_build_X(xs_test, feat_cols, extra_feature_test)
@@ -267,7 +228,7 @@ def run_hpo(
     y_test_true_unit = (ys_test_unit.set_index(KEY_COL)[TARGET_COL]
                         if ys_test_unit is not None else None)
 
-    # multiplier 배열 검증 (train/val/test 공통)
+    # multiplier 배열이 들어왔으면 길이가 해당 split die 수와 맞는지 검증하고 float 1D로 정규화
     def _check_mult(arr, n, name):
         if arr is None:
             return None
@@ -284,19 +245,18 @@ def run_hpo(
                                     "multiplier_test")
 
     def _is_tweedie_hp(hp):
-        """sample된 hp에 tweedie 계열 손실함수가 들어있으면 True.
-        EXPERIMENT_LOG §5.1: tweedie 분포는 right-skew 자체 모델링 → log1p 와 충돌.
+        """이 trial이 고른 hp에 tweedie 계열 손실(objective/loss_function)이 들어 있으면 True.
+
+        tweedie는 right-skew를 분포 자체로 모델링하므로 log1p target과 같이 쓰면 이중 변환이 되어버린다.
         """
         s = str(hp.get("objective") or hp.get("loss_function") or "")
         return s.startswith("tweedie") or s.startswith("reg:tweedie") or s.lower().startswith("tweedie")
 
     def objective(trial):
-        hp = space_fn(trial)
-        # N_JOBS 주입 (strategy_common §8): search_space의 -1 베이크값을 노트북 N_JOBS로 override
-        hp = _inject_n_jobs(model_name, hp, n_jobs)
+        hp = space_fn(trial)                                  # 이 trial의 HP 샘플
+        hp = _inject_n_jobs(model_name, hp, n_jobs)           # search space의 -1을 노트북 N_JOBS로 덮어씀
 
-        # ── trial별 target_transform 분기 (strategy.md §4, EXPERIMENT_LOG §5.1) ──
-        # tweedie 계열 loss가 sample되면 log1p OFF (이중 변환 방지)
+        # tweedie 계열 loss면 target_transform을 끈다 (이중 변환 방지)
         if _is_tweedie_hp(hp):
             eff_transform_fn = None
             eff_inverse_fn   = None
@@ -308,7 +268,7 @@ def run_hpo(
         y_die_fit_local = eff_transform_fn(y_die_orig) if eff_transform_fn else y_die_orig
 
         def _eval_split_rmse_local(xs_split, die_pred_accum, multiplier, y_true_unit_split):
-            """fold 평균된 die 예측 → trial별 inverse → multiplier → unit 집계 → RMSE."""
+            """fold 평균된 die 예측 → (있으면) 역변환 → (있으면) ×multiplier → unit 집계 → unit RMSE."""
             pred = eff_inverse_fn(die_pred_accum) if eff_inverse_fn else die_pred_accum
             if multiplier is not None:
                 pred = pred * multiplier
@@ -316,12 +276,12 @@ def run_hpo(
             aligned = unit.set_index(KEY_COL)["pred"].loc[y_true_unit_split.index]
             return float(np.sqrt(np.mean((aligned.values - y_true_unit_split.values) ** 2)))
 
-        oof = np.full(len(xs_train), np.nan)
-        val_pred_accum  = (np.zeros(len(xs_val))  if xs_val  is not None else None)
+        oof = np.full(len(xs_train), np.nan)                  # train 각 die의 OOF 예측 버퍼
+        val_pred_accum  = (np.zeros(len(xs_val))  if xs_val  is not None else None)   # fold 합산용
         test_pred_accum = (np.zeros(len(xs_test)) if xs_test is not None else None)
 
         for tr_mask, vl_mask in fold_masks:
-            # ── 학습 데이터 필터링 (정석 Two-Stage: Y>0 만) ──
+            # 정석 Two-Stage(Stage 2): fit 데이터에서 y==0 die 제외
             if y_positive_only:
                 fit_mask = tr_mask & (y_die_orig > 0)
             else:
@@ -329,7 +289,7 @@ def run_hpo(
             X_tr, y_tr = X_full[fit_mask], y_die_fit_local[fit_mask]
             X_vl       = X_full[vl_mask]
 
-            # scaler: enet 일 때만. fit-on-train → val/test 도 동일 변환
+            # enet이면 이 fold의 train 기준으로 RobustScaler 통계량(median/IQR)을 잡아 → 이 fold holdout + 외부 val + 외부 test 전부에 동일 적용
             if _scaler.needs_scaling(model_name):
                 med = np.median(X_tr, axis=0)
                 q75 = np.quantile(X_tr, 0.75, axis=0)
@@ -344,9 +304,9 @@ def run_hpo(
                 X_eval_t = X_test_full
 
             res = _fit_predict_fold(model_name, hp, X_tr, y_tr, X_vl)
-            oof[vl_mask] = res["pred"]
+            oof[vl_mask] = res["pred"]                         # 이 fold의 검증분 OOF 채움
 
-            # ── eval set 예측 (fold 평균) ──
+            # val/test 예측은 n_folds개 fold 모델의 평균 (각 fold 예측에 1/n_folds씩 누적)
             if X_eval_v is not None:
                 val_pred_accum  += res["model"].predict(X_eval_v)  / n_folds
             if X_eval_t is not None:
@@ -355,12 +315,11 @@ def run_hpo(
         if np.isnan(oof).any():
             raise RuntimeError("OOF has NaN — fold coverage bug")
 
-        # ── train OOF RMSE (objective 반환값) ──
+        # objective 반환값 = train OOF unit RMSE (역변환·곱셈까지 반영한 "최종 예측" 기준)
         train_rmse = _eval_split_rmse_local(xs_train, oof, multiplier_train, y_true_unit)
-        # 명시적으로 trial.set_user_attr 에도 기록 — Optuna dashboard 에서 라벨링 명확화
-        trial.set_user_attr("train_rmse", train_rmse)
+        trial.set_user_attr("train_rmse", train_rmse)         # dashboard에서 라벨 명확하게
 
-        # ── val/test RMSE (옵션) ──
+        # val/test RMSE는 참고용으로 user_attr에 기록 (objective에는 안 들어감)
         if val_pred_accum is not None:
             val_rmse = _eval_split_rmse_local(xs_val, val_pred_accum,
                                               multiplier_val, y_val_true_unit)
@@ -372,10 +331,8 @@ def run_hpo(
 
         return train_rmse
 
-    # resume_study=False 기본: 같은 study_name/storage 조합이 이미 있으면 에러를
-    # 명시적으로 내어 trial 누적으로 best 값이 오염되는 것을 막는다.
-    # sampler default: strategy_common §4에 따라 multivariate=True, group=True 적용.
-    # seed는 함수 인자 그대로 (None 권장 — 다양성 확보; 노트북이 명시 주입 권장).
+    # resume_study=False면 같은 study_name/storage가 이미 있을 때 에러를 내서 trial 누적으로 best가 오염되는 걸 막는다.
+    # (load_if_exists는 storage가 있고 resume_study=True일 때만 켜짐)
     study = optuna.create_study(
         direction=direction,
         study_name=study_name,
@@ -384,14 +341,13 @@ def run_hpo(
         sampler=sampler if sampler is not None else optuna.samplers.TPESampler(
             seed=seed, multivariate=True, group=True
         ),
-        pruner=pruner,    # None이면 NopPruner default (Optuna 자동)
+        pruner=pruner,    # None이면 Optuna 기본(pruning 없음)
     )
     if user_attrs:
         for k, v in user_attrs.items():
             study.set_user_attr(k, v)
 
-    # ── anchor enqueue (§5): 첫 trial(들) 강제 ──
-    # RESUME(기존 db에 trial 존재) 시에는 재enqueue하지 않는다.
+    # anchor enqueue: 기존 trial이 하나도 없을 때만 (RESUME 시에는 중복 enqueue 안 함)
     if enqueue_trials and len(study.trials) == 0:
         for anchor in enqueue_trials:
             study.enqueue_trial(dict(anchor))
@@ -414,38 +370,36 @@ def run_hpo(
     }
 
 
-# ═════════════════════════════════════════════════════════════
+# ------------------------------------------------------------
 # Best Trial Refit (K-fold)
-# ═════════════════════════════════════════════════════════════
+# ------------------------------------------------------------
 
 def _hp_from_best(best_params, model_name, n_jobs=None):
-    """Optuna best_params dict → MODEL_REGISTRY에 전달할 kwargs.
+    """Optuna best_params dict → 모델 생성자에 넘길 kwargs로 정리.
 
-    새 search space (strategy.md §6):
-    - LGBM `objective`: 'regression' | 'poisson' | 'tweedie'  (+ tweedie 시 별도 'tweedie_variance_power' float)
-    - XGB  `objective`: 'reg:squarederror' | 'count:poisson' | 'reg:tweedie'  (+ tweedie 시 'tweedie_variance_power')
-    - CatBoost `loss_function`: 'RMSE' | 'Poisson' | 'Tweedie'  (+ Tweedie 시 'tweedie_variance_power' → 'Tweedie:variance_power=…' 변환)
+    탐색 공간이 objective를 categorical로 다루므로 여기서 모델 형식에 맞게 풀어 준다:
+    - LGBM/XGB objective: 그대로 (tweedie면 tweedie_variance_power도 그대로 전달)
+    - CatBoost loss_function: 'Tweedie' + tweedie_variance_power → 'Tweedie:variance_power=...' 문자열로 합침
+    또 search space가 이미 넣는 고정값(random_state, n_jobs=-1 등)을 refit 경로에서도 setdefault로 보장한다.
     """
     hp = dict(best_params)
-    # CatBoost: 'Tweedie' + 'tweedie_variance_power' → 'Tweedie:variance_power=...'
+    # CatBoost: 'Tweedie' + tweedie_variance_power → loss_function 문자열에 끼워 넣기
     if model_name == "catboost":
         loss = hp.get("loss_function")
         if loss == "Tweedie":
             power = hp.pop("tweedie_variance_power", 1.5)
             hp["loss_function"] = f"Tweedie:variance_power={power}"
-    # LGBM / XGB는 사이킷 키 그대로 ('tweedie_variance_power'는 그대로 model에 전달)
+    # LGBM / XGB는 키를 그대로 모델에 넘김
 
-    # 공통 고정값 (search space가 이미 주입했지만 refit 경로에서도 보장)
+    # 모델별 고정값 보강 (search space에서 빠졌을 수 있는 REUSE 경로 대비)
     from utils.config import SEED as _S
     if model_name in {"lgbm", "zitboost"}:
         hp.setdefault("random_state", _S)
         hp.setdefault("n_jobs", -1)
         hp.setdefault("verbose", -1)
         hp.setdefault("device", _models.DEVICE)
-        # subsample_freq 없으면 LGBM이 subsample을 무시함. search space에서도
-        # 고정 1을 넣지만 REUSE 모드 하위호환용으로 refit에서도 보장.
         if model_name == "lgbm":
-            hp.setdefault("subsample_freq", 1)
+            hp.setdefault("subsample_freq", 1)   # 없으면 LGBM이 subsample을 무시함
     elif model_name == "xgb":
         hp.setdefault("random_state", _S)
         hp.setdefault("n_jobs", -1)
@@ -464,8 +418,7 @@ def _hp_from_best(best_params, model_name, n_jobs=None):
         hp.setdefault("selection", "random")
         hp.setdefault("precompute", True)
 
-    # N_JOBS override (strategy_common §8): n_jobs 인자가 들어왔으면 모델별 키로 덮어쓰기
-    hp = _inject_n_jobs(model_name, hp, n_jobs)
+    hp = _inject_n_jobs(model_name, hp, n_jobs)   # n_jobs 인자가 들어왔으면 모델별 키로 덮어씀
     return hp
 
 
@@ -486,41 +439,36 @@ def refit_best(
     already_resolved=False,
     n_jobs=None,
 ):
-    """Best trial HP로 K-fold 재학습. die-level OOF + val/test 예측 (fold 평균) 생성.
+    """Best trial HP로 K-fold 재학습. die-level OOF + (fold 평균) val/test 예측 생성.
 
-    ZITboost일 때 π·μ 컴포넌트도 함께 반환.
-    target_transform_fn을 주면 학습은 transformed space, 출력은 original space.
-
-    multiplier_* + y_positive_only : 정석 Two-Stage (경로 B) 지원.
+    ZITboost면 π·μ 컴포넌트도 같이 반환한다.
+    target_transform_fn을 주면 학습은 변환 공간, 출력은 원본 공간. (HPO와 동일하게 tweedie loss면 자동 OFF.)
+    multiplier_* + y_positive_only는 정석 Two-Stage 경로 B를 지원:
       - y_positive_only=True: fit 데이터에서 y==0 die 제외 → E[Y|Y>0,x] 학습
-      - multiplier_*: 최종 예측을 `reg_pred × multiplier` 로 변환 → (1-π)×E[Y|Y>0,x] = E[Y|x]
+      - multiplier_*: 최종 예측을 reg_pred × multiplier 로 → (1-π)×E[Y|Y>0,x] = E[Y|x]
 
     Returns
     -------
     dict {
-        'oof_pred_die':  array (len train-die) — **original space, multiplier 적용 후**,
-        'val_pred_die':  array (len val-die)   — 동일,
-        'test_pred_die': array (len test-die)  — 동일,
-        'oof_pi', 'val_pi', 'test_pi': array or None (ZITboost만),
-        'oof_mu', 'val_mu', 'test_mu': array or None (ZITboost만),
-        'oof_pred_unit': DataFrame [KEY_COL, pred] — original,
-        'val_pred_unit': DataFrame — original,
-        'test_pred_unit': DataFrame — original,
-        'fold_models': list,
-        'fold_scalers': list — fold별 {'median', 'iqr'} dict 또는 None (스케일링 안 하는 모델),
-        'best_params_resolved': dict,
+        'oof_pred_die' / 'val_pred_die' / 'test_pred_die' : array — **원본 공간, multiplier 적용 후**
+        'oof_pi'/'val_pi'/'test_pi', 'oof_mu'/'val_mu'/'test_mu' : array or None (ZITboost만)
+        'oof_pred_unit' / 'val_pred_unit' / 'test_pred_unit' : DataFrame [KEY_COL, pred]
+        'fold_models' : list — fold별 fitted 모델
+        'fold_scalers' : list — fold별 {'median','iqr'} dict 또는 None (스케일링 안 하는 모델)
+        'best_params_resolved' : dict
+        'model_name' : str
     }
     """
     if (target_transform_fn is None) != (target_inverse_fn is None):
         raise ValueError("target_transform_fn / target_inverse_fn은 쌍으로 제공")
-    # REUSE 모드: best_params_resolved(JSON)를 그대로 받은 경우 재변환 스킵
+    # already_resolved=True: best_params가 이미 모델에 넣을 형태(JSON에서 읽은 best_params_resolved 등)면 재변환 스킵
     if already_resolved:
         hp = dict(best_params)
-        hp = _inject_n_jobs(model_name, hp, n_jobs)   # REUSE도 N_JOBS override 보장
+        hp = _inject_n_jobs(model_name, hp, n_jobs)
     else:
         hp = _hp_from_best(best_params, model_name, n_jobs=n_jobs)
 
-    # ── refit도 HPO와 동일하게 tweedie 계열 시 transform OFF (EXPERIMENT_LOG §5.1) ──
+    # HPO와 동일: tweedie 계열 loss면 transform OFF
     _obj_or_loss = str(hp.get("objective") or hp.get("loss_function") or "")
     if (_obj_or_loss.startswith("tweedie") or _obj_or_loss.startswith("reg:tweedie")
             or _obj_or_loss.lower().startswith("tweedie")):
@@ -529,7 +477,7 @@ def refit_best(
         target_transform_fn = None
         target_inverse_fn   = None
 
-    # splits
+    # unit 단위 fold (run_hpo와 동일 seed/방식이라야 OOF가 같은 분할 위에서 나옴)
     unit_ids = ys_train_unit[KEY_COL].unique()
     folds = _make_unit_folds(unit_ids, n_folds, seed)
     y_die_train_orig = _broadcast_y_to_die(xs_train, ys_train_unit)
@@ -541,7 +489,7 @@ def refit_best(
     X_test_full  = _build_X(xs_test,  feat_cols, extra_feature_test)
 
     n_tr, n_vl, n_te = len(xs_train), len(xs_val), len(xs_test)
-    # multiplier 배열 검증
+    # multiplier 길이 검증
     def _check_mult(arr, n, name):
         if arr is None:
             return None
@@ -553,11 +501,12 @@ def refit_best(
     multiplier_val   = _check_mult(multiplier_val,   n_vl, "multiplier_val")
     multiplier_test  = _check_mult(multiplier_test,  n_te, "multiplier_test")
 
-    oof_pred  = np.full(n_tr, np.nan)
-    val_pred  = np.zeros(n_vl)
-    test_pred = np.zeros(n_te)
+    oof_pred  = np.full(n_tr, np.nan)   # train die OOF
+    val_pred  = np.zeros(n_vl)          # val: fold 평균 누적
+    test_pred = np.zeros(n_te)          # test: fold 평균 누적
 
     is_zit = model_name == "zitboost"
+    # ZITboost면 π/μ도 같은 방식으로 OOF·fold평균으로 모음
     oof_pi = np.full(n_tr, np.nan) if is_zit else None
     oof_mu = np.full(n_tr, np.nan) if is_zit else None
     val_pi = np.zeros(n_vl) if is_zit else None
@@ -566,7 +515,7 @@ def refit_best(
     test_mu = np.zeros(n_te) if is_zit else None
 
     fold_models = []
-    fold_scalers = []   # enet 등 스케일링 모델: fold별 (median, iqr) 보관 → pkl 재현용
+    fold_scalers = []   # enet 등: fold별 RobustScaler 통계량 보관 (pkl로 저장해 추론 시 재현)
 
     if _scaler.needs_scaling(model_name):
         print(f"[scaler] {model_name} → fold-local RobustScaler 적용 "
@@ -576,7 +525,7 @@ def refit_best(
         tr_mask = _die_mask_from_units(xs_train, set(tr_units))
         vl_mask = _die_mask_from_units(xs_train, set(vl_units))
 
-        # ── 정석 Two-Stage: Y>0 만 학습 ──
+        # 정석 Two-Stage: y>0 die만 학습
         if y_positive_only:
             fit_mask = tr_mask & (y_die_train_orig > 0)
         else:
@@ -584,7 +533,7 @@ def refit_best(
         X_tr, y_tr = X_train_full[fit_mask], y_die_train_fit[fit_mask]
         X_vl       = X_train_full[vl_mask]
 
-        # 스케일링: enet이면 train-fold 기준으로 fit → val-fold/val/test 모두 transform
+        # enet: 이 fold의 train 기준 RobustScaler → val-fold/val/test 모두 같은 통계로 변환
         if _scaler.needs_scaling(model_name):
             med = np.median(X_tr, axis=0)
             q75 = np.quantile(X_tr, 0.75, axis=0)
@@ -602,7 +551,7 @@ def refit_best(
         model = _models.create_regressor(model_name, hp)
         model.fit(X_tr, y_tr)
 
-        # 예측은 transformed space → 역변환해서 accumulate
+        # 예측은 학습 공간 → 역변환해서 누적
         pred_vl = model.predict(X_vl)
         pred_v  = model.predict(X_val_tr)
         pred_t  = model.predict(X_test_tr)
@@ -611,8 +560,8 @@ def refit_best(
             pred_v  = target_inverse_fn(pred_v)
             pred_t  = target_inverse_fn(pred_t)
 
-        oof_pred[vl_mask] = pred_vl
-        val_pred  += pred_v / n_folds
+        oof_pred[vl_mask] = pred_vl                # 이 fold 검증분 OOF
+        val_pred  += pred_v / n_folds              # val/test는 fold 평균
         test_pred += pred_t / n_folds
 
         if is_zit:
@@ -633,8 +582,7 @@ def refit_best(
     if np.isnan(oof_pred).any():
         raise RuntimeError("oof_pred has NaN — unit coverage bug")
 
-    # ── multiplier 적용 (정석 Two-Stage 경로 B) ──
-    # 곱셈을 여기서 해야 oof/val/test 가 모두 "최종 예측" 의미로 통일된다.
+    # multiplier 곱셈을 마지막에 일괄 적용 → oof/val/test가 모두 "최종 예측" 의미로 통일됨
     if multiplier_train is not None:
         oof_pred = oof_pred * multiplier_train
     if multiplier_val is not None:
@@ -658,19 +606,17 @@ def refit_best(
     }
 
 
-# ═════════════════════════════════════════════════════════════
-# Artifact 저장 (pkl + CSV + JSON)
-# ═════════════════════════════════════════════════════════════
+# ------------------------------------------------------------
+# 산출물 저장 (pkl + CSV + JSON)
+# ------------------------------------------------------------
 
 from utils.config import DIE_KEY_COL as _DIE_KEY_COL
 
 
 def _die_csv(xs_split, pred, pi=None, mu=None, y_unit=None):
-    """die-level 예측을 KEY_COL + DIE_KEY_COL 과 함께 DataFrame으로.
+    """die-level 예측을 [KEY_COL, DIE_KEY_COL, pred(, health)(, pi/one_minus_pi/mu)] DataFrame으로.
 
-    `y_unit` (DataFrame `[KEY_COL, TARGET_COL]` 또는 Series indexed by KEY_COL)이
-    주어지면 unit-level health 를 die-level 로 broadcast 하여 `health` 컬럼 추가.
-    test split 처럼 y 가 없으면 None 으로 두면 컬럼 자체가 빠진다.
+    y_unit이 주어지면 unit health를 die에 broadcast해서 'health' 컬럼 추가 (test처럼 y 없으면 그 컬럼 자체 빠짐).
     """
     out = pd.DataFrame({
         KEY_COL:      xs_split[KEY_COL].values,
@@ -683,14 +629,14 @@ def _die_csv(xs_split, pred, pi=None, mu=None, y_unit=None):
         out[TARGET_COL] = out[KEY_COL].map(h_map)
     if pi is not None:
         out["pi"] = pi
-        out["one_minus_pi"] = 1.0 - pi   # 경로 B에서 바로 쓰기 쉬우라고 파생
+        out["one_minus_pi"] = 1.0 - pi   # 경로 B에서 multiplier로 바로 쓰기 쉽게 미리 만들어 둠
     if mu is not None:
         out["mu"] = mu
     return out
 
 
 def _add_health_to_unit(unit_df, y_unit):
-    """unit-level [KEY_COL, 'pred'] DataFrame 에 health 컬럼을 merge."""
+    """unit-level [KEY_COL, 'pred'] DataFrame에 'health' 컬럼을 붙여 반환 (y_unit이 None이면 그대로)."""
     if y_unit is None:
         return unit_df
     h_map = (y_unit.set_index(KEY_COL)[TARGET_COL]
@@ -711,46 +657,24 @@ def save_artifacts(
     postprocess_config=None,
     study_meta=None,
 ):
-    """refit_best 결과를 디스크에 저장.
+    """refit_best 결과를 디스크에 저장 (fold_models.pkl + best_params.json + die/unit CSV 6개).
 
     Parameters
     ----------
-    feature_names : list[str] or None
-        학습에 사용된 피처 이름 (재현/SHAP/importance 용). best_params.json + pkl 에 저장.
-    extra_feature_name : str or None
-        경로 B 처럼 X 뒤에 붙은 추가 피처 이름 (예: 'one_minus_pi'). 저장 전용 메타.
-    y_train_unit : DataFrame or None
-        postprocess_config 가 주어질 때 필수. unit RMSE 기반으로 집계/threshold 튜닝.
-        die/unit CSV 의 `health` 컬럼 도 여기서 가져온다.
-    y_val_unit, y_test_unit : DataFrame or None
-        주어지면 val/test die·unit CSV 에 `health` 컬럼 merge.
-        None 이면 컬럼 자체가 빠진다 (test 가 비공개일 때 등).
-    postprocess_config : dict or None
-        None 이면 기존 mean 집계만 저장 (backward-compat).
-        dict 이면 postprocess.tune_and_apply 에 kwargs 로 전달하여
-        unit CSV 를 튜닝된 값으로 대체 저장.
-        예: {'agg_methods': (...), 'pi_threshold_range': (...), ...}
-    study_meta : dict or None
-        study.user_attrs 같은 재현성 메타. best_params.json 에 그대로 저장.
+    feature_names : list[str] or None — 학습에 쓴 피처 이름 (재현/importance용). json+pkl에 저장.
+    extra_feature_name : str or None — X 뒤에 붙은 추가 피처 이름 (예: 'one_minus_pi'). 저장 전용 메타.
+    y_train_unit : DataFrame or None — postprocess_config가 있으면 필수 (unit RMSE 튜닝 + CSV의 health 컬럼).
+    y_val_unit, y_test_unit : DataFrame or None — 주면 val/test CSV에 health 컬럼 merge (없으면 컬럼 빠짐).
+    postprocess_config : dict or None — None이면 refit의 mean 집계만 저장. dict면 postprocess.tune_and_apply에 kwargs로 넘겨 unit CSV를 튜닝값으로 대체.
+    study_meta : dict or None — study.user_attrs 같은 재현성 메타. best_params.json에 그대로 저장.
 
-    생성물
-    ------
-    - {out_dir}/fold_models.pkl      : {'fold_models', 'fold_scalers', 'feature_names', ...}
-    - {out_dir}/best_params.json     : model_name + resolved HP + feature_names + study_meta
-    - {out_dir}/oof_die.csv          : train OOF die-level (+ health, +pi/mu if ZIT)
-    - {out_dir}/val_die.csv          : val die-level (+ health if y_val_unit 제공)
-    - {out_dir}/test_die.csv         : test die-level (+ health if y_test_unit 제공)
-    - {out_dir}/oof_unit.csv         : train OOF unit-level (postprocess tuned if config 제공)
-    - {out_dir}/val_unit.csv         : val unit-level (동일)
-    - {out_dir}/test_unit.csv        : test unit-level (동일)
-
-    경로 B는 {out_dir}/oof_die.csv · val_die.csv · test_die.csv 의
-    `one_minus_pi` 컬럼을 reg 입력 피처로 재사용한다.
+    생성 파일: fold_models.pkl, best_params.json, oof/val/test_die.csv, oof/val/test_unit.csv.
+    경로 B는 *_die.csv의 'one_minus_pi' 컬럼을 reg 입력 피처로 재사용한다.
     """
     import os, json, pickle
     os.makedirs(out_dir, exist_ok=True)
 
-    # 1) fold models + feature_names (pkl)
+    # 1) fold 모델들 + feature 이름 등을 pickle로 저장 (추론 시 그대로 로드해서 예측)
     pkl_payload = {
         "fold_models":         refit_result["fold_models"],
         "fold_scalers":        refit_result.get("fold_scalers"),
@@ -762,12 +686,12 @@ def save_artifacts(
     with open(os.path.join(out_dir, "fold_models.pkl"), "wb") as f:
         pickle.dump(pkl_payload, f)
 
-    # 2) best_params (JSON) + study 메타 + fold 재현성 정보
-    # strategy_common.md §23.3 키 위치 정합: effective_pp_params를 study_meta 하위가 아닌 top-level로
+    # 2) best_params.json 메타 — resolved HP + 전처리 파라미터 + feature 이름 + study 메타
     meta = {
         "exp_id":                exp_id,
         "model_name":            refit_result["model_name"],
         "best_params_resolved":  refit_result["best_params_resolved"],
+        # effective_pp_params는 study_meta 하위가 아니라 top-level에도 둠 (clf 쪽과 키 위치 정합)
         "effective_pp_params":   (study_meta or {}).get("effective_pp_params"),
         "feature_names":         list(feature_names) if feature_names is not None else None,
         "n_features":            len(feature_names) if feature_names is not None else None,
@@ -775,7 +699,7 @@ def save_artifacts(
         "n_folds":               len(refit_result["fold_models"]),
         "study_meta":            study_meta or {},
     }
-    # fold 분할 재현성 (01↔03 alignment 검증용)
+    # fold 분할 재현성 — train unit 목록의 해시를 박제 (zit↔reg↔stacking의 OOF가 같은 분할인지 검증용)
     if y_train_unit is not None:
         import hashlib
         uid_arr = y_train_unit[KEY_COL].unique()
@@ -783,7 +707,7 @@ def save_artifacts(
         meta["unit_ids_hash"] = hashlib.sha1(uid_bytes).hexdigest()
         meta["n_units_train"] = int(len(uid_arr))
 
-    # 3) die-level CSV (tune 이전 raw die 예측 그대로) + health merge
+    # 3) die-level CSV — postprocess 이전의 die-level 예측 (multiplier_* 경로면 (1-π) 곱셈까지 반영된 값) + health, ZIT이면 pi/mu
     _die_csv(xs_train, refit_result["oof_pred_die"],
              refit_result.get("oof_pi"), refit_result.get("oof_mu"),
              y_unit=y_train_unit,
@@ -797,7 +721,7 @@ def save_artifacts(
              y_unit=y_test_unit,
              ).to_csv(os.path.join(out_dir, "test_die.csv"), index=False)
 
-    # 4) unit-level CSV — postprocess_config 여부로 분기 + health merge
+    # 4) unit-level CSV — postprocess_config가 있으면 튜닝값, 없으면 refit의 mean 집계
     if postprocess_config is not None and y_train_unit is not None:
         from . import postprocess as _pp
         pp_res = _pp.tune_and_apply(
@@ -806,7 +730,7 @@ def save_artifacts(
             die_pred_val=refit_result["val_pred_die"],
             die_pred_test=refit_result["test_pred_die"],
             y_train_unit=y_train_unit,
-            y_val_unit=y_val_unit,                       # ★ val 비교용 (§10·§11·§12)
+            y_val_unit=y_val_unit,                       # val 기준으로 채택 여부 결정
             die_pi_train=refit_result.get("oof_pi"),
             die_pi_val=refit_result.get("val_pi"),
             die_pi_test=refit_result.get("test_pi"),
@@ -818,7 +742,7 @@ def save_artifacts(
             os.path.join(out_dir, "val_unit.csv"), index=False)
         _add_health_to_unit(pp_res["final_test_unit"], y_test_unit).to_csv(
             os.path.join(out_dir, "test_unit.csv"), index=False)
-        # best tuning 결과도 메타에 기록
+        # 후처리 결정 내역도 메타에 기록
         meta["postprocess"] = {
             "best_agg":          pp_res["best_agg"],
             "pos_weights":       (pp_res["pos_weights"].tolist()
@@ -833,7 +757,7 @@ def save_artifacts(
             "config":            postprocess_config,
         }
     else:
-        # 기존 동작: refit 단계의 mean 집계 그대로 + health merge
+        # 후처리 없이 refit 단계의 mean 집계 그대로 저장
         _add_health_to_unit(refit_result["oof_pred_unit"], y_train_unit).to_csv(
             os.path.join(out_dir, "oof_unit.csv"), index=False)
         _add_health_to_unit(refit_result["val_pred_unit"], y_val_unit).to_csv(
@@ -842,7 +766,7 @@ def save_artifacts(
             os.path.join(out_dir, "test_unit.csv"), index=False)
         meta["postprocess"] = None
 
-    # best_params.json 저장 (postprocess 결과까지 포함된 최종 meta)
+    # best_params.json 저장 (후처리 결과까지 포함된 최종 meta)
     with open(os.path.join(out_dir, "best_params.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False, default=str)
 
@@ -853,24 +777,18 @@ def save_artifacts(
 
 def load_extra_feature_from_path(path_dir, xs_split, feature_col="one_minus_pi",
                                  split=None):
-    """경로 B 용: 경로 A가 저장한 die-level CSV에서 (1-π)를 추출.
-
-    die 순서는 xs_split의 DIE_KEY_COL 기준으로 정렬.
+    """경로 B 용: 경로 A가 저장한 die-level CSV에서 (1-π) 같은 컬럼을 꺼내 xs_split die 순서로 정렬해 반환.
 
     Parameters
     ----------
-    path_dir : str
-        경로 A가 save_artifacts로 저장한 디렉토리.
-    xs_split : DataFrame
-        현재 노트북의 xs_train / xs_val / xs_test 중 하나.
-    feature_col : str  (default 'one_minus_pi')
-    split : {'train','val','test'} or None
-        명시하면 oof/val/test CSV 를 **직접 지정**해 로드. 기본 None 이면
-        길이/키셋 일치 기반으로 자동 감지.
+    path_dir : str — 경로 A가 save_artifacts로 저장한 디렉토리
+    xs_split : DataFrame — 현재 노트북의 xs_train / xs_val / xs_test 중 하나
+    feature_col : str (default 'one_minus_pi')
+    split : {'train','val','test'} or None — 명시하면 해당 CSV(oof/val/test_die)를 직접 로드. None이면 길이·키셋 일치로 자동 감지.
 
     Returns
     -------
-    np.ndarray  — xs_split과 동일 길이의 die-level 배열
+    np.ndarray — xs_split과 같은 길이의 die-level 배열
     """
     import os
 
@@ -880,10 +798,11 @@ def load_extra_feature_from_path(path_dir, xs_split, feature_col="one_minus_pi",
         "test":  "test_die.csv",
     }
 
-    split_keys = set(xs_split[_DIE_KEY_COL].values)
+    split_keys = set(xs_split[_DIE_KEY_COL].values)   # 이 split의 die 키 집합
     n_split = len(xs_split)
 
     def _try_load(csv_name):
+        """csv_name을 읽어 feature_col을 xs_split die 순서로 정렬해 반환. 길이/키 불일치면 사유 튜플, 파일 없으면 None."""
         full = os.path.join(path_dir, csv_name)
         if not os.path.exists(full):
             return None
@@ -893,7 +812,7 @@ def load_extra_feature_from_path(path_dir, xs_split, feature_col="one_minus_pi",
                 f"{csv_name}에 컬럼 {feature_col!r} 없음 — "
                 f"경로 A 아티팩트가 맞는지 확인하세요."
             )
-        # 엄격 검증: 길이 일치 + 키셋 일치 (부분 매칭 방지)
+        # 부분 매칭 사고 방지: 길이도 같고 키 집합도 정확히 같아야 함
         if len(df) != n_split:
             return ("length_mismatch", len(df))
         if set(df[_DIE_KEY_COL].values) != split_keys:
@@ -903,7 +822,7 @@ def load_extra_feature_from_path(path_dir, xs_split, feature_col="one_minus_pi",
         ].values
         return aligned.astype(float)
 
-    # 명시 split: 해당 파일만 시도, 실패하면 에러
+    # split을 명시했으면 그 파일만 시도하고, 안 되면 에러
     if split is not None:
         if split not in CSV_BY_SPLIT:
             raise ValueError(
@@ -926,7 +845,7 @@ def load_extra_feature_from_path(path_dir, xs_split, feature_col="one_minus_pi",
               f"(n={len(result)})")
         return result
 
-    # 자동 감지: 길이+키 모두 일치하는 CSV 탐색
+    # split 미지정: 세 CSV 중 길이+키가 모두 맞는 걸 자동 채택
     for split_name, csv_name in CSV_BY_SPLIT.items():
         result = _try_load(csv_name)
         if isinstance(result, np.ndarray):
@@ -940,17 +859,12 @@ def load_extra_feature_from_path(path_dir, xs_split, feature_col="one_minus_pi",
     )
 
 
-# ═════════════════════════════════════════════════════════════
-# CLF (Stage 1) — Two-Stage 03c 노트북 전용
-# ═════════════════════════════════════════════════════════════
-# binary classification (y>0 vs y=0). die-level 학습 + unit mean 집계.
-#
-# Objective (RMSE-aligned):
-#   oof_proba_die → unit mean → × y_pos_const → unit pred → unit RMSE
-#   "회귀를 평균값 상수로 가정" 한 RMSE 평가. clf calibration 단독 평가.
-#   y_pos_const = mean(y_train_unit | y > 0)  ← E[Y | Y>0]
-#
-# KFold split 은 unit 단위 (run_hpo 와 동일 패턴, leakage 방지).
+# ------------------------------------------------------------
+# CLF (Two-Stage Stage 1) — binary 분류 (y>0 vs y=0)
+# ------------------------------------------------------------
+# die-level로 학습 + unit 평균으로 집계. objective는 "회귀를 평균 상수로 가정한 unit RMSE":
+#   oof_proba_die → unit 평균 → × y_pos_const → unit pred → unit RMSE,  y_pos_const = mean(y_train_unit | y>0) = E[Y|Y>0]
+# 이렇게 하면 분류기 calibration을 RMSE 척도로 직접 평가하게 됨. KFold는 회귀와 똑같이 unit 단위(leakage 방지).
 
 def run_clf_hpo(
     xs_train, ys_train_unit, feat_cols,
@@ -961,16 +875,15 @@ def run_clf_hpo(
     seed=SEED,
     show_progress_bar=True,
     user_attrs=None,
-    # ── strategy_common §4·§5·§25 ──
-    sampler=None,                 # None이면 TPESampler(seed=seed). §4
-    pruner=None,                  # None이면 사용 안 함. §4
-    enqueue_trials=None,          # list[dict] — anchor 첫 trial 강제 (§5)
-    timeout=None,                 # 초 단위, None=무제한 (§25)
-    n_jobs=None,                  # 모델 학습 병렬도 (strategy_common §8). None이면 라이브러리 default(-1)
+    sampler=None,                 # None이면 TPESampler(seed=seed, multivariate=True, group=True)
+    pruner=None,                  # None이면 pruning 없음
+    enqueue_trials=None,          # list[dict] — anchor 첫 trial 강제
+    timeout=None,                 # 초 단위, None=무제한
+    n_jobs=None,                  # 모델 학습 병렬도. None이면 라이브러리 default(-1)
     xs_val=None, ys_val_unit=None,
     xs_test=None, ys_test_unit=None,
 ):
-    """die-level binary CLF HPO. Objective = unit RMSE (clf_proba × y_pos_const).
+    """die-level binary CLF HPO. objective = unit RMSE(unit평균확률 × y_pos_const).
 
     Returns
     -------
@@ -983,6 +896,7 @@ def run_clf_hpo(
 
     space_fn = _models.get_clf_search_space(model_name)
 
+    # unit 단위 fold + die mask 미리 계산
     unit_ids = ys_train_unit[KEY_COL].unique()
     folds = _make_unit_folds(unit_ids, n_folds, seed)
     fold_masks = [
@@ -992,7 +906,7 @@ def run_clf_hpo(
     ]
 
     y_die_orig = _broadcast_y_to_die(xs_train, ys_train_unit)
-    y_die_bin  = (y_die_orig > 0).astype(int)
+    y_die_bin  = (y_die_orig > 0).astype(int)             # 학습 target = "이 die의 unit이 y>0인가" 0/1
     X_train = xs_train[feat_cols].values
     X_val   = xs_val[feat_cols].values  if xs_val  is not None else None
     X_test  = xs_test[feat_cols].values if xs_test is not None else None
@@ -1003,10 +917,11 @@ def run_clf_hpo(
     y_test_true_unit = (ys_test_unit.set_index(KEY_COL)[TARGET_COL]
                         if ys_test_unit is not None else None)
 
-    # E[Y | Y>0] — 정석 Two-Stage 의 Stage 2 평균값 상수로 대체
+    # E[Y | Y>0] — Stage 2 회귀를 "상수"로 대체한 값. clf 단독 평가에서 unit pred = prob × 이 상수.
     y_pos_const = float(y_true_unit[y_true_unit > 0].mean())
 
     def _eval_split_rmse(xs_split, die_proba, y_true_unit_split):
+        """die 확률 → unit 평균 확률 → × y_pos_const → unit pred → 정답과 RMSE."""
         df = pd.DataFrame({KEY_COL: xs_split[KEY_COL].values, "p": die_proba})
         unit_proba = df.groupby(KEY_COL, sort=False)["p"].mean()
         unit_pred  = unit_proba * y_pos_const
@@ -1017,8 +932,7 @@ def run_clf_hpo(
 
     def objective(trial):
         params = space_fn(trial)
-        # N_JOBS 주입 (strategy_common §8): clf search_space의 -1 베이크값 override
-        params = _inject_n_jobs(model_name, params, n_jobs)
+        params = _inject_n_jobs(model_name, params, n_jobs)   # search space의 -1을 노트북 N_JOBS로
         oof_proba = np.full(len(xs_train), np.nan)
         val_proba_accum  = (np.zeros(len(xs_val))  if xs_val  is not None else None)
         test_proba_accum = (np.zeros(len(xs_test)) if xs_test is not None else None)
@@ -1027,11 +941,12 @@ def run_clf_hpo(
             X_tr, y_tr = X_train[tr_mask], y_die_bin[tr_mask]
             X_vl       = X_train[vl_mask]
 
+            # 이 fold의 양/음 비율로 클래스 불균형 옵션(scale_pos_weight 등)을 자동 채워 넣음
             params_resolved = _models.resolve_clf_imbalance(model_name, params, y_tr)
             clf = _models.create_classifier(model_name, params_resolved)
             clf.fit(X_tr, y_tr)
 
-            oof_proba[vl_mask] = clf.predict_proba(X_vl)[:, 1]
+            oof_proba[vl_mask] = clf.predict_proba(X_vl)[:, 1]   # 양성(=y>0) 클래스 확률
             if X_val is not None:
                 val_proba_accum  += clf.predict_proba(X_val)[:, 1]  / n_folds
             if X_test is not None:
@@ -1040,7 +955,7 @@ def run_clf_hpo(
         if np.isnan(oof_proba).any():
             raise RuntimeError("oof_proba has NaN — fold coverage bug")
 
-        train_rmse = _eval_split_rmse(xs_train, oof_proba, y_true_unit)
+        train_rmse = _eval_split_rmse(xs_train, oof_proba, y_true_unit)   # objective 반환값
         trial.set_user_attr("train_rmse", train_rmse)
 
         if val_proba_accum is not None:
@@ -1052,7 +967,6 @@ def run_clf_hpo(
 
         return train_rmse
 
-    # sampler default: strategy_common §4 (multivariate=True, group=True) 정합
     study = optuna.create_study(
         direction="minimize",
         study_name=study_name,
@@ -1070,8 +984,7 @@ def run_clf_hpo(
     study.set_user_attr("clf_objective_recipe",
                         "unit_RMSE(unit_mean(die_proba) * y_pos_const)")
 
-    # ── anchor enqueue (§5) ──
-    # RESUME(기존 db에 trial 존재) 시에는 재enqueue하지 않는다.
+    # anchor enqueue (RESUME 시에는 안 함)
     if enqueue_trials and len(study.trials) == 0:
         for anchor in enqueue_trials:
             study.enqueue_trial(dict(anchor))
@@ -1092,7 +1005,7 @@ def run_clf_hpo(
 
 
 def _clf_hp_with_defaults(model_name, best_params, n_jobs=None):
-    """best_params dict 에 모델별 search space 고정값 보강 (REUSE 모드 호환)."""
+    """clf best_params dict에 모델별 고정값(objective='binary' 등)을 setdefault로 보강 (REUSE 모드 호환)."""
     hp = dict(best_params)
     if model_name == "lgbm":
         hp.setdefault("objective",      "binary")
@@ -1117,8 +1030,7 @@ def _clf_hp_with_defaults(model_name, best_params, n_jobs=None):
         hp.setdefault("random_state", SEED)
         hp.setdefault("n_jobs",       -1)
         hp.setdefault("bootstrap",    True)
-    # N_JOBS override (strategy_common §8)
-    hp = _inject_n_jobs(model_name, hp, n_jobs)
+    hp = _inject_n_jobs(model_name, hp, n_jobs)   # n_jobs 인자 들어왔으면 모델별 키로 덮어씀
     return hp
 
 
@@ -1130,25 +1042,21 @@ def refit_clf_best(
     already_resolved=False,
     n_jobs=None,
 ):
-    """Best CLF HP 로 K-fold 재학습. die-level prob (OOF/val/test) 반환.
+    """Best CLF HP로 K-fold 재학습. die-level 양성 확률(OOF/val/test, val·test는 fold 평균) 반환.
 
     Returns
     -------
-    dict {
-        'oof_proba_die', 'val_proba_die', 'test_proba_die': np.array,
-        'fold_models': list,
-        'best_params_resolved': dict,
-        'model_name': str,
-    }
+    dict {'oof_proba_die', 'val_proba_die', 'test_proba_die': array,
+          'fold_models': list, 'best_params_resolved': dict, 'model_name': str}
     """
     if already_resolved:
         hp = dict(best_params)
-        hp = _inject_n_jobs(model_name, hp, n_jobs)   # REUSE도 N_JOBS override
+        hp = _inject_n_jobs(model_name, hp, n_jobs)
     else:
         hp = _clf_hp_with_defaults(model_name, best_params, n_jobs=n_jobs)
 
     unit_ids = ys_train_unit[KEY_COL].unique()
-    folds = _make_unit_folds(unit_ids, n_folds, seed)
+    folds = _make_unit_folds(unit_ids, n_folds, seed)   # 회귀와 동일 seed/방식
     y_die_orig = _broadcast_y_to_die(xs_train, ys_train_unit)
     y_die_bin  = (y_die_orig > 0).astype(int)
 
@@ -1169,7 +1077,7 @@ def refit_clf_best(
         X_tr, y_tr = X_train[tr_mask], y_die_bin[tr_mask]
         X_vl       = X_train[vl_mask]
 
-        hp_resolved = _models.resolve_clf_imbalance(model_name, hp, y_tr)
+        hp_resolved = _models.resolve_clf_imbalance(model_name, hp, y_tr)   # fold 클래스 비율로 imbalance 옵션 채움
         clf = _models.create_classifier(model_name, hp_resolved)
         clf.fit(X_tr, y_tr)
 
@@ -1207,9 +1115,9 @@ def save_clf_artifacts(
 ):
     """clf refit 결과를 디스크에 저장.
 
-    저장 파일:
-      - oof_die.csv / val_die.csv / test_die.csv   (KEY, DIE_KEY, prob, [health])
-      - oof_unit.csv / val_unit.csv / test_unit.csv (KEY, prob_unit_mean, pred=prob*y_pos_const, [health])
+    파일:
+      - oof/val/test_die.csv   : [KEY, DIE_KEY, prob, (health)]
+      - oof/val/test_unit.csv  : [KEY, prob(=unit 평균), pred(=prob×y_pos_const), (health)]
       - fold_models.pkl
       - best_params.json
     """
@@ -1234,6 +1142,7 @@ def save_clf_artifacts(
         return out
 
     def _build_unit(xs_split, prob, y_unit):
+        # die 확률 → unit 평균 확률, 그리고 pred = 평균확률 × E[Y|Y>0]
         df = pd.DataFrame({KEY_COL: xs_split[KEY_COL].values, "p": prob})
         unit_proba = df.groupby(KEY_COL, sort=False)["p"].mean().reset_index()
         unit_proba.columns = [KEY_COL, "prob"]
@@ -1256,10 +1165,7 @@ def save_clf_artifacts(
     with open(os.path.join(out_dir, "fold_models.pkl"), "wb") as f:
         pickle.dump(refit_result["fold_models"], f)
 
-    # strategy_common.md §23.3 검수 체크리스트 6필드 top-level 보강
-    # - effective_pp_params: study_meta에서 끌어올려 top-level로 (회귀 save_artifacts와 키 위치 정합)
-    # - n_folds / unit_ids_hash / n_units_train: fold split 재현성 (zit↔reg↔stacking alignment)
-    # - postprocess: clf 단독은 후처리 없음 — None + 사유 명시
+    # best_params.json — 회귀 save_artifacts와 키 위치를 맞춰 둠 (effective_pp_params/n_folds/unit_ids_hash/postprocess 등)
     meta = {
         "exp_id":               exp_id,
         "model_name":           refit_result["model_name"],
@@ -1269,7 +1175,7 @@ def save_clf_artifacts(
         "n_features":           len(feature_names) if feature_names else None,
         "n_folds":              len(refit_result["fold_models"]),
         "y_pos_const":          y_pos_const,
-        "postprocess":          None,  # clf 단독은 후처리 없음 (combine 단계에서 적용)
+        "postprocess":          None,  # clf 단독은 후처리 없음 (combine 단계에서 reg와 곱한 뒤 적용)
         "study_meta":           study_meta,
     }
     # fold 분할 재현성 (save_artifacts와 동일 패턴)
@@ -1288,48 +1194,28 @@ def save_clf_artifacts(
           f"(fold_models.pkl + best_params.json + 6 CSV)")
 
 
-# ═════════════════════════════════════════════════════════════
-# Search range / anchor enqueue helpers (strategy.md §6, §5)
-# ═════════════════════════════════════════════════════════════
+# ------------------------------------------------------------
+# 탐색 범위 / anchor enqueue 헬퍼
+# ------------------------------------------------------------
 
 def narrow_around(anchor, log_keys=None, int_keys=None, cat_keys=None,
                   ratio=0.30, int_step_ratio=0.30):
-    """anchor dict → 자동 narrow search range dict.
-
-    [strategy_common.md §5] 'A. Narrow' 방식 helper.
+    """anchor(1차 best HP) dict → 그 주변으로 좁힌(±ratio) 탐색 범위 dict 자동 생성.
 
     Parameters
     ----------
-    anchor : dict[str, value]
-        기준 HP. value 타입(float/int/str)으로 처리 분기.
-    log_keys : set[str] or None
-        log-uniform 처리할 float 키. log-space에서 ±ratio.
-    int_keys : set[str] or None
-        정수형 키. anchor ± int_step_ratio*|anchor| (최소 1).
-        명시 안 하면 anchor 값이 int 인 키 자동 감지.
-    cat_keys : set[str] or None
-        categorical 키. range가 아닌 anchor 값만 single-choice로.
-    ratio : float (default 0.30)
-        연속형 ±폭. 0.30이면 ±30%.
-    int_step_ratio : float (default 0.30)
-        정수형 ±폭 비율.
+    anchor : dict[str, value] — 기준 HP. 값 타입(float/int/str)에 따라 처리 분기.
+    log_keys : set[str] or None — log-uniform으로 다룰 float 키. log 공간에서 ±ratio.
+    int_keys : set[str] or None — 정수형 키. 명시 안 하면 anchor 값이 int인 키를 자동 감지.
+    cat_keys : set[str] or None — categorical 키. 범위가 아니라 anchor 값 하나만 choices로.
+    ratio : float (default 0.30) — 연속형 ±폭 (0.30 → ±30%).
+    int_step_ratio : float (default 0.30) — 정수형 ±폭 비율 (최소 ±1).
 
     Returns
     -------
-    dict[str, dict] — 각 HP에 대해
-        {'type': 'float'|'int'|'cat', 'low': ..., 'high': ..., 'log': bool, 'choices': [...]}
-
-    Notes
-    -----
-    Optuna trial.suggest_*(...) 호출 시 이 dict의 키들을 풀어서 사용:
-
-        for k, spec in space.items():
-            if spec['type'] == 'float':
-                trial.suggest_float(k, spec['low'], spec['high'], log=spec.get('log', False))
-            elif spec['type'] == 'int':
-                trial.suggest_int(k, spec['low'], spec['high'])
-            elif spec['type'] == 'cat':
-                trial.suggest_categorical(k, spec['choices'])
+    dict[str, dict] — 키별로
+        {'type':'float','low':..,'high':..,'log':bool} / {'type':'int','low':..,'high':..} / {'type':'cat','choices':[..]}
+    이 dict는 sample_from_space()에 넘겨 trial.suggest_*로 푼다.
     """
     log_keys = set(log_keys or [])
     int_keys_explicit = set(int_keys or [])
@@ -1337,9 +1223,9 @@ def narrow_around(anchor, log_keys=None, int_keys=None, cat_keys=None,
     space = {}
     for k, v in anchor.items():
         if k in cat_keys:
-            space[k] = {"type": "cat", "choices": [v]}
+            space[k] = {"type": "cat", "choices": [v]}   # 고정값 1개
             continue
-        # int 자동 감지 (명시 우선)
+        # 정수 키 자동 감지 (명시된 int_keys 우선, bool은 제외, log_keys면 정수 취급 안 함)
         is_int = (k in int_keys_explicit) or (
             isinstance(v, (int, np.integer)) and not isinstance(v, bool)
             and k not in log_keys
@@ -1349,15 +1235,16 @@ def narrow_around(anchor, log_keys=None, int_keys=None, cat_keys=None,
             step = max(1, int(round(abs(v_int) * int_step_ratio)))
             space[k] = {
                 "type": "int",
-                "low":  max(1, v_int - step) if v_int > 0 else v_int - step,
+                "low":  max(1, v_int - step) if v_int > 0 else v_int - step,   # 양수면 1 미만으로 안 내려감
                 "high": v_int + step,
             }
             continue
-        # float
+        # float 키
         v_f = float(v)
         if k in log_keys:
             if v_f <= 0:
                 raise ValueError(f"log_keys '{k}'는 양수만 가능 (anchor={v_f})")
+            # log 공간에서 ±log(1+ratio) → 곱셈적 ±ratio
             log_v = np.log(v_f)
             log_low = log_v - np.log(1.0 + ratio)
             log_high = log_v + np.log(1.0 + ratio)
@@ -1379,12 +1266,7 @@ def narrow_around(anchor, log_keys=None, int_keys=None, cat_keys=None,
 
 
 def sample_from_space(trial, space):
-    """narrow_around() 결과 dict → trial.suggest_*(...) 일괄 호출.
-
-    Returns
-    -------
-    dict[str, value] — sampled HP
-    """
+    """narrow_around() 결과 dict → trial.suggest_*(...)를 일괄 호출해 sampled HP dict 반환."""
     out = {}
     for k, spec in space.items():
         t = spec["type"]
@@ -1401,19 +1283,10 @@ def sample_from_space(trial, space):
 
 
 def enqueue_anchor(study, anchor):
-    """[strategy_common.md §5] anchor를 첫 trial로 강제 — 1차 best 보존.
+    """anchor를 study의 첫 trial로 강제 (1차 best HP를 trial 0에 박제) — study.enqueue_trial의 얇은 래퍼.
 
-    study.enqueue_trial(anchor)의 thin wrapper. 호출은 study.optimize 전.
-
-    Parameters
-    ----------
-    study : optuna.Study
-    anchor : dict[str, value]
-        narrow_around()의 anchor와 동일 키/값. categorical은 choices 안의 값이어야.
-
-    Notes
-    -----
-    RESUME 모드(기존 db에 trial이 있는 경우)에는 anchor를 다시 enqueue하지 않는다.
+    study.optimize() 호출 전에 부른다. RESUME 모드(이미 trial이 있는 study)면 다시 enqueue하지 않는다 (중복 방지).
+    anchor의 categorical 값은 search space의 choices 안에 있어야 한다.
     """
     if len(study.trials) == 0:
         study.enqueue_trial(dict(anchor))

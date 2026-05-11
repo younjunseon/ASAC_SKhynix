@@ -1,19 +1,16 @@
 """
-메타 피처 생성 모듈
-- run_wf_xy 파싱 → lot, wafer_no, die_x, die_y
-- add_meta_features: 노트북 공통 헬퍼 (2026-05-09 결정 반영)
+메타 피처 생성 모듈.
 
-2026-05-09 결정 (meta_features_strategy.md, enet_experiments.md):
-- position: 모든 모델 사용 (enet은 OHE 4, 트리/ET는 raw int 1)
-- die_x, die_y: 트리/ET만 사용 (continuous), ElasticNet 제외
-- lot / wafer_no / lot_wafer: 전 모델 제외 (leak + production 일반화 약화)
+원본 X0~X1086에는 없는 "공정 맥락" 정보는 run_wf_xy("Lot_Wafer_X_Y" 문자열) 안에 들어 있다.
+이 모듈은:
+  - parse_run_wf_xy : run_wf_xy를 lot / wafer_no / die_x / die_y 컬럼으로 쪼갬
+  - add_meta_features : 노트북 공통 헬퍼 — 모델별로 약속된 메타피처 세트를 추가
 
-이전 EDA 결과 (참고용 보존):
-- 로트 간 health 차이 극도로 유의 (p=1.69e-242, Phase 19)
-- 로트별 일괄 z-score 정규화는 역효과 (76.9% 악화, Phase 21)
-- 웨이퍼 패턴별 health 유의 차이 (Random 가장 심각, Phase 18-1)
-- radial_dist/is_edge 단독 예측력 없음 (r=0.006, Phase 23) → 제외
-- NNR 공간 잔차 비효과적 (0/30 우위, Phase 24) → 제외
+모델별 메타피처 정책:
+  - position : 모든 모델 사용 (ElasticNet은 OHE 4컬럼, 트리/ET는 raw 정수 1컬럼)
+  - die_x, die_y : 트리/ET만 사용 (연속형), ElasticNet 제외
+  - 위치기반 X(X1073 등)의 OHE : ElasticNet만 사용 (sector/strip ID라 순서 가정이 부적절), 트리/ET 제외
+  - lot / wafer_no / lot_wafer : 전 모델 제외 (target leak + production 일반화 약화 우려라 인자 자체가 없음)
 """
 import pandas as pd
 import numpy as np
@@ -44,8 +41,9 @@ def parse_run_wf_xy(xs, prefix="", inplace=False, verbose=True):
     from utils.config import DIE_KEY_COL
 
     if not inplace:
-        xs = xs.copy()
+        xs = xs.copy()   # 원본 보호 (inplace=True면 호출 측이 복사 비용을 아끼겠다는 뜻)
 
+    # "Lot_Wafer_X_Y"를 '_'로 4조각 분리 → 0:lot, 1:wafer, 2:die_x, 3:die_y
     split = xs[DIE_KEY_COL].str.split("_", expand=True)
     lot_c = f"{prefix}lot"
     wf_c = f"{prefix}wafer_no"
@@ -53,7 +51,7 @@ def parse_run_wf_xy(xs, prefix="", inplace=False, verbose=True):
     dy_c = f"{prefix}die_y"
     xs[lot_c] = split[0]
     xs[wf_c] = split[1]
-    xs[dx_c] = split[2].astype(int)
+    xs[dx_c] = split[2].astype(int)   # 좌표는 정수
     xs[dy_c] = split[3].astype(int)
 
     if verbose:
@@ -69,7 +67,7 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
                       use_loc_x_ohe=False,
                       loc_x_required=("X1073",),
                       loc_x_optional=("X1059", "X1075", "X1076", "X1077")):
-    """노트북 공통 메타피처 추가 헬퍼 (2026-05-09 결정 반영).
+    """노트북 공통 메타피처 추가 헬퍼.
 
     적용 범위:
     - position: 모든 모델 (enet은 OHE 4, 트리/ET는 raw int 1)
@@ -91,13 +89,13 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
     verbose : bool
         True(기본)면 추가된 컬럼 요약 print.
     use_loc_x_ohe : bool
-        True면 위치기반 X (X1073 등)를 OHE로 변환 (단계 2a/2b, ElasticNet 전용).
+        True면 위치기반 X (X1073 등)를 OHE로 변환 (ElasticNet 전용).
         train 카테고리 기준 dummy 생성, val/test 신규 카테고리는 모든 dummy=0 가드.
         원본 컬럼은 feat_cols에서 제거 (ordinal+OHE 동시 유지 시 multicollinearity).
     loc_x_required : tuple[str, ...]
-        단계 2a 필수 OHE 컬럼 (기본: X1073 4분면 sector).
+        필수 OHE 대상 컬럼 (기본: X1073 — 4분면 sector).
     loc_x_optional : tuple[str, ...]
-        단계 2b A/B OHE 컬럼 (기본: X1059/X1075/X1076/X1077 좌표/strip).
+        추가 OHE 대상 컬럼 (기본: X1059/X1075/X1076/X1077 — 좌표/strip).
         loc_x_required와 동일하게 처리됨. ordinal 유지하려면 빈 튜플 전달.
 
     Returns
@@ -114,13 +112,14 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
     - loc_x_required/optional 컬럼이 feat_cols에 없으면 (cleaning에서 제거됐거나
       EXCLUDE_COLS에 있는 경우) 해당 컬럼 스킵. 에러 안 발생.
     """
-    feat_cols = list(feat_cols)  # 원본 보호
-    splits = [df for df in (xs_train, xs_val, xs_test) if df is not None]
+    feat_cols = list(feat_cols)  # 받은 리스트를 직접 수정하지 않게 복사
+    splits = [df for df in (xs_train, xs_val, xs_test) if df is not None]   # None 아닌 split만 처리
     if not splits:
         raise ValueError("xs_train/xs_val/xs_test 중 하나 이상 DataFrame이 필요")
 
-    # ── 1. position ──
+    # --- 1) position ---
     if position_mode == 'ohe':
+        # pos_1 ~ pos_4 더미 4개 생성 (이 unit 내 die 위치를 one-hot으로)
         added_pos = []
         for p in (1, 2, 3, 4):
             col = f'pos_{p}'
@@ -129,6 +128,7 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
             added_pos.append(col)
         feat_cols += added_pos
     elif position_mode == 'raw':
+        # 'position' 정수 컬럼을 그대로 feature로 등록 (트리/ET는 OHE 불필요)
         if 'position' not in feat_cols:
             feat_cols.append('position')
         added_pos = ['position']
@@ -137,18 +137,19 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
             f"position_mode must be 'ohe' or 'raw', got {position_mode!r}"
         )
 
-    # ── 2. die_x, die_y (트리/ET 전용) ──
+    # --- 2) die_x, die_y (트리/ET 전용 연속형 좌표) ---
     if use_die_xy:
         for split_df in splits:
+            # lot/wafer_no/die_x/die_y 컬럼을 추가하지만, feat_cols엔 die_x/die_y만 등록
             parse_run_wf_xy(split_df, prefix='', inplace=True, verbose=False)
         added_diexy = ['die_x', 'die_y']
         feat_cols += added_diexy
     else:
         added_diexy = []
 
-    # ── 3. loc_x OHE (단계 2a/2b, ElasticNet 전용) ──
-    # 위치기반 X 컬럼을 OHE로 변환. monotonic 가정이 부적절한 sector/strip ID.
-    # train 카테고리 기준 dummy 생성, val/test 신규 카테고리는 모든 dummy=0 가드.
+    # --- 3) 위치기반 X 컬럼의 OHE (ElasticNet 전용) ---
+    # X1073 같은 컬럼은 값이 sector/strip ID라 "1<2<3"이라는 순서 가정이 부적절 → 더미로 펼침.
+    # 더미 카테고리는 train 값 기준으로 정함. val/test에만 나오는 새 카테고리는 모든 더미가 0이 되어 자연스럽게 처리됨.
     added_loc, removed_loc = [], []
     if use_loc_x_ohe:
         if xs_train is None:
@@ -158,12 +159,13 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
         loc_cols = list(loc_x_required) + list(loc_x_optional)
         for col in loc_cols:
             if col not in feat_cols:
-                continue  # cleaning/EXCLUDE_COLS에서 이미 제거된 경우 스킵
-            cats = sorted(xs_train[col].dropna().unique().tolist())
+                continue  # cleaning이나 EXCLUDE_COLS에서 이미 빠진 컬럼이면 그냥 넘어감 (에러 X)
+            cats = sorted(xs_train[col].dropna().unique().tolist())   # train에 등장한 카테고리
             cat_cols = [f"{col}_eq{int(cat)}" for cat in cats]
             for split_df in splits:
                 for cat, cat_col in zip(cats, cat_cols):
                     split_df[cat_col] = (split_df[col] == cat).astype(np.int8)
+            # 원본 ordinal 컬럼은 빼고(더미와 동시 유지 시 다중공선성) 더미들만 feat_cols에 추가
             feat_cols = [c for c in feat_cols if c != col] + cat_cols
             added_loc += cat_cols
             removed_loc.append(col)
@@ -177,6 +179,3 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
         msg += f" (feat_cols: {len(feat_cols)})"
         print(msg)
     return feat_cols
-
-
-

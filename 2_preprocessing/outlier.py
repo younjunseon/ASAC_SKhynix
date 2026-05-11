@@ -1,14 +1,15 @@
 """
-이상치 처리 모듈
-- IQR 기반 탐지
-- Winsorization (분위수 경계로 클리핑)
-- Grubbs 검정 (통계적으로 유의한 이상치만 처리)
-- 로트별 국소 기준 (AEC DPAT, run_id별 중앙값/백분위수 기반)
+이상치 처리 모듈.
 
-EDA 결과 기반:
-- IQR 기준 이상치 5% 초과: 167개 feature
-- X393(45.7%), X988(40.4%) 등 극단적 이상치 비율
-- Feature 스케일 극도로 불균일 (mean 범위: -2,293 ~ 20,201,109)
+WT feature는 스케일이 제각각이고 극단값(IQR 기준 이상치 5%+)이 많은 컬럼이 다수다.
+이상치를 "제거"하는 게 아니라 "경계값으로 눌러주는(clip)" 방식을 쓴다. 제공 방식:
+  - winsorize: train 분위수(예: 1%/99%) 경계로 clip — 가장 단순·기본
+  - iqr_clip: Q1-k·IQR ~ Q3+k·IQR 경계로 clip
+  - grubbs: Grubbs 검정으로 "통계적으로 유의한 극값"만 잡아 clip — 가장 보수적
+  - lot_local: 로트(lot)별로 따로 분위수 경계 — 로트 간 정상적 차이를 이상치로 오판하지 않게
+또 multivariate_anomaly_score(): IsolationForest 점수를 새 feature 컬럼으로 추가 (제거가 아님).
+
+핵심 규칙: 경계(분위수/IQR/Grubbs)는 항상 train에서만 계산하고 그 경계를 val/test에 그대로 적용 (data leakage 방지).
 """
 import pandas as pd
 import numpy as np
@@ -35,15 +36,16 @@ def detect_outliers_iqr(xs, feat_cols, multiplier=1.5):
     Q3 = xs[feat_cols].quantile(0.75)
     IQR = Q3 - Q1
 
+    # 표준 IQR 규칙: [Q1 - k·IQR, Q3 + k·IQR] 밖이면 이상치
     low = xs[feat_cols] < (Q1 - multiplier * IQR)
     high = xs[feat_cols] > (Q3 + multiplier * IQR)
-    outlier_count = (low | high).sum()
-    outlier_pct = (outlier_count / len(xs) * 100).round(2)
+    outlier_count = (low | high).sum()                       # 컬럼별 이상치 개수
+    outlier_pct = (outlier_count / len(xs) * 100).round(2)   # 컬럼별 이상치 비율(%)
 
     stats = pd.DataFrame({
         "outlier_count": outlier_count,
         "outlier_pct": outlier_pct,
-    }).sort_values("outlier_pct", ascending=False)
+    }).sort_values("outlier_pct", ascending=False)           # 이상치 많은 컬럼이 위로
 
     print(f"[이상치 탐지] IQR × {multiplier}")
     print(f"  이상치 > 5%: {(stats['outlier_pct'] > 5).sum()}개")
@@ -59,12 +61,12 @@ def _match_bounds_dtype(xs_train, feat_cols, lower, upper):
     float32 파이프라인에서 clip 결과가 float64로 승격되는 것을 방지한다.
     """
     try:
-        in_dtype = xs_train[feat_cols].dtypes.iloc[0]
+        in_dtype = xs_train[feat_cols].dtypes.iloc[0]   # 첫 feature의 dtype을 대표값으로
     except (AttributeError, IndexError):
-        return lower, upper
+        return lower, upper                              # feat_cols가 비었거나 이상하면 그대로 반환
     if in_dtype == np.float32:
         if hasattr(lower, 'astype'):
-            # X1086 파생 bounds는 float64 유지 (날짜값 8자리, float32 정밀도 부족)
+            # X1086 파생 경계만 float64 유지 (8자리 날짜값 — float32 정밀도 부족)
             safe_idx = [i for i in lower.index if not str(i).startswith("X1086")]
             lower[safe_idx] = lower[safe_idx].astype('float32')
         if hasattr(upper, 'astype'):
@@ -86,12 +88,14 @@ def _apply_clip_to_splits(xs_train, xs_val, xs_test, feat_cols, lower, upper):
     xs_train, xs_val, xs_test : DataFrame (클리핑된 복사본)
     bounds : DataFrame (feature별 lower/upper 경계)
     """
+    # 원본을 건드리지 않게 복사본에서 clip
     xs_train = xs_train.copy()
     xs_val = xs_val.copy()
     xs_test = xs_test.copy()
 
-    lower, upper = _match_bounds_dtype(xs_train, feat_cols, lower, upper)
+    lower, upper = _match_bounds_dtype(xs_train, feat_cols, lower, upper)   # float64 승격 방지
 
+    # 같은 경계를 3 split에 그대로 적용 (경계는 호출 측에서 train 기준으로 계산해 넘김)
     xs_train[feat_cols] = xs_train[feat_cols].clip(lower, upper, axis=1)
     xs_val[feat_cols] = xs_val[feat_cols].clip(lower, upper, axis=1)
     xs_test[feat_cols] = xs_test[feat_cols].clip(lower, upper, axis=1)
@@ -119,6 +123,7 @@ def winsorize(xs_train, xs_val, xs_test, feat_cols,
     xs_train, xs_val, xs_test : DataFrame (클리핑된 복사본)
     bounds : DataFrame (feature별 lower/upper 경계)
     """
+    # 경계 = train의 분위수 (val/test 값은 보지 않음)
     lower = xs_train[feat_cols].quantile(lower_pct)
     upper = xs_train[feat_cols].quantile(upper_pct)
 
@@ -148,6 +153,7 @@ def iqr_clip(xs_train, xs_val, xs_test, feat_cols, multiplier=1.5):
     xs_train, xs_val, xs_test : DataFrame (클리핑된 복사본)
     bounds : DataFrame (feature별 lower/upper 경계)
     """
+    # 경계 = train 기준 [Q1 - k·IQR, Q3 + k·IQR]
     Q1 = xs_train[feat_cols].quantile(0.25)
     Q3 = xs_train[feat_cols].quantile(0.75)
     IQR = Q3 - Q1
@@ -166,7 +172,7 @@ def iqr_clip(xs_train, xs_val, xs_test, feat_cols, multiplier=1.5):
 def grubbs_clip(xs_train, xs_val, xs_test, feat_cols,
                 alpha=0.05, max_rounds=5):
     """
-    Grubbs 검정 기반 이상치 처리 (논문 5-4 근거)
+    Grubbs 검정 기반 이상치 처리
     통계적으로 유의한 이상치만 경계값으로 clip — 가장 보수적
 
     원리:
@@ -197,9 +203,10 @@ def grubbs_clip(xs_train, xs_val, xs_test, feat_cols,
     lower_bounds = {}
     upper_bounds = {}
 
+    # feature마다 train 값에서 극값을 하나씩 떼어내 보며 "통계적으로 이상치인지" 판정
     for col in feat_cols:
         data = xs_train[col].dropna().values
-        if len(data) < 3:
+        if len(data) < 3:                       # Grubbs는 n≥3 필요 → 그 미만이면 그냥 min/max를 경계로
             lower_bounds[col] = data.min() if len(data) > 0 else np.nan
             upper_bounds[col] = data.max() if len(data) > 0 else np.nan
             continue
@@ -207,31 +214,31 @@ def grubbs_clip(xs_train, xs_val, xs_test, feat_cols,
         col_lower = data.min()
         col_upper = data.max()
 
-        for _ in range(max_rounds):
+        for _ in range(max_rounds):             # 최대 max_rounds번 "가장 튀는 값" 하나씩 검정
             n = len(data)
             if n < 3:
                 break
 
             mean = data.mean()
             std = data.std(ddof=1)
-            if std == 0:
+            if std == 0:                        # 모두 같은 값이면 이상치 개념 없음 → 종료
                 break
 
-            # 양쪽 극값 중 평균에서 더 먼 값 선택
+            # 평균에서 가장 멀리 떨어진 값(양/음 어느 쪽이든)의 검정통계량 G
             abs_dev = np.abs(data - mean)
             max_idx = abs_dev.argmax()
             G = abs_dev[max_idx] / std
 
-            # Grubbs 임계값 계산 (t-분포 기반)
+            # Grubbs 임계값 (t-분포 기반). G > G_crit 이면 그 값은 유의한 이상치
             t_crit = sp_stats.t.ppf(1 - alpha / (2 * n), n - 2)
             G_crit = ((n - 1) / np.sqrt(n)) * np.sqrt(
                 t_crit**2 / (n - 2 + t_crit**2)
             )
 
             if G <= G_crit:
-                break  # 유의한 이상치 없음 → 종료
+                break  # 더 이상 유의한 이상치 없음 → 이 feature 종료
 
-            # 이상치 제거 후 경계 갱신
+            # 이상치로 판정된 값을 빼고 다시 검정 (남은 데이터의 min/max가 새 경계가 됨)
             data = np.delete(data, max_idx)
             total_clipped += 1
 
@@ -245,6 +252,7 @@ def grubbs_clip(xs_train, xs_val, xs_test, feat_cols,
 
     lower_s, upper_s = _match_bounds_dtype(xs_train, feat_cols, lower_s, upper_s)
 
+    # train에서 구한 "이상치 제외 min/max"를 3 split에 동일하게 clip 경계로 적용
     xs_train[feat_cols] = xs_train[feat_cols].clip(lower_s, upper_s, axis=1)
     xs_val[feat_cols] = xs_val[feat_cols].clip(lower_s, upper_s, axis=1)
     xs_test[feat_cols] = xs_test[feat_cols].clip(lower_s, upper_s, axis=1)
@@ -261,7 +269,7 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
                    run_id_col="run_wf_xy", lower_pct=0.01, upper_pct=0.99,
                    min_lot_size=10):
     """
-    로트별 국소 기준 이상치 처리 (논문 5-3 근거, AEC DPAT 방식)
+    로트별 국소 기준 이상치 처리 (AEC DPAT 방식)
     전역 기준 대신 로트(lot)별로 분위수 경계를 세움
 
     원리:
@@ -292,31 +300,31 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
     xs_val = xs_val.copy()
     xs_test = xs_test.copy()
 
-    # 로트 컬럼 준비
+    # 로트 ID 컬럼 확보: run_wf_xy를 쓰면 파싱해서 _lot을, 아니면 주어진 컬럼을 그대로 사용
     parsed_cols = None
     if run_id_col == "run_wf_xy" and "run_wf_xy" in xs_train.columns:
         for df in [xs_train, xs_val, xs_test]:
             parse_run_wf_xy(df, prefix="_", inplace=True, verbose=False)
         lot_col = "_lot"
-        parsed_cols = ["_lot", "_wafer_no", "_die_x", "_die_y"]
+        parsed_cols = ["_lot", "_wafer_no", "_die_x", "_die_y"]   # 끝에 지울 임시 컬럼
     elif run_id_col in xs_train.columns:
         lot_col = run_id_col
     else:
         raise ValueError(f"컬럼 '{run_id_col}'을 찾을 수 없습니다.")
 
-    # 전역 기준 (소량 로트 fallback용) — train 기준
+    # 소량 로트가 fallback으로 쓸 전역 경계 (train 기준)
     global_lower = xs_train[feat_cols].quantile(lower_pct)
     global_upper = xs_train[feat_cols].quantile(upper_pct)
     global_lower, global_upper = _match_bounds_dtype(
         xs_train, feat_cols, global_lower, global_upper
     )
 
-    # 로트별 처리 (train 기준으로 경계 산출)
+    # 로트별 처리 — 충분히 큰 로트만 자체 경계, 작은 로트는 전역 경계
     lot_sizes = xs_train[lot_col].value_counts()
     large_lots = lot_sizes[lot_sizes >= min_lot_size].index
     large_lot_set = set(large_lots)
 
-    # 대형 로트의 경계를 한 번만 계산해 캐싱 (val/test에서 재사용)
+    # 큰 로트들의 경계를 train 기준으로 한 번씩만 계산해 저장 (val/test에서 그대로 재사용)
     lot_bounds = {}
     for lot in large_lots:
         mask_tr = xs_train[lot_col] == lot
@@ -331,7 +339,7 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
             xs_train.loc[mask_tr, feat_cols].clip(lot_lower, lot_upper, axis=1)
         )
 
-    # 소형 로트: 전역 기준 적용
+    # 작은 로트(train): 통계가 불안정하므로 전역 경계 적용
     small_lots = lot_sizes[lot_sizes < min_lot_size].index
     for lot in small_lots:
         mask_tr = xs_train[lot_col] == lot
@@ -339,7 +347,7 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
             xs_train.loc[mask_tr, feat_cols].clip(global_lower, global_upper, axis=1)
         )
 
-    # val/test: 캐시된 경계 재사용, 없으면 전역 기준
+    # val/test: 그 로트가 train에서 큰 로트였으면 캐시된 경계, 아니면(작거나 train에 없던 로트) 전역 경계
     for df in [xs_val, xs_test]:
         for lot in df[lot_col].unique():
             mask = df[lot_col] == lot
@@ -353,7 +361,7 @@ def lot_local_clip(xs_train, xs_val, xs_test, feat_cols,
                     df.loc[mask, feat_cols].clip(global_lower, global_upper, axis=1)
                 )
 
-    # 임시 컬럼 제거
+    # 파싱하느라 만든 임시 컬럼 정리
     if parsed_cols is not None:
         for df in [xs_train, xs_val, xs_test]:
             df.drop(columns=parsed_cols, inplace=True)
@@ -417,11 +425,11 @@ def run_outlier_treatment(xs_train, xs_val, xs_test, feat_cols,
 
     report = {"method": method}
 
-    # 1. 처리 전 이상치 현황
+    # 1) 처리 전 이상치 현황 (참고용 — 데이터는 안 바꿈)
     stats_before = detect_outliers_iqr(xs_train, feat_cols)
     report["before"] = stats_before
 
-    # 2. 메서드별 처리
+    # 2) 선택한 방식으로 처리
     if method == "winsorize":
         xs_train, xs_val, xs_test, bounds = winsorize(
             xs_train, xs_val, xs_test, feat_cols, lower_pct, upper_pct
@@ -461,9 +469,9 @@ def run_outlier_treatment(xs_train, xs_val, xs_test, feat_cols,
     return xs_train, xs_val, xs_test, report
 
 
-# ============================================================
-# 2차 funnel — IsolationForest 다변량 이상치 점수 (feature 추가)
-# ============================================================
+# ------------------------------------------------------------
+# IsolationForest 다변량 이상치 점수 — 제거가 아니라 feature 컬럼으로 추가
+# ------------------------------------------------------------
 
 def multivariate_anomaly_score(xs_train, xs_val, xs_test, feat_cols,
                                contamination='auto',
@@ -474,8 +482,8 @@ def multivariate_anomaly_score(xs_train, xs_val, xs_test, feat_cols,
     """
     IsolationForest 기반 다변량 이상치 점수를 컬럼으로 추가 (제거 아님).
 
-    단변량 clip의 한계 보완 목적 (EDA: 단일 |r| max=0.037). 트리 모델이
-    `iso_anomaly_score > τ` 분기로 자동 활용 가능.
+    단변량 clip은 "한 컬럼 안에서 튀는 값"만 잡지만, 이건 여러 컬럼을 동시에 보고
+    "조합이 이상한 행"을 점수화한다. 트리 모델이 `iso_anomaly_score > τ` 분기로 자동 활용 가능.
 
     Parameters
     ----------
@@ -498,6 +506,7 @@ def multivariate_anomaly_score(xs_train, xs_val, xs_test, feat_cols,
     """
     from sklearn.ensemble import IsolationForest
 
+    # fit은 train에서만 (leakage 방지)
     iso = IsolationForest(contamination=contamination,
                           n_estimators=n_estimators,
                           max_samples=max_samples,
@@ -505,9 +514,8 @@ def multivariate_anomaly_score(xs_train, xs_val, xs_test, feat_cols,
                           n_jobs=-1)
     iso.fit(xs_train[feat_cols].values)
 
-    # decision_function: 높을수록 normal, 낮을수록 anomaly
-    # 부호 뒤집어 "높을수록 이상"으로 통일. dtype은 feature와 동일하게 맞춰
-    # 기존 파이프라인의 float32 일관성 유지
+    # decision_function: 클수록 normal, 작을수록 anomaly → 부호를 뒤집어 "클수록 이상"으로 통일.
+    # dtype은 입력 feature에 맞춰(float32면 float32) 파이프라인 dtype 일관성 유지.
     in_dtype = xs_train[feat_cols].dtypes.iloc[0]
     for df in [xs_train, xs_val, xs_test]:
         scores = -iso.decision_function(df[feat_cols].values)
@@ -515,7 +523,7 @@ def multivariate_anomaly_score(xs_train, xs_val, xs_test, feat_cols,
             scores = scores.astype(np.float32, copy=False)
         df[score_col] = scores
 
-    new_feat_cols = list(feat_cols) + [score_col]
+    new_feat_cols = list(feat_cols) + [score_col]   # feature 목록에 새 컬럼 합쳐서 반환
     report = {
         'n_estimators': n_estimators,
         'contamination': contamination,

@@ -1,8 +1,11 @@
 """
-실험 결과 기록 모듈
+실험 결과 기록 모듈.
 
-- csv: 실험별 핵심 지표 테이블 (1행 = 1실험, 공용)
-- sqlite: 모든 trial 상세 + 재현 메타데이터 (팀원별 optuna_{USER}.db)
+두 군데에 나눠 기록한다:
+  - csv (experiments.csv): 실험별 핵심 지표 1행씩 — 팀 공용 요약 테이블
+  - sqlite (optuna_{USER}.db): 모든 trial 상세 + 재현 메타데이터 — 팀원별 개인 파일
+
+Colab에서는 Google Drive와 csv/db를 주고받는 헬퍼(download/upload_to_drive)도 제공한다.
 
 사용법:
     from utils.experiment import log_experiment
@@ -28,11 +31,11 @@ import pandas as pd
 from utils.config import ENV, OUTPUT_DIR
 
 
-# ─── 저장 경로 ────────────────────────────────────────────
+# 공용 실험 요약 csv 경로 (4_output/experiments/experiments.csv)
 EXP_DIR = os.path.join(OUTPUT_DIR, "experiments")
 CSV_PATH = os.path.join(EXP_DIR, "experiments.csv")
 
-# ─── csv 컬럼 정의 ────────────────────────────────────────
+# csv 컬럼 순서·이름 (한글 헤더 — Excel에서 바로 보기 편하게)
 CSV_COLUMNS = [
     "실험번호", "날짜", "타입", "베스트모델",
     "val_rmse", "test_rmse", "val_증감", "test_증감",
@@ -41,7 +44,7 @@ CSV_COLUMNS = [
 
 
 def _parse_exp_id(exp_id: str):
-    """실험번호 파싱 → (팀, 모델, 실험번호)"""
+    """실험번호 '팀-모델-실험번호'를 세 조각으로 쪼갠다 (형식 안 맞으면 즉시 에러)."""
     parts = exp_id.split("-")
     if len(parts) != 3:
         raise ValueError(
@@ -51,24 +54,24 @@ def _parse_exp_id(exp_id: str):
 
 
 def _get_baseline_id(exp_id: str) -> str:
-    """같은 팀-모델의 기준 실험번호(001) 반환"""
+    """같은 팀·모델의 기준 실험번호(끝자리 001)를 만들어 반환 — 증감 계산의 기준점."""
     team, model, _ = _parse_exp_id(exp_id)
     return f"{team}-{model}-001"
 
 
 def _load_csv(path=None) -> pd.DataFrame:
-    """기존 csv 로드. 없거나 비어있으면 빈 DataFrame 반환"""
+    """기존 실험 csv를 읽는다. 파일이 없거나 비었거나 깨졌으면 빈 DataFrame(컬럼만)으로 시작."""
     p = path or CSV_PATH
     if os.path.exists(p) and os.path.getsize(p) > 0:
         try:
-            return pd.read_csv(p, dtype={"실험번호": str})
+            return pd.read_csv(p, dtype={"실험번호": str})   # 실험번호는 '1-1-001' 형태 — 끝자리 0이 잘리지 않게 문자열로 강제
         except Exception:
             return pd.DataFrame(columns=CSV_COLUMNS)
     return pd.DataFrame(columns=CSV_COLUMNS)
 
 
 def _save_csv(df: pd.DataFrame, path=None):
-    """csv 저장 (UTF-8 BOM: 한글 Excel 호환)"""
+    """실험 csv 저장. encoding='utf-8-sig'(BOM 포함)이라야 한글 헤더가 Excel에서 안 깨진다."""
     p = path or CSV_PATH
     os.makedirs(os.path.dirname(p), exist_ok=True)
     df.to_csv(p, index=False, encoding="utf-8-sig")
@@ -90,11 +93,11 @@ def download_from_drive(
     db_gdrive_id : str
         본인 optuna_{USER}.db 파일 ID
     db_path : str
-        .db 파일의 로컬 저장 경로 (없으면 새 파일로 생성)
+        .db 파일의 로컬 저장 경로. None이면 db 다운로드를 건너뛴다 (csv만 받음).
     """
-    if ENV != "colab":
+    if ENV != "colab":          # 로컬은 디스크에 이미 있으므로 받을 필요 없음
         return
-    if not csv_gdrive_id and not db_gdrive_id:
+    if not csv_gdrive_id and not db_gdrive_id:   # 받을 ID가 하나도 없으면 할 일 없음
         return
 
     import gdown
@@ -137,7 +140,7 @@ def upload_to_drive(
 
     from googleapiclient.http import MediaFileUpload
 
-    # 인증 + service 객체를 한 번만 생성하고 캐싱
+    # Drive API service 객체는 인증 비용이 크므로 모듈 전역에 한 번만 만들어 두고 재사용
     global _drive_service
     if "_drive_service" not in globals() or _drive_service is None:
         from google.colab import auth
@@ -146,6 +149,7 @@ def upload_to_drive(
         _drive_service = build("drive", "v3")
     service = _drive_service
 
+    # files().update(fileId=...): 같은 파일 ID에 내용만 갈아끼움 → 링크 유지한 채 덮어쓰기
     if csv_gdrive_id and os.path.exists(CSV_PATH):
         media = MediaFileUpload(CSV_PATH, mimetype="text/csv")
         service.files().update(fileId=csv_gdrive_id, media_body=media).execute()
@@ -162,9 +166,9 @@ def check_exp_id(exp_id: str):
     실험번호 중복 검사. 이미 존재하면 에러 발생.
     노트북 상단(실험 설정 셀)에서 호출하여 코드 실행 전에 미리 차단.
     """
-    _parse_exp_id(exp_id)
+    _parse_exp_id(exp_id)                       # 형식 검증
     df = _load_csv()
-    if exp_id in df["실험번호"].values:
+    if exp_id in df["실험번호"].values:          # 이미 csv에 같은 번호가 있으면 막음
         raise ValueError(f"이미 존재하는 실험번호입니다: '{exp_id}'")
 
 
@@ -179,18 +183,19 @@ def _calc_delta(df: pd.DataFrame, exp_id: str, val_rmse: float, test_rmse: float
     """
     _, _, exp_num = _parse_exp_id(exp_id)
 
-    # 본인이 001이면 기준점 → 증감 없음
+    # 이번 실험 자신이 기준점(001)이면 비교 대상이 없음
     if exp_num == "001":
         return None, None
 
     baseline_id = _get_baseline_id(exp_id)
-    match = df[df["실험번호"] == baseline_id]
+    match = df[df["실험번호"] == baseline_id]    # csv에서 기준 실험 행 찾기
 
     if match.empty:
         print(f"  주의: 기준 실험 '{baseline_id}'이 없어 증감을 계산할 수 없습니다.")
         return None, None
 
     ref = match.iloc[0]
+    # (이번 값 - 기준 값). 둘 중 하나라도 NaN이면(예: val 미평가) 계산 안 함
     val_delta = (
         val_rmse - ref["val_rmse"]
         if pd.notna(val_rmse) and pd.notna(ref["val_rmse"])
@@ -245,31 +250,31 @@ def log_experiment(
     csv_gdrive_id : str
         공용 experiments.csv Drive 파일 ID (Colab에서 업로드용)
     """
-    # 형식 검증
-    _parse_exp_id(exp_id)
+    _parse_exp_id(exp_id)   # 형식 검증 (잘못된 번호면 여기서 멈춤)
 
-    # ── csv 처리 ───────────────────────────────────────────
+    # --- 1) 기존 csv 로드 + 중복 처리 ---
     _csv = csv_path or CSV_PATH
     df = _load_csv(_csv)
 
-    # 중복 체크
     if exp_id in df["실험번호"].values:
+        # 같은 번호가 이미 있으면 사용자에게 덮어쓸지 물어봄 (y가 아니면 그냥 종료)
         print(f"경고: 실험번호 '{exp_id}'가 이미 존재합니다.")
         answer = input("덮어쓰시겠습니까? (y/n): ").strip().lower()
         if answer != "y":
             print("저장 취소.")
             return
-        df = df[df["실험번호"] != exp_id].reset_index(drop=True)
+        df = df[df["실험번호"] != exp_id].reset_index(drop=True)   # 기존 행 제거 후 새로 추가
 
-    # 증감 계산
+    # --- 2) 기준(001) 대비 증감 계산 ---
     val_delta, test_delta = _calc_delta(df, exp_id, val_rmse, test_rmse)
 
-    # 행 추가
+    # --- 3) 새 행 만들어 붙이고 저장 ---
     new_row = pd.DataFrame([{
         "실험번호": exp_id,
         "날짜": datetime.now().strftime("%Y-%m-%d"),
         "타입": exp_type,
         "베스트모델": best_model,
+        # round(.., 6): csv가 너무 길어지지 않게 소수 6자리로. None이면 그대로 둠
         "val_rmse": round(val_rmse, 6) if val_rmse is not None else None,
         "test_rmse": round(test_rmse, 6) if test_rmse is not None else None,
         "val_증감": round(val_delta, 6) if val_delta is not None else None,
@@ -282,15 +287,15 @@ def log_experiment(
     df = pd.concat([df, new_row], ignore_index=True)
     _save_csv(df, _csv)
 
-    # ── 결과 출력 ─────────────────────────────────────────
+    # --- 4) 콘솔에 요약 출력 ---
     print(f"\n{'='*50}")
     print(f"실험 기록 완료: {exp_id}")
     print(f"  타입: {exp_type} | 베스트: {best_model} | user: {user}")
-    # val_rmse/test_rmse None 방어 (EVAL_VAL=False 경로 대응)
+    # val/test가 None일 수 있음(EVAL_VAL=False 등 평가 생략 경로) → "N/A"로 표시
     _val_str = f"{val_rmse:.6f}" if pd.notna(val_rmse) else "N/A"
     print(f"  Val RMSE:  {_val_str}", end="")
     if pd.notna(val_delta):
-        sign = "+" if val_delta >= 0 else ""
+        sign = "+" if val_delta >= 0 else ""   # 악화(+)인지 개선(-)인지 부호로 표시
         print(f"  ({sign}{val_delta:.6f})", end="")
     print()
     print(f"  Test RMSE: {test_rmse:.6f}" if pd.notna(test_rmse) else "  Test RMSE: N/A", end="")
@@ -302,7 +307,7 @@ def log_experiment(
     print(f"  csv: {_csv}")
     print(f"{'='*50}")
 
-    # ── Colab이면 Google Drive에 업로드 ─────────────────────
+    # --- 5) Colab이면 갱신된 csv를 Drive에도 올림 ---
     if csv_gdrive_id:
         upload_to_drive(csv_gdrive_id=csv_gdrive_id)
 
@@ -328,6 +333,7 @@ def make_trial_upload_callback(db_path: str, db_gdrive_id: str):
         Optuna callback 함수 (study, trial) → None
     """
     def _callback(study, trial):
+        # 업로드가 실패해도(네트워크 등) study는 계속 돌아야 하므로 예외를 삼키고 로그만 남김
         try:
             upload_to_drive(db_gdrive_id=db_gdrive_id, db_path=db_path)
         except Exception as e:
