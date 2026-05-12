@@ -129,6 +129,9 @@ def xgb_space(trial):
         params["tweedie_variance_power"] = trial.suggest_float(
             "tweedie_variance_power", 1.05, 1.99
         )
+        # reg:tweedie는 log-space 예측이라 zero-inflated·극소 target에서 leaf step이 폭주 → exp() overflow → NaN.
+        # XGBoost는 count:poisson에는 max_delta_step=0.7을 자동으로 넣지만 reg:tweedie에는 안 넣어줘서 직접 켠다 (발산 가드).
+        params["max_delta_step"] = 0.7
     else:
         params["objective"] = obj_choice   # squarederror / count:poisson 그대로
     return params

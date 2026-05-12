@@ -312,8 +312,14 @@ def run_hpo(
             if X_eval_t is not None:
                 test_pred_accum += res["model"].predict(X_eval_t) / n_folds
 
+        # OOF에 NaN이 있으면 (fold 누락이 아니라) 모델 예측 자체가 NaN인 경우 — 보통 tweedie/poisson 류
+        # log-space loss가 발산해서 exp() overflow → NaN. 셀 전체를 죽이지 말고 이 trial만 폐기(pruned)하고 계속.
         if np.isnan(oof).any():
-            raise RuntimeError("OOF has NaN — fold coverage bug")
+            n_nan = int(np.isnan(oof).sum())
+            print(f"[trial {trial.number}] 예측에 NaN {n_nan}개 (모델 발산 추정: "
+                  f"objective={hp.get('objective')}, tweedie_power={hp.get('tweedie_variance_power')}) "
+                  f"→ 이 trial 폐기")
+            raise optuna.TrialPruned()
 
         # objective 반환값 = train OOF unit RMSE (역변환·곱셈까지 반영한 "최종 예측" 기준)
         train_rmse = _eval_split_rmse_local(xs_train, oof, multiplier_train, y_true_unit)
@@ -405,11 +411,21 @@ def _hp_from_best(best_params, model_name, n_jobs=None):
         hp.setdefault("n_jobs", -1)
         hp.setdefault("tree_method", "hist")
         hp.setdefault("verbosity", 0)
+        # xgb_space와 동일: reg:tweedie면 발산 가드(max_delta_step) — best_params엔 안 박혀 있을 수 있으므로 setdefault로 복원
+        if str(hp.get("objective", "")).startswith("reg:tweedie"):
+            hp.setdefault("max_delta_step", 0.7)
     elif model_name == "catboost":
         hp.setdefault("random_seed", _S)
         hp.setdefault("verbose", False)
         hp.setdefault("allow_writing_files", False)
     elif model_name == "et":
+        # Optuna trial.params엔 max_features_kind / max_features_frac 만 기록됨 → et_space와 동일하게 max_features로 환원
+        if "max_features_kind" in hp:
+            mf_kind = hp.pop("max_features_kind")
+            mf_frac = hp.pop("max_features_frac", None)
+            hp["max_features"] = mf_frac if (mf_kind == "frac" and mf_frac is not None) else "sqrt"
+        hp.setdefault("max_features", "sqrt")
+        hp.setdefault("bootstrap", True)        # et_space는 항상 bootstrap=True (sklearn 기본은 False라 빠지면 안 됨)
         hp.setdefault("random_state", _S)
         hp.setdefault("n_jobs", -1)
     elif model_name == "enet":
@@ -580,7 +596,10 @@ def refit_best(
               f"tr_units={len(tr_units)}, vl_units={len(vl_units)}")
 
     if np.isnan(oof_pred).any():
-        raise RuntimeError("oof_pred has NaN — unit coverage bug")
+        raise RuntimeError(
+            "oof_pred has NaN — fold 커버리지 문제가 아니라 모델 예측 자체가 NaN "
+            "(tweedie/poisson 류 log-space loss 발산 가능성). best_params 확인 필요."
+        )
 
     # multiplier 곱셈을 마지막에 일괄 적용 → oof/val/test가 모두 "최종 예측" 의미로 통일됨
     if multiplier_train is not None:
@@ -952,8 +971,11 @@ def run_clf_hpo(
             if X_test is not None:
                 test_proba_accum += clf.predict_proba(X_test)[:, 1] / n_folds
 
+        # OOF 확률에 NaN이 있으면 모델 예측 자체가 NaN인 경우 — 셀을 죽이지 말고 이 trial만 폐기하고 계속
         if np.isnan(oof_proba).any():
-            raise RuntimeError("oof_proba has NaN — fold coverage bug")
+            n_nan = int(np.isnan(oof_proba).sum())
+            print(f"[clf trial {trial.number}] 예측 확률에 NaN {n_nan}개 → 이 trial 폐기")
+            raise optuna.TrialPruned()
 
         train_rmse = _eval_split_rmse(xs_train, oof_proba, y_true_unit)   # objective 반환값
         trial.set_user_attr("train_rmse", train_rmse)
@@ -1027,6 +1049,14 @@ def _clf_hp_with_defaults(model_name, best_params, n_jobs=None):
         hp.setdefault("verbose",             False)
         hp.setdefault("allow_writing_files", False)
     elif model_name == "et":
+        # et_clf_space도 max_features_kind/max_features_frac, class_weight를 categorical로 둠 → 모델 kwargs로 환원
+        if "max_features_kind" in hp:
+            mf_kind = hp.pop("max_features_kind")
+            mf_frac = hp.pop("max_features_frac", None)
+            hp["max_features"] = mf_frac if (mf_kind == "frac" and mf_frac is not None) else "sqrt"
+        hp.setdefault("max_features", "sqrt")
+        if hp.get("class_weight") == "None":   # trial.params엔 "None" 문자열로 남음 (et_clf_space는 resolved None을 넣지만)
+            hp["class_weight"] = None
         hp.setdefault("random_state", SEED)
         hp.setdefault("n_jobs",       -1)
         hp.setdefault("bootstrap",    True)
@@ -1091,7 +1121,9 @@ def refit_clf_best(
               f"pos_ratio={y_tr.mean():.3f}")
 
     if np.isnan(oof_proba).any():
-        raise RuntimeError("oof_proba has NaN — unit coverage bug")
+        raise RuntimeError(
+            "oof_proba has NaN — fold 커버리지 문제가 아니라 분류기 예측 자체가 NaN. best_params 확인 필요."
+        )
 
     return {
         "oof_proba_die":  oof_proba,

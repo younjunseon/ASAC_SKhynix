@@ -165,7 +165,10 @@ AXES = {
     "lds":              [True, False],
 }
 
-SEEDS = [42, 7, 123, 2024, 31415]
+# baseline은 LGBM default 고정(sampling 없어 결정론적) + run_one이 seed를 모델에 안 넘김 →
+# seed를 늘려도 결과가 비트 단위로 동일하다 (master.csv val_std 전 행 0.0 실측).
+# strategy_common §7 "모델 random_state=42 고정" 정책과도 일치하므로 1개만 쓴다.
+SEEDS = [42]
 
 
 # ═════════════════════════════════════════════════════════════
@@ -180,21 +183,34 @@ def generate_oat_grid():
     list of (axis_name, option, seed, cfg_dict, is_reference)
         - axis_name : 'reference' (참조 셀) 또는 흔든 축 이름
         - option : 그 축의 옵션 값
-        - seed : 5개 중 1개
-        - cfg_dict : REFERENCE 사본에 해당 axis만 option으로 override
+        - seed : SEEDS 중 1개 (baseline은 [42] 1개)
+        - cfg_dict : REFERENCE 사본에 해당 axis만 option으로 override.
+                     단 axis=='agg_preset'이면 reg_level도 'unit'으로 함께 override
+                     (position에선 agg_preset이 no-op이라 unit에서 12개 전부 비교).
         - is_reference : reference 셀 여부 (master.csv 기록용)
     """
     grid = []
 
-    # reference × 5 seed
+    # reference × seed들
     for seed in SEEDS:
         grid.append(("reference", REFERENCE[next(iter(REFERENCE))], seed,
                      deepcopy(REFERENCE), True))
 
-    # 각 축의 non-reference 옵션 × 5 seed
+    # 각 축의 non-reference 옵션 × seed들
     for axis, options in AXES.items():
         ref_val = REFERENCE[axis]
         for opt in options:
+            # agg_preset은 reg_level='position'(reference)에서는 die→unit 집계를 안 써서 no-op이다
+            # (_modules/e2e_hpo._prepare_unit_data: position 모드는 agg_funcs 무시).
+            # 집계가 실제로 쓰이는 reg_level='unit'으로 바꿔 12개 프리셋 전부 흔든다.
+            # reference가 position이라 P00_full6도 비교 대상에 포함 — 이 축은 unit 셀들로 자기완결.
+            if axis == "agg_preset":
+                cfg = deepcopy(REFERENCE)
+                cfg["reg_level"] = "unit"
+                cfg["agg_preset"] = opt
+                for seed in SEEDS:
+                    grid.append((axis, opt, seed, cfg, False))
+                continue
             if opt == ref_val:
                 continue
             cfg = deepcopy(REFERENCE)
