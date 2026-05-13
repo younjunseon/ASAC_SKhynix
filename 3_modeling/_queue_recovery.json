@@ -1,0 +1,14 @@
+{
+  "concurrency": 1,
+  "log_dir": "_runlogs",
+  "deadline": null,
+  "deadline_buffer_min": 0,
+  "defaults": {"overrides": {}},
+  "jobs": [
+    {
+      "nb": "01_zit/02_bag_zit_pphp.ipynb",
+      "group": 1,
+      "overrides": {"N_TRIALS": 0, "N_JOBS": 6}
+    }
+  ]
+}

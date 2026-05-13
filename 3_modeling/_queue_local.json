@@ -1,0 +1,26 @@
+{
+  "_comment": "이 PC 즉시 실행용 — group1: pphp 12개 1-trial 스모크(N_TRIALS=1), group2: zit2+ts_reverse 데드라인 실행. 4대 PC 분산은 jobs 목록만 갈아끼우면 됨.",
+  "concurrency": 3,
+  "log_dir": "_runlogs",
+  "deadline": "2026-05-13 14:00",
+  "deadline_buffer_min": 60,
+  "defaults": {"overrides": {"N_JOBS": 6}},
+  "jobs": [
+    {"nb": "02_reg_single/lgbm_pphp.ipynb",                 "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "02_reg_single/xgb_pphp.ipynb",                  "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "02_reg_single/catboost_pphp.ipynb",             "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "02_reg_single/et_pphp.ipynb",                   "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "03_two_stage/default/reg/lgbm_pphp.ipynb",      "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "03_two_stage/default/reg/xgb_pphp.ipynb",       "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "03_two_stage/default/reg/catboost_pphp.ipynb",  "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "03_two_stage/default/reg/et_pphp.ipynb",        "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "03_two_stage/default/clf/lgbm_pphp.ipynb",      "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "03_two_stage/default/clf/xgb_pphp.ipynb",       "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "03_two_stage/default/clf/catboost_pphp.ipynb",  "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+    {"nb": "03_two_stage/default/clf/et_pphp.ipynb",        "group": 1, "overrides": {"N_TRIALS": 1, "TIMEOUT_SEC": 7200}},
+
+    {"nb": "01_zit/01_zit_only_pphp.ipynb",   "group": 2, "timeout_to_deadline": true},
+    {"nb": "01_zit/02_bag_zit_pphp.ipynb",    "group": 2, "timeout_to_deadline": true},
+    {"nb": "03_two_stage/reverse/ts_reverse_pphp.ipynb", "group": 2, "timeout_to_deadline": true}
+  ]
+}

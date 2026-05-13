@@ -98,6 +98,11 @@ _autoclicker/**
 3_modeling/_run/
 3_modeling/_run/**
 
+# run_queue.py 실행 산출물 (임시 사본 / 로그 / 실행본 노트북)
+3_modeling/_runlogs/
+3_modeling/_runlogs/**
+**/*.__q__.ipynb
+
 # Colab 부트스트랩용 zip 산출물 (Drive 업로드 후 폐기)
 _dist/
 _dist/**
