@@ -56,6 +56,14 @@ from utils.data import get_feat_cols, load_all, split_xs                       #
 from modules import preprocess                                                 # noqa: E402
 from meta_features import add_meta_features                                    # noqa: E402
 
+# ZITETRegressor는 노트북 인라인 정의 → pickle 역직렬화용 stub
+try:
+    from modules.zit import ZITboostRegressor as _ZITBase
+    class ZITETRegressor(_ZITBase):  # noqa: N801
+        pass
+except Exception:
+    pass
+
 
 # 기본 PP_FIXED — lgbm/xgb/et/catboost 노트북 공통값 (strategy_common.md §1)
 PP_FIXED_TREE = {
@@ -81,6 +89,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--zit-sub-model", choices=("pi", "mu", "phi"), default=None,
                    help="ZIT(ZITboostRegressor) fold_models일 때 어느 내부 LGBM에서 SHAP을 뽑을지. "
                         "pi=zero 분류, mu=Tweedie mean, phi=dispersion. lgbm/xgb/cat 단일 모델이면 무시.")
+    p.add_argument("--ts-sub-model", choices=("reg", "clf"), default=None,
+                   help="ts_reverse fold_models는 (LGBMRegressor, LGBMClassifier) tuple. "
+                        "reg=index 0 (회귀), clf=index 1 (분류). ts_reverse 이외에는 무시.")
     p.add_argument("--clip-y-extreme", action=argparse.BooleanOptionalAction, default=True,
                    help="train의 y>=1.0 행을 두 번째 큰 값으로 clip (노트북 기본 동작)")
     p.add_argument("--position-mode", default="raw", choices=("raw", "ohe"),
@@ -115,7 +126,7 @@ def _predict_contrib(model, X: np.ndarray, zit_sub: str | None = None) -> np.nda
     ZITboostRegressor면 zit_sub ∈ {'pi','mu','phi'} 로 내부 LGBM 선택.
     """
     cls = type(model).__name__
-    if cls == "ZITboostRegressor":
+    if cls in {"ZITboostRegressor", "BagZITboostRegressor", "ZITETRegressor"}:
         if zit_sub == "pi":
             inner = model.lgb_pi_
         elif zit_sub == "mu":
@@ -127,7 +138,7 @@ def _predict_contrib(model, X: np.ndarray, zit_sub: str | None = None) -> np.nda
                 f"ZIT 모델인데 --zit-sub-model 미지정 (현재: {zit_sub!r}). "
                 "{{pi, mu, phi}} 중 하나 지정 필요."
             )
-        return inner.predict(X, pred_contrib=True)
+        return _predict_contrib(inner, X)  # inner가 LGBM이든 ET든 자동 분기
     if cls in {"LGBMRegressor", "LGBMClassifier"}:
         return model.predict(X, pred_contrib=True)
     if cls in {"XGBRegressor", "XGBClassifier"}:
@@ -135,8 +146,26 @@ def _predict_contrib(model, X: np.ndarray, zit_sub: str | None = None) -> np.nda
         import xgboost as xgb
         return model.get_booster().predict(xgb.DMatrix(X), pred_contribs=True)
     if cls in {"CatBoostRegressor", "CatBoostClassifier"}:
-        # ShapValues type — (n, n_features+1) 같은 형태
-        return model.get_feature_importance(type="ShapValues", data=X)
+        import catboost as cb
+        pool = cb.Pool(X)
+        return model.get_feature_importance(type="ShapValues", data=pool)
+    if cls in {"ExtraTreesRegressor", "ExtraTreesClassifier",
+               "RandomForestRegressor", "RandomForestClassifier"}:
+        import shap as shap_lib
+        explainer = shap_lib.TreeExplainer(model)
+        sv = explainer.shap_values(X)
+        ev = explainer.expected_value
+        # 이진 분류기: shap_values()가 [class0_arr, class1_arr] 리스트를 반환할 수 있음
+        # → class 1(양성) SHAP 값만 사용 (LGBM/XGB pred_contrib과 동일 기준)
+        if isinstance(sv, list):
+            sv = sv[-1]
+        # expected_value도 클래스별 배열일 수 있음 → class 1 값 사용
+        if hasattr(ev, "__len__") and len(ev) > 1:
+            ev_val = float(ev[-1])
+        else:
+            ev_val = float(ev) if not hasattr(ev, "__len__") else float(ev[0])
+        return np.column_stack([sv.astype(np.float32),
+                                np.full(len(X), ev_val, dtype=np.float32)])
     raise NotImplementedError(f"pred_contrib 미지원 모델: {cls}")
 
 
@@ -215,8 +244,12 @@ def main():
     args = parse_args()
     base_dir = Path(OUTPUT_DIR) / args.base_rel
     base_tag = args.base_rel.replace("/", "__").replace("\\", "__")
-    # ZIT면 out_dir 이름에 sub-model suffix 자동 추가 (예: ...__pi, ...__mu)
-    out_tag = f"{base_tag}__{args.zit_sub_model}" if args.zit_sub_model else base_tag
+    # sub-model suffix 자동 추가 (ZIT: ...__pi, ts_reverse: ...__reg/__clf)
+    out_tag = base_tag
+    if args.zit_sub_model:
+        out_tag = f"{out_tag}__{args.zit_sub_model}"
+    if args.ts_sub_model:
+        out_tag = f"{out_tag}__{args.ts_sub_model}"
     out_dir = Path(args.out_dir) if args.out_dir else (
         Path(__file__).resolve().parent / "shap_cache" / out_tag
     )
@@ -226,6 +259,8 @@ def main():
     print(f"[top_k]     {args.top_k if args.top_k > 0 else 'ALL'}")
     if args.zit_sub_model:
         print(f"[zit-sub]   {args.zit_sub_model} (ZITboostRegressor 내부 lgb_{args.zit_sub_model}_)")
+    if args.ts_sub_model:
+        print(f"[ts-sub]    {args.ts_sub_model} (ts_reverse tuple index {'0=reg' if args.ts_sub_model=='reg' else '1=clf'})")
 
     # ---- 1. best_params.json 로드 + 검증값 추출
     with open(base_dir / "best_params.json", encoding="utf-8") as f:
@@ -233,7 +268,7 @@ def main():
     expected_feat_names = bp["feature_names"]
     expected_n_units    = bp["n_units_train"]
     expected_uid_hash   = bp["unit_ids_hash"]
-    seed_kfold          = int(bp["study_meta"].get("seed_kfold", args.seed_kfold))
+    seed_kfold          = int(bp.get("study_meta", {}).get("seed_kfold", args.seed_kfold))
     n_folds             = int(bp.get("n_folds", args.n_folds))
     eff_pp              = bp["effective_pp_params"]
     objective           = bp["best_params_resolved"].get("objective", "regression")
@@ -243,13 +278,23 @@ def main():
     # ---- 2. fold_models.pkl 로드
     with open(base_dir / "fold_models.pkl", "rb") as f:
         fm = pickle.load(f)
-    fold_models = fm["fold_models"]
+    # dict 형식(ts_reverse 등)과 list 형식 모두 처리
+    fold_models = fm["fold_models"] if isinstance(fm, dict) else fm
     if len(fold_models) != n_folds:
         raise RuntimeError(f"fold_models 길이 {len(fold_models)} != n_folds {n_folds}")
+
+    # ts_reverse: 각 fold가 (LGBMRegressor, LGBMClassifier) tuple → 선택적 unwrap
+    # fold_models_raw 보존 — ts_reverse clf 577번째 피처(reg OOF 예측) 생성에 필요
+    fold_models_raw = list(fold_models)
+    if args.ts_sub_model is not None:
+        idx = 0 if args.ts_sub_model == "reg" else 1
+        fold_models = [m[idx] for m in fold_models]
+
     model_cls = type(fold_models[0]).__name__
-    if model_cls == "ZITboostRegressor" and args.zit_sub_model is None:
+    ZIT_CLASSES = {"ZITboostRegressor", "BagZITboostRegressor", "ZITETRegressor"}
+    if model_cls in ZIT_CLASSES and args.zit_sub_model is None:
         raise SystemExit(
-            f"[ABORT] base가 ZITboostRegressor인데 --zit-sub-model 미지정. "
+            f"[ABORT] base가 {model_cls}인데 --zit-sub-model 미지정. "
             "{pi, mu, phi} 중 하나 지정 (각각 별도 cache로 저장 권장)."
         )
     print(f"[fold model class] {model_cls}")
@@ -287,12 +332,29 @@ def main():
 
     # ---- 4. 재현성 검증 — feat_cols / unit_ids_hash
     if feat_cols_clean != expected_feat_names:
-        diff_a = set(feat_cols_clean) - set(expected_feat_names)
-        diff_b = set(expected_feat_names) - set(feat_cols_clean)
-        raise RuntimeError(
-            f"feat_cols 재현 실패. extra={sorted(diff_a)[:10]}... missing={sorted(diff_b)[:10]}..."
-            f" (len cur={len(feat_cols_clean)}, expected={len(expected_feat_names)})"
-        )
+        missing = [f for f in expected_feat_names if f not in set(feat_cols_clean)]
+        if missing:
+            # raw/001 스타일: preprocessing이 걸러낸 피처를 원본 xs에서 복원
+            # preprocess.run()은 xs를 수정하지 않으므로 xs.loc[xs_train.index] 정렬 가능
+            recoverable   = [f for f in missing if f in xs.columns]
+            unrecoverable = [f for f in missing if f not in xs.columns]
+            if unrecoverable:
+                raise RuntimeError(
+                    f"feat_cols 재현 실패: 원본 xs에도 없는 피처: {unrecoverable[:10]}"
+                )
+            print(f"  [WARN] {len(missing)}개 피처를 preprocessing이 제거 → 원본에서 복원 "
+                  f"(train 기준 median impute). 예: {missing[:5]}")
+            for col in recoverable:
+                med = xs.loc[xs_train.index, col].median()
+                xs_train[col] = xs.loc[xs_train.index, col].fillna(med).values
+                xs_val[col]   = xs.loc[xs_val.index,   col].fillna(med).values
+                xs_test[col]  = xs.loc[xs_test.index,  col].fillna(med).values
+            print(f"  [OK] {len(recoverable)}개 피처 복원 완료")
+        # extra 피처(pipeline이 추가한 것) 드롭 + expected 기준 정렬
+        extra = [f for f in feat_cols_clean if f not in set(expected_feat_names)]
+        if extra:
+            print(f"  [WARN] extra {len(extra)}개 드롭, expected 기준 정렬")
+        feat_cols_clean = expected_feat_names
     print(f"  [OK] feat_cols 일치 ({len(feat_cols_clean)}개)")
 
     train_uid = ys_input["train"][KEY_COL].unique()
@@ -315,6 +377,30 @@ def main():
     fold_sizes = [(len(tr), len(vl)) for tr, vl in folds]
     print(f"  fold (tr_units, vl_units): {fold_sizes}")
 
+    # ---- 6.5. ts_reverse clf 전용: reg OOF 예측을 577번째 feature로 추가
+    # clf 학습 시 X_tr_aug = np.hstack([X_tr, clip(reg_oof, 0)]) 로 훈련됐으므로 동일하게 재현
+    if args.ts_sub_model == "clf":
+        print("\n[4.5] ts_reverse clf: reg OOF 예측 → 577번째 feature 추가 ...")
+        reg_models_ts = [m[0] for m in fold_models_raw]
+        # train: outer fold-aware OOF reg 예측 (fold_models[i][0]이 outer full reg)
+        reg_oof_arr = np.full(len(X_train_full), np.nan, dtype=np.float64)
+        for i, (_, vl_units) in enumerate(folds):
+            vl_mask = xs_train[KEY_COL].isin(set(vl_units)).values
+            reg_oof_arr[vl_mask] = np.clip(
+                reg_models_ts[i].predict(X_train_full[vl_mask]), 0.0, None
+            )
+        if np.isnan(reg_oof_arr).any():
+            raise RuntimeError("ts_reverse clf: reg OOF에 NaN 잔존 — fold coverage 문제")
+        # val / test: 전체 fold reg 모델 평균
+        reg_val_arr  = np.mean([np.clip(m.predict(X_val_full),  0.0, None) for m in reg_models_ts], axis=0)
+        reg_test_arr = np.mean([np.clip(m.predict(X_test_full), 0.0, None) for m in reg_models_ts], axis=0)
+        X_train_full = np.column_stack([X_train_full, reg_oof_arr.astype(np.float32)])
+        X_val_full   = np.column_stack([X_val_full,   reg_val_arr.astype(np.float32)])
+        X_test_full  = np.column_stack([X_test_full,  reg_test_arr.astype(np.float32)])
+        feat_cols_clean = list(feat_cols_clean) + ["ts_reg_pred"]
+        n_features = len(feat_cols_clean)
+        print(f"  ts_reg_pred 추가 완료 → X_train: {X_train_full.shape}, n_features: {n_features}")
+
     # ---- 7. SHAP 추출
     print("\n[5] SHAP 추출 (OOF, fold-aware) ...")
     t0 = time.time()
@@ -336,10 +422,10 @@ def main():
     print(f"  done {time.time()-t0:.1f}s, shap_test_die shape={shap_test_die.shape}")
 
     # ---- 8. Sanity check — reconstructed prediction RMSE (unit mean)
-    # ZIT는 (1-π)×μ 의 mixture라 sub-model 하나만으로 final RMSE 재현 불가 → skip
-    if args.zit_sub_model:
-        print(f"\n[8] sanity: ZIT sub-model({args.zit_sub_model}) → final RMSE 재현 skip "
-              "((1-π)×μ mixture라 단일 sub-model로 비교 부적합).")
+    # ZIT sub-model 또는 ts_reverse clf(분류기)는 RMSE 재현 skip
+    if args.zit_sub_model or args.ts_sub_model == "clf":
+        sub_label = args.zit_sub_model or f"ts_clf({args.ts_sub_model})"
+        print(f"\n[8] sanity: {sub_label} → final RMSE 재현 skip.")
         oof_rmse_recon = float("nan")
         oof_rmse_saved = float("nan")
     else:
@@ -360,68 +446,72 @@ def main():
             else:
                 print(f"  [OK] OOF RMSE 일치 (diff={diff:.2e})")
 
-    # ---- 9. die→unit signed mean 집계
-    print("\n[9] die→unit signed mean 집계 ...")
+    # ---- 9. feature importance (meta.json 기록용)
     feat_names = list(feat_cols_clean)
-    oof_unit = die_to_unit_signed_mean(xs_train, shap_oof_die, feat_names)
-    val_unit = die_to_unit_signed_mean(xs_val,   shap_val_die, feat_names)
-    test_unit = die_to_unit_signed_mean(xs_test,  shap_test_die, feat_names)
-    print(f"  oof_unit  {oof_unit.shape}")
-    print(f"  val_unit  {val_unit.shape}")
-    print(f"  test_unit {test_unit.shape}")
-
-    # ---- 10. top-K feature 선택 (mean|SHAP| on OOF)
     abs_means = np.abs(shap_oof_die).mean(axis=0)
     importance = pd.Series(abs_means, index=feat_names).sort_values(ascending=False)
-    if args.top_k > 0:
-        keep = importance.head(args.top_k).index.tolist()
-    else:
-        keep = feat_names
-    keep_cols = [KEY_COL] + keep
-    print(f"\n[10] top-K={len(keep)} (전체 {len(feat_names)})")
-    print("  top 10:")
+    print(f"\n[9] feature importance top-10 (mean|SHAP|):")
     for nm, v in importance.head(10).items():
-        print(f"    {nm:>20s}  mean|SHAP|={v:.6e}")
+        print(f"    {nm:>20s}  {v:.6e}")
 
-    # ---- 11. 저장 — parquet (없으면 csv fallback)
-    print(f"\n[11] 저장 ({out_dir}) ...")
-    saved = {}
-    for name, df in [("oof_unit_shap",  oof_unit[keep_cols]),
-                     ("val_unit_shap",  val_unit[keep_cols]),
-                     ("test_unit_shap", test_unit[keep_cols])]:
-        try:
-            path = out_dir / f"{name}.parquet"
-            df.to_parquet(path, index=False)
-        except Exception as e:
-            path = out_dir / f"{name}.csv"
-            df.to_csv(path, index=False)
-            print(f"  parquet 실패({e}) → csv fallback {path.name}")
-        saved[name] = str(path)
-        print(f"  {path.name:30s}  shape={df.shape}  size={os.path.getsize(path)/1024:,.1f} KB")
+    # ---- 10. 저장 — die-level npz (oof+val+test 통합)
+    npz_path = out_dir / "die_shap.npz"
+    print(f"\n[10] die-level npz 저장: {npz_path} ...")
+    np.savez_compressed(
+        npz_path,
+        oof_shap=shap_oof_die,
+        val_shap=shap_val_die,
+        test_shap=shap_test_die,
+        feature_names=np.array(feat_names, dtype=object),
+        oof_serials=xs_train[KEY_COL].values.astype(str),
+        val_serials=xs_val[KEY_COL].values.astype(str),
+        test_serials=xs_test[KEY_COL].values.astype(str),
+    )
+    npz_mb = os.path.getsize(npz_path) / 1024 / 1024
+    print(f"  die_shap.npz  oof={shap_oof_die.shape}  val={shap_val_die.shape}  "
+          f"test={shap_test_die.shape}  {npz_mb:.1f} MB")
 
     meta = {
-        "base_rel":            args.base_rel,
-        "base_tag":            base_tag,
-        "model_class":         type(fold_models[0]).__name__,
-        "objective":           objective,
-        "n_folds":             n_folds,
-        "seed_kfold":          seed_kfold,
-        "n_features":          n_features,
-        "top_k":               len(keep),
-        "kept_features":       keep,
-        "importance_full":     {nm: float(v) for nm, v in importance.items()},
-        "unit_ids_hash":       got_hash,
-        "n_units_train":       int(len(train_uid)),
-        "oof_rmse_recon":      oof_rmse_recon,
-        "oof_rmse_saved":      oof_rmse_saved,
-        "clip_y_extreme":      bool(args.clip_y_extreme),
-        "position_mode":       args.position_mode,
-        "use_die_xy":          bool(args.use_die_xy),
-        "saved":               saved,
+        "base_rel":         args.base_rel,
+        "base_tag":         base_tag,
+        "zit_sub_model":    args.zit_sub_model,
+        "model_class":      type(fold_models[0]).__name__,
+        "objective":        objective,
+        "n_folds":          n_folds,
+        "seed_kfold":       seed_kfold,
+        "n_features":       n_features,
+        "feature_names":    feat_names,
+        "importance_top50": {nm: float(v) for nm, v in importance.head(50).items()},
+        "unit_ids_hash":    got_hash,
+        "n_units_train":    int(len(train_uid)),
+        "oof_rmse_recon":   oof_rmse_recon,
+        "oof_rmse_saved":   oof_rmse_saved,
+        "clip_y_extreme":   bool(args.clip_y_extreme),
+        "position_mode":    args.position_mode,
+        "use_die_xy":       bool(args.use_die_xy),
+        "npz_path":         str(npz_path),
+        "npz_mb":           round(npz_mb, 2),
     }
     with open(out_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"  meta.json 저장")
+
+    # ---- 11. unit-level parquet 저장 (die→unit signed mean, importance 내림차순 열 정렬)
+    ordered_feat = importance.index.tolist()   # 이미 mean|SHAP| 내림차순
+    print(f"\n[11] unit-level parquet 저장 ...")
+    for split_name, shap_die, serials in [
+        ("oof",  shap_oof_die,  xs_train[KEY_COL].values.astype(str)),
+        ("val",  shap_val_die,  xs_val[KEY_COL].values.astype(str)),
+        ("test", shap_test_die, xs_test[KEY_COL].values.astype(str)),
+    ]:
+        df = pd.DataFrame(shap_die.astype(np.float32), columns=feat_names)
+        df[KEY_COL] = serials
+        unit_df = df.groupby(KEY_COL, sort=False)[feat_names].mean().reset_index()
+        unit_df = unit_df[[KEY_COL] + ordered_feat]   # importance 순 열 정렬
+        pq_path = out_dir / f"{split_name}_unit_shap.parquet"
+        unit_df.to_parquet(pq_path, index=False)
+        pq_mb = os.path.getsize(pq_path) / 1024 / 1024
+        print(f"  {split_name}_unit_shap.parquet  {unit_df.shape}  {pq_mb:.1f} MB")
 
     print("\n[DONE]")
 

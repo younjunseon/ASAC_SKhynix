@@ -76,6 +76,13 @@ _scratch/
 # 4_output 임시 작업 폴더
 4_output/_temp/
 
+# 모델링 실험 스크래치 노트북 폴더
+3_modeling/**/_temp/
+
+# SHAP 계산 캐시 (대용량 바이너리 npz/parquet — GitHub 100MB 제한 초과, 11GB)
+3_modeling/04_stacking/shap_cache/
+3_modeling/04_stacking/_prev/
+
 # 발표자료 (대용량 바이너리, 민감 정보 포함 가능)
 *.pptx
 

@@ -61,11 +61,12 @@ for _stream in (sys.stdout, sys.stderr):
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = PROJECT_ROOT / "4_output"
-RESULT_DIR = Path(__file__).resolve().parent / "results_extreme_v2"
+RESULT_DIR = PROJECT_ROOT / "4_output" / "04_stacking" / "results_extreme_v2"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 KEY_COL = "ufs_serial"
 DEFAULT_SEED = 42
+_VAL_GAP_PENALTY: float = 0.0   # main()에서 args.val_gap_penalty로 설정
 KNOWN_STRONG_SUBSET = [
     "03_two_stage__default__clf__lgbm__hp__002",
     "01_zit__zit_only__hp__002",
@@ -114,7 +115,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--deadline", type=str, default=None,
                    help='Stop before this local datetime, e.g. "2026-05-16 08:00".')
     p.add_argument("--deadline_margin_minutes", type=float, default=10.0)
-    p.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    p.add_argument("--seed", type=int, default=None,
+                   help="RNG seed. 미지정 시 매 실행마다 랜덤 시드 자동 생성.")
     p.add_argument("--extra-cache", action="append", default=[],
                    help="추가 메타 입력 컬럼 캐시 폴더(반복 지정 가능). build_shap_features.py의 출력 폴더.")
     p.add_argument("--extra-prefix-with-tag", action=argparse.BooleanOptionalAction, default=True,
@@ -124,6 +126,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--extra-mode", choices=["always_include", "searchable"], default="always_include",
                    help="extra cache 컬럼을 다루는 방식. always_include=메타 학습 시 항상 포함(v2 기본), "
                         "searchable=base와 동등하게 subset search 후보로 두기 (ridge/L1이 알아서 선택).")
+    p.add_argument("--val_gap_penalty", type=float, default=0.0,
+                   help="OOF 선택 시 val-OOF 갭에 대한 패널티 계수 λ. "
+                        "score = oof + λ*max(0, val-oof). λ=0: 순수 OOF, λ=2: val 선호 강화. "
+                        "select_by=oof 일 때만 적용.")
     return p.parse_args()
 
 
@@ -141,7 +147,11 @@ def score_rec(rec: Record, select_by: str) -> float:
         if not math.isnan(rec.meta_cv_oof_rmse):
             return rec.meta_cv_oof_rmse
         return rec.oof_rmse
-    return rec.oof_rmse
+    # "oof" with optional val_gap_penalty: score = oof + λ*max(0, val-oof)
+    score = rec.oof_rmse
+    if _VAL_GAP_PENALTY > 0 and not math.isnan(rec.val_rmse):
+        score += _VAL_GAP_PENALTY * max(0.0, rec.val_rmse - rec.oof_rmse)
+    return score
 
 
 def parse_deadline(text: str | None):
@@ -770,7 +780,352 @@ def prediction_for_record(rec, extra_idx, arrays, names, extra_tags, args):
     return None
 
 
-def save_outputs(records, pred_cache, keys_val, keys_test, args, models, extra_tags, extra_col_count):
+# ---------------------------------------------------------------------------
+# weight extraction — record 1개에 대해 메타 학습기를 한 번 더 fit 해서
+# (각 base/extra 컬럼별 가중치 + iso step) 를 dict 로 반환.
+# eval_fast/eval_enet/eval_combo 의 fit 로직과 정확히 동치이도록 작성.
+# ---------------------------------------------------------------------------
+def _fit_ridge_with_coef(Xo, yo, alpha: float):
+    """fit_ridge_raw 와 동일한 식. 차이는 coef/mu/sd 를 반환한다는 것뿐."""
+    mu = Xo.mean(axis=0)
+    sd = Xo.std(axis=0)
+    sd[sd == 0] = 1.0
+    Zo = np.column_stack([np.ones(len(Xo)), (Xo - mu) / sd])
+    penalty = np.eye(Zo.shape[1]) * alpha
+    penalty[0, 0] = 0.0
+    lhs = Zo.T @ Zo + penalty
+    rhs = Zo.T @ yo
+    try:
+        coef = np.linalg.solve(lhs, rhs)
+    except np.linalg.LinAlgError:
+        coef = np.linalg.lstsq(lhs, rhs, rcond=None)[0]
+    intercept = float(coef[0])
+    weights = coef[1:].astype(float)
+    return intercept, weights, mu.astype(float), sd.astype(float)
+
+
+def _fit_nnls_with_w(Xo, yo):
+    """fit_nnls_raw 와 동일 — w 배열만 반환."""
+    w0, _ = nnls(Xo, yo, maxiter=50000)
+    res = minimize(
+        lambda w: float(np.mean((Xo @ w - yo) ** 2)),
+        w0,
+        method="L-BFGS-B",
+        bounds=[(0.0, None)] * Xo.shape[1],
+        options={"maxiter": 300, "ftol": 1e-12},
+    )
+    w = res.x if res.success else w0
+    return w.astype(float)
+
+
+def _iso_curve_for_weights(raw_oof, y_oof):
+    """apply_iso 와 동일한 iso 학습 + step 결과 추출."""
+    raw_oof = clip_nonneg(raw_oof)
+    iso = IsotonicRegression(out_of_bounds="clip", y_min=0)
+    iso.fit(raw_oof, y_oof)
+    return {
+        "x_thresholds": iso.X_thresholds_.astype(float).tolist(),
+        "y_thresholds": iso.y_thresholds_.astype(float).tolist(),
+    }
+
+
+def _enet_fit_components(Xo, yo, seed, positive):
+    """fit_enet_cv_raw 와 동일 — 학습된 ElasticNetCV 의 coef/intercept/scaler 통계 추출."""
+    pipe = Pipeline([
+        ("sc", StandardScaler()),
+        ("en", ElasticNetCV(
+            l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9, 1.0],
+            alphas=np.logspace(-6, 0, 30),
+            cv=KFold(5, shuffle=True, random_state=seed),
+            n_jobs=-1,
+            max_iter=20000,
+            random_state=seed,
+            positive=positive,
+        )),
+    ])
+    pipe.fit(Xo, yo)
+    sc = pipe.named_steps["sc"]
+    en = pipe.named_steps["en"]
+    return {
+        "alpha": float(en.alpha_),
+        "l1_ratio": float(en.l1_ratio_),
+        "scaler_mean": sc.mean_.astype(float).tolist(),
+        "scaler_scale": sc.scale_.astype(float).tolist(),
+        "intercept": float(en.intercept_),
+        "coef": en.coef_.astype(float).tolist(),
+        "raw_oof": pipe.predict(Xo).astype(float),  # iso fit용
+    }
+
+
+def extract_weights(rec, extra_idx, arrays, names, extra_tags, args):
+    """record 1개에 대해 fit 을 재실행하고, 사람-읽을 수 있는 weights dict 를 반환.
+
+    eval_fast / eval_enet / eval_combo 의 학습 로직과 동치 (closed-form 이거나
+    seed/random_state 고정이므로 재현 가능). 결과 RMSE 가 원본 record 와 일치하는지
+    sanity check 도 함께 박는다.
+    """
+    X_oof, y_oof, X_val, y_val, X_test, y_test = arrays
+    base_cols = tuple(sorted(names.index(x) for x in rec.pool_names))
+    use_cols = _combine_cols(base_cols, extra_idx)
+    base_col_names = [names[i] for i in base_cols]
+    extra_col_names = [f"__extra_{i - len(names) + len(use_cols)}"  # placeholder
+                       for i in extra_idx]
+    # extra column 이름은 호출자가 받았다면 그쪽으로 채우지만, 보통 always_include 모드에서
+    # extra 는 SHAP 컬럼이고 squeeze 결과에는 별도로 박혀 있지 않다. 일단 인덱스만 박제.
+    all_input_names = base_col_names + [f"extra[{i}]" for i in extra_idx]
+
+    Xo = X_oof[:, use_cols]
+    method_full = rec.method
+
+    out = {
+        "tag": rec.tag,
+        "stage": rec.stage,
+        "method": method_full,
+        "n_base": rec.n_base,
+        "n_extra": rec.n_extra,
+        "base_models": base_col_names,
+        "extra_indices": list(extra_idx),
+        "rec_val_rmse": rec.val_rmse,
+        "rec_test_rmse": rec.test_rmse,
+        "rec_oof_rmse": rec.oof_rmse,
+        "rec_params": rec.params,
+        "iso_weight": float(rec.params.get("iso_weight", 1.0)),
+        "zero_tau": float(rec.params.get("zero_tau", 0.0)),
+    }
+
+    if method_full.startswith("ridge"):
+        alpha = float(rec.params.get("alpha", 1e-5))
+        intercept, w, mu, sd = _fit_ridge_with_coef(Xo, y_oof, alpha)
+        out["learner"] = {
+            "kind": "ridge",
+            "alpha": alpha,
+            "intercept": intercept,
+            "standardize_mu": mu.tolist(),
+            "standardize_sd": sd.tolist(),
+            "weights": [{"name": n, "w": float(wi)} for n, wi in zip(all_input_names, w)],
+        }
+        raw_oof = np.column_stack([np.ones(len(Xo)), (Xo - mu) / sd]) @ np.concatenate([[intercept], w])
+    elif method_full.startswith("nnls"):
+        w = _fit_nnls_with_w(Xo, y_oof)
+        out["learner"] = {
+            "kind": "nnls",
+            "weights": [{"name": n, "w": float(wi)} for n, wi in zip(all_input_names, w)],
+        }
+        raw_oof = Xo @ w
+    elif method_full.startswith("mean"):
+        out["learner"] = {
+            "kind": "mean",
+            "weights": [{"name": n, "w": 1.0 / len(all_input_names)} for n in all_input_names],
+        }
+        raw_oof = Xo.mean(axis=1)
+    elif method_full.startswith("ENetPositive"):
+        comp = _enet_fit_components(Xo, y_oof, seed=args.seed, positive=True)
+        out["learner"] = {
+            "kind": "ENetPositive",
+            "alpha": comp["alpha"],
+            "l1_ratio": comp["l1_ratio"],
+            "scaler_mean": comp["scaler_mean"],
+            "scaler_scale": comp["scaler_scale"],
+            "intercept": comp["intercept"],
+            "weights": [{"name": n, "w": float(c)} for n, c in zip(all_input_names, comp["coef"])],
+        }
+        raw_oof = comp["raw_oof"]
+    elif method_full.startswith("ENet"):
+        comp = _enet_fit_components(Xo, y_oof, seed=args.seed, positive=False)
+        out["learner"] = {
+            "kind": "ENet",
+            "alpha": comp["alpha"],
+            "l1_ratio": comp["l1_ratio"],
+            "scaler_mean": comp["scaler_mean"],
+            "scaler_scale": comp["scaler_scale"],
+            "intercept": comp["intercept"],
+            "weights": [{"name": n, "w": float(c)} for n, c in zip(all_input_names, comp["coef"])],
+        }
+        raw_oof = comp["raw_oof"]
+    elif method_full.startswith("Combo"):
+        seeds = list(rec.params.get("seeds", [args.seed, 123, 456, 789, 2024]))
+        # 1) ENet bag
+        bag_components = []
+        oof_bag = np.zeros(len(y_oof))
+        for s in seeds:
+            comp = _enet_fit_components(Xo, y_oof, seed=s, positive=False)
+            bag_components.append({
+                "seed": s,
+                "alpha": comp["alpha"],
+                "l1_ratio": comp["l1_ratio"],
+                "scaler_mean": comp["scaler_mean"],
+                "scaler_scale": comp["scaler_scale"],
+                "intercept": comp["intercept"],
+                "weights": [{"name": n, "w": float(c)} for n, c in zip(all_input_names, comp["coef"])],
+            })
+            oof_bag += clip_nonneg(comp["raw_oof"]) / len(seeds)
+        # 2) single ENet (seed=args.seed)
+        comp_single = _enet_fit_components(Xo, y_oof, seed=args.seed, positive=False)
+        # 3) NNLS
+        w_nnls = _fit_nnls_with_w(Xo, y_oof)
+        out["learner"] = {
+            "kind": "Combo",
+            "seeds": seeds,
+            "components": {
+                "enet_bag": bag_components,
+                "enet_single": {
+                    "alpha": comp_single["alpha"],
+                    "l1_ratio": comp_single["l1_ratio"],
+                    "scaler_mean": comp_single["scaler_mean"],
+                    "scaler_scale": comp_single["scaler_scale"],
+                    "intercept": comp_single["intercept"],
+                    "weights": [{"name": n, "w": float(c)} for n, c in zip(all_input_names, comp_single["coef"])],
+                },
+                "nnls": {
+                    "weights": [{"name": n, "w": float(wi)} for n, wi in zip(all_input_names, w_nnls)],
+                },
+            },
+            "aggregation": "raw = (mean(enet_bag) + enet_single + nnls) / 3",
+        }
+        oof_en = clip_nonneg(comp_single["raw_oof"])
+        oof_nn = clip_nonneg(Xo @ w_nnls)
+        raw_oof = (oof_bag + oof_en + oof_nn) / 3.0
+    else:
+        out["learner"] = {"kind": "unknown", "note": f"method={method_full!r} not handled"}
+        return out
+
+    # iso step 박제 (mean/ridge/nnls/ENet/Combo 공통)
+    out["iso"] = _iso_curve_for_weights(raw_oof, y_oof)
+    return out
+
+
+def dump_weights_for_run(run_dir: Path, top_n: int = 1) -> Path:
+    """기존 squeeze run 폴더(`results_extreme_v2/run_*`)를 받아서, 그 summary.json 의
+    상위 top_n 개 record 에 대해 weights 를 재추출하여 `best_weights.json` 으로 저장.
+
+    summary.json 만 있으면 재현 가능 (base 모델 OOF/val/test csv 는 4_output 안에 그대로 있음).
+    """
+    run_dir = Path(run_dir)
+    summary_path = run_dir / "summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(summary_path)
+    with open(summary_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    # summary.json 에 NaN 이 그대로 박혀있는 경우(json 비표준) → js-style 로 파싱
+    try:
+        summary = json.loads(text)
+    except json.JSONDecodeError:
+        summary = json.loads(text.replace("NaN", "null"))
+
+    saved_args = summary.get("args", {})
+
+    class _A:
+        pass
+
+    args = _A()
+    args.seed = int(saved_args.get("seed", DEFAULT_SEED))
+    args.oof_rmse_cutoff = float(saved_args.get("oof_rmse_cutoff", 0.00555))
+    args.no_clf = bool(saved_args.get("no_clf", False))
+    args.include_combined = bool(saved_args.get("include_combined", False))
+    args.include_ts_reg = bool(saved_args.get("include_ts_reg", False))
+    args.extra_cache = list(saved_args.get("extra_cache", []))
+    args.extra_prefix_with_tag = bool(saved_args.get("extra_prefix_with_tag", True))
+    args.extra_top_k = int(saved_args.get("extra_top_k", 0))
+    args.extra_mode = saved_args.get("extra_mode", "always_include")
+
+    models = discover_models(args)
+    names = [m["name"] for m in models]
+    names_in_summary = {m["name"] for m in summary.get("models", [])}
+    # summary 의 모델 목록과 현재 discover 결과가 정확히 일치해야 column 순서가 보장됨
+    if names_in_summary and set(names) != names_in_summary:
+        missing = names_in_summary - set(names)
+        extra = set(names) - names_in_summary
+        raise RuntimeError(
+            f"[dump_weights_for_run] model set mismatch — "
+            f"missing={sorted(missing)[:5]}... extra={sorted(extra)[:5]}..."
+            " (4_output 의 base 모델 폴더가 그 run 이후 바뀐 듯)"
+        )
+    # 순서까지 일치하는지 확인 (build_base_matrix 시 컬럼 순서가 모델 정렬과 동일해야 함)
+    summary_order = [m["name"] for m in summary.get("models", [])]
+    if summary_order and summary_order != names:
+        raise RuntimeError(
+            "[dump_weights_for_run] model order changed since run — "
+            "discover_models() 결과 순서가 summary.json 과 달라 재현 불가."
+        )
+
+    X_oof_base, y_oof, keys_oof = build_base_matrix(models, "oof")
+    X_val_base, y_val, keys_val = build_base_matrix(models, "val")
+    X_test_base, y_test, keys_test = build_base_matrix(models, "test")
+
+    X_oof_extra, X_val_extra, X_test_extra, extra_names, extra_tags, _ = load_extra_caches(
+        args.extra_cache, keys_oof, keys_val, keys_test, args.extra_prefix_with_tag,
+        top_k=args.extra_top_k,
+    )
+    n_base = X_oof_base.shape[1]
+    n_extra = X_oof_extra.shape[1] if X_oof_extra is not None else 0
+    if n_extra > 0:
+        X_oof = np.hstack([X_oof_base, X_oof_extra])
+        X_val = np.hstack([X_val_base, X_val_extra])
+        X_test = np.hstack([X_test_base, X_test_extra])
+        if args.extra_mode == "searchable":
+            names = names + extra_names
+            extra_idx = ()
+        else:
+            extra_idx = tuple(range(n_base, n_base + n_extra))
+    else:
+        X_oof, X_val, X_test = X_oof_base, X_val_base, X_test_base
+        extra_idx = ()
+
+    arrays = (X_oof, y_oof, X_val, y_val, X_test, y_test)
+
+    records = summary.get("records", [])
+    if not records:
+        raise RuntimeError(f"no records in {summary_path}")
+
+    # 항상 순수 oof_rmse 최저 기준으로 재정렬 — summary.json 의 records 순서는
+    # score_rec(objective_score, val_gap_penalty 적용) 기준이라 oof 최저와 다를 수 있음.
+    records = sorted(records, key=lambda r: float(r["oof_rmse"]))
+
+    weights_top = []
+    for rank, rec_dict in enumerate(records[:top_n], 1):
+        rec = Record(
+            tag=rec_dict["tag"],
+            stage=rec_dict["stage"],
+            method=rec_dict["method"],
+            n_base=rec_dict["n_base"],
+            n_extra=rec_dict["n_extra"],
+            val_rmse=float(rec_dict["val_rmse"]),
+            test_rmse=float(rec_dict["test_rmse"]),
+            oof_rmse=float(rec_dict["oof_rmse"]),
+            pool_names=list(rec_dict["pool_names"]),
+            extra_tags=list(rec_dict.get("extra_tags", [])),
+            params=dict(rec_dict.get("params", {})),
+            meta_cv_oof_rmse=(float(rec_dict["meta_cv_oof_rmse"])
+                              if rec_dict.get("meta_cv_oof_rmse") not in (None, float("nan"))
+                              else float("nan")),
+        )
+        try:
+            w = extract_weights(rec, extra_idx, arrays, names, extra_tags, args)
+            w["rank_in_run_by_oof"] = rank
+            w["selection_criterion"] = "min(oof_rmse)"
+            weights_top.append(w)
+        except Exception as e:
+            weights_top.append({
+                "rank_in_run_by_oof": rank,
+                "tag": rec.tag,
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+    out_path = run_dir / ("best_weights.json" if top_n == 1 else f"top{top_n}_weights.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "source_run": str(run_dir),
+            "selection_criterion": "min(oof_rmse)",
+            "args_select_by": saved_args.get("select_by", "oof"),
+            "args_val_gap_penalty": saved_args.get("val_gap_penalty", 0.0),
+            "top_n": top_n,
+            "weights": weights_top,
+        }, f, ensure_ascii=False, indent=2)
+    return out_path
+
+
+def save_outputs(records, pred_cache, keys_val, keys_test, args, models, extra_tags, extra_col_count,
+                 arrays=None, names=None, extra_idx=None):
     ts = datetime.now().strftime("%m%d_%H%M%S")
     run_dir = RESULT_DIR / f"run_{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -822,14 +1177,42 @@ def save_outputs(records, pred_cache, keys_val, keys_test, args, models, extra_t
         mcv = f"mcv={r.meta_cv_oof_rmse:.9f} " if not math.isnan(r.meta_cv_oof_rmse) else ""
         print(f"{i:2d}. val={r.val_rmse:.9f} oof={r.oof_rmse:.9f} "
               f"{mcv}test={r.test_rmse:.9f} k={r.n_base:2d}+x{r.n_extra} {r.tag}")
+    # ── best record 의 메타 가중치를 별도 파일로 박제 (재현/디버깅용)
+    # "best" 는 항상 **순수 oof_rmse 최저** 로 고정 (select_by / val_gap_penalty 와 무관).
+    # 이유: val_gap_penalty 가 적용된 objective_score 1등이 실제 oof 최저와 어긋날 수 있어서,
+    # 사용자 입장에서 가장 직관적인 "재현 가능한 최저 oof" 를 박는다.
+    if arrays is not None and names is not None and extra_idx is not None:
+        try:
+            best_oof = min(records, key=lambda r: r.oof_rmse)
+            best_w = extract_weights(best_oof, extra_idx, arrays, names, extra_tags, args)
+            best_w["rank_in_run_by_oof"] = 1
+            best_w["selection_criterion"] = "min(oof_rmse)"
+            with open(run_dir / "best_weights.json", "w", encoding="utf-8") as f:
+                json.dump({
+                    "source_run": str(run_dir),
+                    "selection_criterion": "min(oof_rmse)",
+                    "args_select_by": args.select_by,
+                    "args_val_gap_penalty": getattr(args, "val_gap_penalty", 0.0),
+                    "top_n": 1,
+                    "weights": [best_w],
+                }, f, ensure_ascii=False, indent=2)
+            print(f"Saved best meta-weights (min oof): {run_dir / 'best_weights.json'}")
+        except Exception as e:
+            print(f"[WARN] best_weights.json 저장 실패: {type(e).__name__}: {e}")
+
     print(f"\nSaved: {run_dir}")
     return run_dir
 
 
 def main():
+    global _VAL_GAP_PENALTY
     args = parse_args()
+    _VAL_GAP_PENALTY = args.val_gap_penalty
     deadline = parse_deadline(args.deadline)
-    rng = np.random.default_rng(args.seed)
+    seed = args.seed if args.seed is not None else int(np.random.SeedSequence().entropy & 0xFFFFFFFF)
+    args.seed = seed  # None이었을 경우 실제 값으로 덮어써서 summary.json에 기록
+    print(f"[seed] {seed}")
+    rng = np.random.default_rng(seed)
     alpha_grid = np.logspace(-9, -2, 8)
 
     print("=" * 92)
@@ -1022,7 +1405,8 @@ def main():
         pred_cache[id(rec)] = pred
         break
 
-    save_outputs(records, pred_cache, keys_val, keys_test, args, models, extra_tags, n_extra)
+    save_outputs(records, pred_cache, keys_val, keys_test, args, models, extra_tags, n_extra,
+                 arrays=arrays, names=names, extra_idx=extra_idx)
 
 
 if __name__ == "__main__":
