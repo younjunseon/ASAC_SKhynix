@@ -11,15 +11,22 @@ Same execution model as 01_zit/hp/01_zit_only_parallel_hpo.py:
 - Each worker only writes Optuna DB records (no refit / no artifact export).
 - Final refit + postprocess must be run separately from a single process.
 
-Typical local workflow:
+Assigned PC for 1-week run: PC4 (dedicated to XGBoost regressor only — highest ROI).
 
-  # One-time initialization. Enqueues the hp/001 best anchor, then exits.
+Run command (PowerShell on the assigned PC):
+
+  # Step 1 — one-time init in any terminal. Enqueues hp/001 best anchor, then exits.
   python 3_modeling/02_reg_single/hp/02_reg_xgb_parallel_hpo.py --enqueue-anchor --n-trials 0
 
-  # Three terminals. Tune --n-jobs so workers*n_jobs <= physical threads.
-  python 3_modeling/02_reg_single/hp/02_reg_xgb_parallel_hpo.py --worker-id w1 --n-trials 2500 --n-jobs 3 --end-at 2026-06-01T05:00
-  python 3_modeling/02_reg_single/hp/02_reg_xgb_parallel_hpo.py --worker-id w2 --n-trials 2500 --n-jobs 3 --end-at 2026-06-01T05:00
-  python 3_modeling/02_reg_single/hp/02_reg_xgb_parallel_hpo.py --worker-id w3 --n-trials 2500 --n-jobs 3 --end-at 2026-06-01T05:00
+  # Step 2 — open 3 separate terminals on the same PC, paste one of these per terminal.
+  # Tune --n-jobs so 3 * n_jobs <= physical thread count:
+  #   16-thread PC -> --n-jobs 5
+  #   12-thread PC -> --n-jobs 4
+  #    8-thread PC -> --n-jobs 2
+  # *> wN.log redirects stdout+stderr so 3 workers don't interleave in one console.
+  python 3_modeling/02_reg_single/hp/02_reg_xgb_parallel_hpo.py --worker-id w1 --n-trials 3000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w1.log
+  python 3_modeling/02_reg_single/hp/02_reg_xgb_parallel_hpo.py --worker-id w2 --n-trials 3000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w2.log
+  python 3_modeling/02_reg_single/hp/02_reg_xgb_parallel_hpo.py --worker-id w3 --n-trials 3000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w3.log
 
 Objective:
   unit RMSE of mean(die_pred -> unit). Identical recipe to hpo.run_hpo (model='xgb').

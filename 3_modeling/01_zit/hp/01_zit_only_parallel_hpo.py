@@ -5,17 +5,22 @@ Run multiple copies of this script with the same EXP_ID/DB_PATH. Each process
 claims trials through Optuna storage and writes only Optuna DB records. Final
 refit, postprocess, and artifact export must be run separately from one process.
 
-Typical local workflow:
+Assigned PC for 1-week run: PC1 (dedicated to ZITboost only).
 
-  # One-time initialization. Enqueues the hp/002 best anchor, then exits.
+Run command (PowerShell on the assigned PC):
+
+  # Step 1 — one-time init in any terminal. Enqueues hp/002 best anchor, then exits.
   python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --enqueue-anchor --n-trials 0
 
-  # Start three terminals. --end-at gives all workers the same wall-clock stop
-  # time. --n-trials is an upper bound; the timeout terminates first.
-  # --n-jobs * (number of workers) should stay <= physical thread count.
-  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w1 --n-trials 1500 --n-jobs 3 --end-at 2026-06-01T05:00
-  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w2 --n-trials 1500 --n-jobs 3 --end-at 2026-06-01T05:00
-  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w3 --n-trials 1500 --n-jobs 3 --end-at 2026-06-01T05:00
+  # Step 2 — open 3 separate terminals on the same PC, paste one of these per terminal.
+  # Tune --n-jobs so 3 * n_jobs <= physical thread count:
+  #   16-thread PC -> --n-jobs 5   (15 threads used, 1 free for OS)
+  #   12-thread PC -> --n-jobs 4
+  #    8-thread PC -> --n-jobs 2   (consider dropping to 2 workers if RAM tight)
+  # *> wN.log redirects stdout+stderr so 3 workers don't interleave in one console.
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w1 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w1.log
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w2 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w2.log
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w3 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w3.log
 """
 
 from __future__ import annotations

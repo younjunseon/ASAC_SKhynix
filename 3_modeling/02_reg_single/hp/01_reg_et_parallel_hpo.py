@@ -6,15 +6,22 @@ Same execution model as 01_zit/hp/01_zit_only_parallel_hpo.py:
 - Each worker only writes Optuna DB records (no refit / no artifact export).
 - Final refit + postprocess must be run separately from a single process.
 
-Typical local workflow:
+Assigned PC for 1-week run: PC3 (dedicated to ExtraTrees regressor only).
 
-  # One-time initialization. Enqueues the hp/002 best anchor, then exits.
+Run command (PowerShell on the assigned PC):
+
+  # Step 1 — one-time init in any terminal. Enqueues hp/002 best anchor, then exits.
   python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --enqueue-anchor --n-trials 0
 
-  # Three terminals. Tune --n-jobs so workers*n_jobs <= physical threads.
-  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w1 --n-trials 1500 --n-jobs 3 --end-at 2026-06-01T05:00
-  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w2 --n-trials 1500 --n-jobs 3 --end-at 2026-06-01T05:00
-  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w3 --n-trials 1500 --n-jobs 3 --end-at 2026-06-01T05:00
+  # Step 2 — open 3 separate terminals on the same PC, paste one of these per terminal.
+  # Tune --n-jobs so 3 * n_jobs <= physical thread count:
+  #   16-thread PC -> --n-jobs 5
+  #   12-thread PC -> --n-jobs 4
+  #    8-thread PC -> --n-jobs 2
+  # *> wN.log redirects stdout+stderr so 3 workers don't interleave in one console.
+  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w1 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w1.log
+  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w2 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w2.log
+  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w3 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w3.log
 
 Note: ExtraTrees trial cost is ~60-90s/fold so 5-fold takes 5-8 min per trial.
 For 1주일 budget with 3 workers expect ~2,000-3,000 total trials.
