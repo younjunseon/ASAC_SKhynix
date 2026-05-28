@@ -1,26 +1,42 @@
 """
-Parallel HPO worker for ZIT-only hp/003.
+Parallel HPO worker for ZIT-only hp/004 (PC1) and hp/005 (PC2).
 
-Run multiple copies of this script with the same EXP_ID/DB_PATH. Each process
-claims trials through Optuna storage and writes only Optuna DB records. Final
-refit, postprocess, and artifact export must be run separately from one process.
+Same search space and tuning logic; only --exp-id differs per PC. Each process
+claims trials through its own SQLite Optuna DB and writes only Optuna DB records.
+Final refit, postprocess, and artifact export must be run separately.
 
-Assigned PC for 1-week run: PC1 (dedicated to ZITboost only).
+Compared to hp/003:
+  - 11 search ranges widened from 002+003 TOP boundary analysis
+  - tau_pi lower bound 0.88 -> 0.84
+  - n_em_iters upper 24 -> 28 (002 36% HI, 003 20% HI)
+  - default n_startup_trials 60 -> 120 (larger search space needs more exploration)
+  - per-trial model seed = SEED + trial.number (deterministic per-trial diversity)
+  - val_rmse / partial_val_rmse recorded as trial.user_attrs (DB-side metric)
+  - both 002 best and 003 best are enqueued as anchors
 
-Run command (PowerShell on the assigned PC):
+SQLite is local per-PC. Do not share the DB over a network mount.
 
-  # Step 1 — one-time init in any terminal. Enqueues hp/002 best anchor, then exits.
-  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --enqueue-anchor --n-trials 0
+Run command (PowerShell on each PC):
 
-  # Step 2 — open 3 separate terminals on the same PC, paste one of these per terminal.
-  # Tune --n-jobs so 3 * n_jobs <= physical thread count:
-  #   16-thread PC -> --n-jobs 5   (15 threads used, 1 free for OS)
+  ### PC1 (hp/004)
+  # Step 1 — one-time init. Enqueues 002 + 003 best anchors, then exits.
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --exp-id zit-only-final-004 --enqueue-anchor --n-trials 0
+
+  # Step 2 — open 3 terminals on PC1. Tune --n-jobs so 3 * n_jobs <= physical thread count.
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --exp-id zit-only-final-004 --worker-id w1 --n-trials 2000 --n-jobs 4 --end-at 2026-06-04T05:00 > w1.log 2>&1
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --exp-id zit-only-final-004 --worker-id w2 --n-trials 2000 --n-jobs 4 --end-at 2026-06-04T05:00 > w2.log 2>&1
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --exp-id zit-only-final-004 --worker-id w3 --n-trials 2000 --n-jobs 4 --end-at 2026-06-04T05:00 > w3.log 2>&1
+
+  ### PC2 (hp/005) — identical commands, only --exp-id changes
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --exp-id zit-only-final-005 --enqueue-anchor --n-trials 0
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --exp-id zit-only-final-005 --worker-id w1 --n-trials 2000 --n-jobs 4 --end-at 2026-06-04T05:00 > w1.log 2>&1
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --exp-id zit-only-final-005 --worker-id w2 --n-trials 2000 --n-jobs 4 --end-at 2026-06-04T05:00 > w2.log 2>&1
+  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --exp-id zit-only-final-005 --worker-id w3 --n-trials 2000 --n-jobs 4 --end-at 2026-06-04T05:00 > w3.log 2>&1
+
+  # --n-jobs guide:
+  #   16-thread PC -> --n-jobs 5
   #   12-thread PC -> --n-jobs 4
-  #    8-thread PC -> --n-jobs 2   (consider dropping to 2 workers if RAM tight)
-  # *> wN.log redirects stdout+stderr so 3 workers don't interleave in one console.
-  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w1 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w1.log
-  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w2 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w2.log
-  python 3_modeling/01_zit/hp/01_zit_only_parallel_hpo.py --worker-id w3 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w3.log
+  #    8-thread PC -> --n-jobs 2
 """
 
 from __future__ import annotations
@@ -67,7 +83,7 @@ from utils.config import DIE_KEY_COL, KEY_COL, OUTPUT_DIR, SEED, TARGET_COL  # n
 from utils.data import get_feat_cols, load_all, split_xs  # noqa: E402
 
 
-DEFAULT_EXP_ID = "zit-only-final-003"
+DEFAULT_EXP_ID = "zit-only-final-004"
 DEFAULT_USER = "jh"
 
 PP_FIXED = {
@@ -81,20 +97,20 @@ PP_FIXED = {
     "post_impute_corr_keep_by": "std",
 }
 
-# hp/002 best trial #82. This is only enqueued when --enqueue-anchor is used.
-ZIT_ONLY_ANCHOR = {
+# hp/002 best trial #82. Enqueued together with hp/003 best when --enqueue-anchor is used.
+ZIT_ONLY_ANCHOR_002 = {
     "zeta": 1.070592137915828,
     "n_em_iters": 17,
     "mu_n_estimators": 200,
-    "mu_learning_rate": 0.002724262170219916,
     # hp/002 trial #82의 원본 mu_num_leaves=260은 max_depth=4와 함께 쓰여 LightGBM이
-    # 실제로 쓴 leaf 수는 min(260, 2^4)=16. hp/003 range가 [16, 96]이라 260은 범위
-    # 밖이므로 effective 값(16)으로 정합. anchor trial이 hp/002 best와 동일 동작.
+    # 실제로 쓴 leaf 수는 min(260, 2^4)=16. hp/004 range도 [16, 128]이라 effective
+    # 값(16)으로 정합. anchor trial이 hp/002 best와 동일 동작.
     "mu_num_leaves": 16,
     "mu_max_depth": 4,
     "mu_min_child_samples": 202,
     "mu_subsample": 0.7490707207911603,
     "mu_colsample_bytree": 0.21034413805267055,
+    "mu_learning_rate": 0.002724262170219916,
     "mu_reg_alpha": 0.002190807541322471,
     "mu_reg_lambda": 0.0008220461034125899,
     "pi_n_estimators": 117,
@@ -108,36 +124,64 @@ ZIT_ONLY_ANCHOR = {
     "phi_max_depth": 6,
     "phi_min_child_samples": 322,
 }
-ANCHOR_TAU_PI = 0.9417341871098373
+ANCHOR_TAU_PI_002 = 0.9417341871098373
 
-# hp/003 search space. Adjusted from hp/002 diagnostics:
-# - lower zeta / learning rates / regularization where best trials hit low edges
-# - higher EM, pi depth, phi depth, and phi min_child_samples where top trials leaned high
-# - mu_num_leaves reduced because max_depth already caps effective leaves.
+# hp/003 best trial #24 (val_rmse=0.005493945346).
+ZIT_ONLY_ANCHOR_003 = {
+    "zeta": 1.1200196096433799,
+    "n_em_iters": 16,
+    "mu_n_estimators": 206,
+    "mu_learning_rate": 0.001544804994892871,
+    "mu_num_leaves": 29,
+    "mu_max_depth": 3,
+    "mu_min_child_samples": 269,
+    "mu_subsample": 0.8129218946739942,
+    "mu_colsample_bytree": 0.18344245348572596,
+    "mu_reg_alpha": 0.001211879891858438,
+    "mu_reg_lambda": 0.003235224001159518,
+    "pi_n_estimators": 125,
+    "pi_learning_rate": 0.05221975843303289,
+    "pi_num_leaves": 179,
+    "pi_max_depth": 17,
+    "pi_min_child_samples": 44,
+    "phi_n_estimators": 44,
+    "phi_learning_rate": 0.002809100266233647,
+    "phi_num_leaves": 75,
+    "phi_max_depth": 6,
+    "phi_min_child_samples": 322,
+}
+ANCHOR_TAU_PI_003 = 0.8927453228423853
+
+# hp/004 search space. Built from 002 TOP-25 + 003 TOP-10 boundary analysis.
+# Widened low edges where best trials clustered low (mu_reg_alpha/lambda, mu_lr,
+# phi_lr, mu_colsample), widened high edges where they clustered high
+# (n_em_iters, mu_num_leaves, mu_max_depth, pi_max_depth, phi_max_depth,
+# phi_num_leaves, phi_min_child_samples). mu_num_leaves cap stays loose because
+# mu_max_depth still caps effective leaves to 2^max_depth.
 ZIT_SEARCH = {
     "zeta": {"type": "float", "low": 1.02, "high": 1.20, "log": False},
-    "n_em_iters": {"type": "int", "low": 15, "high": 24},
+    "n_em_iters": {"type": "int", "low": 15, "high": 28},
     "mu_n_estimators": {"type": "int", "low": 150, "high": 240},
-    "mu_learning_rate": {"type": "float", "low": 0.0015, "high": 0.0032, "log": True},
-    "mu_num_leaves": {"type": "int", "low": 16, "high": 96},
-    "mu_max_depth": {"type": "int", "low": 3, "high": 6},
+    "mu_learning_rate": {"type": "float", "low": 0.0009, "high": 0.0032, "log": True},
+    "mu_num_leaves": {"type": "int", "low": 16, "high": 128},
+    "mu_max_depth": {"type": "int", "low": 2, "high": 7},
     "mu_min_child_samples": {"type": "int", "low": 160, "high": 320},
     "mu_subsample": {"type": "float", "low": 0.55, "high": 0.85, "log": False},
-    "mu_colsample_bytree": {"type": "float", "low": 0.18, "high": 0.27, "log": False},
-    "mu_reg_alpha": {"type": "float", "low": 5e-4, "high": 0.006, "log": True},
-    "mu_reg_lambda": {"type": "float", "low": 3e-4, "high": 0.007, "log": True},
+    "mu_colsample_bytree": {"type": "float", "low": 0.14, "high": 0.34, "log": False},
+    "mu_reg_alpha": {"type": "float", "low": 1e-4, "high": 0.006, "log": True},
+    "mu_reg_lambda": {"type": "float", "low": 5e-5, "high": 0.007, "log": True},
     "pi_n_estimators": {"type": "int", "low": 90, "high": 170},
     "pi_learning_rate": {"type": "float", "low": 0.032, "high": 0.065, "log": True},
     "pi_num_leaves": {"type": "int", "low": 160, "high": 260},
-    "pi_max_depth": {"type": "int", "low": 12, "high": 18},
+    "pi_max_depth": {"type": "int", "low": 12, "high": 22},
     "pi_min_child_samples": {"type": "int", "low": 25, "high": 50},
     "phi_n_estimators": {"type": "int", "low": 30, "high": 60},
-    "phi_learning_rate": {"type": "float", "low": 0.0025, "high": 0.0065, "log": True},
-    "phi_num_leaves": {"type": "int", "low": 50, "high": 95},
-    "phi_max_depth": {"type": "int", "low": 5, "high": 8},
-    "phi_min_child_samples": {"type": "int", "low": 220, "high": 400},
+    "phi_learning_rate": {"type": "float", "low": 0.0012, "high": 0.0065, "log": True},
+    "phi_num_leaves": {"type": "int", "low": 40, "high": 110},
+    "phi_max_depth": {"type": "int", "low": 5, "high": 10},
+    "phi_min_child_samples": {"type": "int", "low": 180, "high": 520},
 }
-TAU_PI_RANGE = (0.88, 1.0)
+TAU_PI_RANGE = (0.84, 1.0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -158,7 +202,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--n-jobs", type=int, default=4)
-    parser.add_argument("--n-startup-trials", type=int, default=60)
+    parser.add_argument("--n-startup-trials", type=int, default=120)
     parser.add_argument("--db-timeout", type=float, default=120.0)
     parser.add_argument("--heartbeat-interval", type=int, default=300)
     parser.add_argument("--grace-period", type=int, default=1800)
@@ -207,10 +251,15 @@ def create_study(args: argparse.Namespace, db_path: Path) -> optuna.Study:
     )
 
     if args.enqueue_anchor:
-        anchor = dict(ZIT_ONLY_ANCHOR)
-        anchor["tau_pi"] = ANCHOR_TAU_PI
         if len(study.trials) == 0:
-            hpo.enqueue_anchor(study, anchor)
+            anchor_002 = dict(ZIT_ONLY_ANCHOR_002, tau_pi=ANCHOR_TAU_PI_002)
+            anchor_003 = dict(ZIT_ONLY_ANCHOR_003, tau_pi=ANCHOR_TAU_PI_003)
+            study.enqueue_trial(anchor_002)
+            study.enqueue_trial(anchor_003)
+            print(
+                f"[enqueue] 2 anchors -- 002 best ({len(anchor_002)} HP) + "
+                f"003 best ({len(anchor_003)} HP)"
+            )
         else:
             print(f"[enqueue skip] existing trials={len(study.trials)}")
 
@@ -222,15 +271,19 @@ def create_study(args: argparse.Namespace, db_path: Path) -> optuna.Study:
         "n_folds": args.n_folds,
         "n_jobs": args.n_jobs,
         "pp_fixed": PP_FIXED,
-        "anchor_source": "hp/002 best trial #82",
-        "anchor": ZIT_ONLY_ANCHOR,
-        "anchor_tau_pi": ANCHOR_TAU_PI,
+        "anchor_002_source": "hp/002 best trial #82",
+        "anchor_002": ZIT_ONLY_ANCHOR_002,
+        "anchor_002_tau_pi": ANCHOR_TAU_PI_002,
+        "anchor_003_source": "hp/003 best trial #24",
+        "anchor_003": ZIT_ONLY_ANCHOR_003,
+        "anchor_003_tau_pi": ANCHOR_TAU_PI_003,
         "search_space": ZIT_SEARCH,
         "tau_pi_range": TAU_PI_RANGE,
         "sampler": "TPE seed=None multivariate group",
         "pruner": f"MedianPruner n_startup={args.n_startup_trials} n_warmup=2",
         "clip_y_extreme": not args.no_clip_y_extreme,
         "seed": int(SEED),
+        "model_random_state": "SEED + trial.number (per-trial)",
         "worker_id_last_writer": args.worker_id,
     }
     for k, v in study_meta.items():
@@ -289,7 +342,10 @@ def build_objective(args: argparse.Namespace):
         params = hpo.sample_from_space(trial, ZIT_SEARCH)
         tau_pi = trial.suggest_float("tau_pi", TAU_PI_RANGE[0], TAU_PI_RANGE[1])
 
-        params["random_state"] = SEED
+        # 모델 seed를 trial별로 다르게 → 재현성 유지 + trial 간 다양성. KFold split은
+        # SEED로 고정해 같은 study 내 모든 trial이 동일한 fold 분할을 공유 → RMSE 비교 가능.
+        model_seed = int(SEED) + int(trial.number)
+        params["random_state"] = model_seed
         params["n_jobs"] = args.n_jobs
         params["verbose"] = -1
         params["device"] = "cpu"
@@ -298,6 +354,7 @@ def build_objective(args: argparse.Namespace):
         trial.set_user_attr("worker_id", args.worker_id)
         trial.set_user_attr("pid", os.getpid())
         trial.set_user_attr("tau_pi", tau_pi)
+        trial.set_user_attr("model_seed", model_seed)
 
         fold_oof_rmse = []
         oof_pred_unit = pd.Series(np.nan, index=y_train_unit_s.index, dtype=np.float64)
@@ -327,6 +384,7 @@ def build_objective(args: argparse.Namespace):
                 trial.set_user_attr("pruned_at_fold", fold_idx + 1)
                 trial.set_user_attr("elapsed_sec", time.time() - t0)
                 trial.set_user_attr("fold_oof_rmse", fold_oof_rmse)
+                trial.set_user_attr("partial_val_rmse", avg)
                 raise optuna.TrialPruned()
 
         if oof_pred_unit.isna().any():
@@ -336,6 +394,8 @@ def build_objective(args: argparse.Namespace):
         elapsed = time.time() - t0
         trial.set_user_attr("elapsed_sec", elapsed)
         trial.set_user_attr("fold_oof_rmse", fold_oof_rmse)
+        trial.set_user_attr("val_rmse", oof_rmse)
+        trial.set_user_attr("oof_rmse", oof_rmse)
         print(
             f"trial #{trial.number}: worker={args.worker_id}, "
             f"tau_pi={tau_pi:.4f}, oof={oof_rmse:.9f}, elapsed={elapsed:.0f}s"
