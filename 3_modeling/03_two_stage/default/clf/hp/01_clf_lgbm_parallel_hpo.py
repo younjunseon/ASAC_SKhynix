@@ -18,10 +18,10 @@ Run command (PowerShell on the assigned PC):
   #   16-thread PC -> --n-jobs 5
   #   12-thread PC -> --n-jobs 4
   #    8-thread PC -> --n-jobs 2
-  # *> wN.log redirects stdout+stderr so 3 workers don't interleave in one console.
-  python 3_modeling/03_two_stage/default/clf/hp/01_clf_lgbm_parallel_hpo.py --worker-id w1 --n-trials 2500 --n-jobs 4 --end-at 2026-06-01T05:00 *> w1.log
-  python 3_modeling/03_two_stage/default/clf/hp/01_clf_lgbm_parallel_hpo.py --worker-id w2 --n-trials 2500 --n-jobs 4 --end-at 2026-06-01T05:00 *> w2.log
-  python 3_modeling/03_two_stage/default/clf/hp/01_clf_lgbm_parallel_hpo.py --worker-id w3 --n-trials 2500 --n-jobs 4 --end-at 2026-06-01T05:00 *> w3.log
+  # "> wN.log 2>&1" redirects stdout+stderr (works in both cmd.exe and PowerShell).
+  python 3_modeling/03_two_stage/default/clf/hp/01_clf_lgbm_parallel_hpo.py --worker-id w1 --n-trials 2500 --n-jobs 4 --end-at 2026-06-01T05:00 > w1.log 2>&1
+  python 3_modeling/03_two_stage/default/clf/hp/01_clf_lgbm_parallel_hpo.py --worker-id w2 --n-trials 2500 --n-jobs 4 --end-at 2026-06-01T05:00 > w2.log 2>&1
+  python 3_modeling/03_two_stage/default/clf/hp/01_clf_lgbm_parallel_hpo.py --worker-id w3 --n-trials 2500 --n-jobs 4 --end-at 2026-06-01T05:00 > w3.log 2>&1
 
 Objective:
   unit RMSE of (unit-mean(die_proba) * y_pos_const), with y_pos_const = E[Y|Y>0] on train.

@@ -18,10 +18,10 @@ Run command (PowerShell on the assigned PC):
   #   16-thread PC -> --n-jobs 5
   #   12-thread PC -> --n-jobs 4
   #    8-thread PC -> --n-jobs 2
-  # *> wN.log redirects stdout+stderr so 3 workers don't interleave in one console.
-  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w1 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w1.log
-  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w2 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w2.log
-  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w3 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 *> w3.log
+  # "> wN.log 2>&1" redirects stdout+stderr (works in both cmd.exe and PowerShell).
+  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w1 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 > w1.log 2>&1
+  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w2 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 > w2.log 2>&1
+  python 3_modeling/02_reg_single/hp/01_reg_et_parallel_hpo.py --worker-id w3 --n-trials 2000 --n-jobs 4 --end-at 2026-06-01T05:00 > w3.log 2>&1
 
 Note: ExtraTrees trial cost is ~60-90s/fold so 5-fold takes 5-8 min per trial.
 For 1주일 budget with 3 workers expect ~2,000-3,000 total trials.
