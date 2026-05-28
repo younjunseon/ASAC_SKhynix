@@ -435,7 +435,7 @@ def main():
                            .groupby(KEY_COL, sort=False)["pred"].mean()
         y_true = ys_input["train"].set_index(KEY_COL)[TARGET_COL].loc[oof_pred_unit.index]
         oof_rmse_recon = float(np.sqrt(np.mean((oof_pred_unit.values - y_true.values) ** 2)))
-        pp_block = bp.get("postprocess", {})
+        pp_block = bp.get("postprocess") or {}   # clf 모델 등은 postprocess=null일 수 있음
         oof_rmse_saved = float(pp_block.get("train_rmse", float("nan")))
         print(f"  reconstructed OOF unit RMSE = {oof_rmse_recon:.9f}")
         print(f"  saved postprocess.train_rmse= {oof_rmse_saved:.9f}")
@@ -455,6 +455,7 @@ def main():
         print(f"    {nm:>20s}  {v:.6e}")
 
     # ---- 10. 저장 — die-level npz (oof+val+test 통합)
+    # die-level stacking(v4)에서 (ufs_serial, run_wf_xy)로 매칭하기 위해 run_wf_xy도 함께 저장.
     npz_path = out_dir / "die_shap.npz"
     print(f"\n[10] die-level npz 저장: {npz_path} ...")
     np.savez_compressed(
@@ -466,6 +467,9 @@ def main():
         oof_serials=xs_train[KEY_COL].values.astype(str),
         val_serials=xs_val[KEY_COL].values.astype(str),
         test_serials=xs_test[KEY_COL].values.astype(str),
+        oof_run_wf_xy=xs_train["run_wf_xy"].values.astype(str),
+        val_run_wf_xy=xs_val["run_wf_xy"].values.astype(str),
+        test_run_wf_xy=xs_test["run_wf_xy"].values.astype(str),
     )
     npz_mb = os.path.getsize(npz_path) / 1024 / 1024
     print(f"  die_shap.npz  oof={shap_oof_die.shape}  val={shap_val_die.shape}  "
