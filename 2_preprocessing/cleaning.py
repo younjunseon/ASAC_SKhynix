@@ -259,12 +259,12 @@ def remove_high_corr_features(
 
 def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
     """
-    공간 보간 → lot 평균 → 전체 평균 순서로 결측치를 채우는 함수
+    공간 보간 → lot 중앙값 → 전체 중앙값 순서로 결측치를 채우는 함수
 
     전략:
     1단계: 같은 lot/wafer 내 xy 좌표 기준 거리 가중 평균 (max_dist 이내 이웃)
-    2단계: 같은 lot 내 평균
-    3단계: train split의 컬럼 전체 평균
+    2단계: 같은 lot 내 중앙값
+    3단계: train split의 컬럼 전체 중앙값
 
     Parameters
     ----------
@@ -275,9 +275,9 @@ def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
     max_dist : float
         공간 보간 시 이웃으로 간주할 최대 거리 (기본 2.0, 인접 die까지)
     train_mask : Series[bool], optional
-        xs.index와 정렬된 boolean 마스크. True인 행만 1단계 이웃 후보·2단계 lot 평균
+        xs.index와 정렬된 boolean 마스크. True인 행만 1단계 이웃 후보·2단계 lot 중앙값
         계산에 사용되어 data leakage를 차단한다. None이면 1·2단계는 전체 데이터를 사용.
-        단 3단계(전체 평균 fallback)는 train_mask와 무관하게 항상 split=='train' 행만 쓰므로
+        단 3단계(전체 중앙값 fallback)는 train_mask와 무관하게 항상 split=='train' 행만 쓰므로
         standalone 호출 시에도 SPLIT_COL 컬럼이 필요하다.
 
     Returns
@@ -385,15 +385,15 @@ def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
     print(f"  1단계 (공간 보간, dist<={max_dist}): {filled_spatial:,}개 채움"
           f" → 잔여: {na_after_spatial:,}")
 
-    # --- 2단계: 1단계로 못 채운 칸은 "같은 lot의 평균"으로 (평균은 train 행에서만 계산) ---
+    # --- 2단계: 1단계로 못 채운 칸은 "같은 lot의 중앙값"으로 (중앙값은 train 행에서만 계산) ---
     if na_after_spatial > 0:
         if train_mask is not None:
-            train_lot_means = xs.loc[train_mask].groupby('_lot')[feat_cols].mean()
+            train_lot_medians = xs.loc[train_mask].groupby('_lot')[feat_cols].median()
         else:
-            train_lot_means = xs.groupby('_lot')[feat_cols].mean()
+            train_lot_medians = xs.groupby('_lot')[feat_cols].median()
 
-        # 각 행의 _lot 값에 해당하는 lot 평균을 가져옴 (train에 없는 lot은 NaN → 3단계로 넘어감)
-        fill_df = train_lot_means.reindex(xs['_lot'].values)
+        # 각 행의 _lot 값에 해당하는 lot 중앙값을 가져옴 (train에 없는 lot은 NaN → 3단계로 넘어감)
+        fill_df = train_lot_medians.reindex(xs['_lot'].values)
         fill_df.index = xs.index
 
         filled_before = xs[feat_cols].isnull().sum().sum()
@@ -401,20 +401,20 @@ def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
         filled_lot = filled_before - xs[feat_cols].isnull().sum().sum()
         na_after_lot = xs[feat_cols].isnull().sum().sum()
         lot_label = "train 기준" if train_mask is not None else "전체 기준"
-        print(f"  2단계 (lot 평균, {lot_label}): {filled_lot:,}개 채움"
+        print(f"  2단계 (lot 중앙값, {lot_label}): {filled_lot:,}개 채움"
               f" → 잔여: {na_after_lot:,}")
     else:
         filled_lot = 0
         na_after_lot = 0
 
-    # --- 3단계: 그래도 남은 칸은 "train 전체의 컬럼 평균"으로 ---
+    # --- 3단계: 그래도 남은 칸은 "train 전체의 컬럼 중앙값"으로 ---
     if na_after_lot > 0:
-        train_means = xs.loc[xs[SPLIT_COL] == 'train', feat_cols].mean()
+        train_medians = xs.loc[xs[SPLIT_COL] == 'train', feat_cols].median()
         filled_before = xs[feat_cols].isnull().sum().sum()
-        xs[feat_cols] = xs[feat_cols].fillna(train_means)
+        xs[feat_cols] = xs[feat_cols].fillna(train_medians)
         filled_global = filled_before - xs[feat_cols].isnull().sum().sum()
         na_after_global = xs[feat_cols].isnull().sum().sum()
-        print(f"  3단계 (train 전체 평균): {filled_global:,}개 채움"
+        print(f"  3단계 (train 전체 중앙값): {filled_global:,}개 채움"
               f" → 잔여: {na_after_global:,}")
     else:
         filled_global = 0

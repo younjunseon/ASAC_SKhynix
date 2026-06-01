@@ -1,9 +1,9 @@
 """
 전처리 오케스트레이션.
 
-고정 파이프라인: Stage 0(웨이퍼맵 수동 제외) → Cleaning → Outlier winsorize.
+고정 파이프라인: Stage 0(웨이퍼맵 수동 제외) → Cleaning → Outlier(현재 'none'=스킵).
 - Cleaning 세부 파라미터(상수/결측/상관 임계값 등): DEFAULT_PARAMS + 노트북에서 넘긴 params로 override
-- 일부 항목은 설계상 고정(_FIXED): 중복 제거 ON, imputation='spatial', outlier='winsorize'(0.0~0.99)
+- 일부 항목은 설계상 고정(_FIXED): 중복 제거 ON, imputation='spatial', outlier='none'(이상치 처리 안 함)
 - run()이 cleaning+outlier를 한 번에 돌려 주고, 실제 적용된 파라미터 전체(effective_params)를 같이 반환해 재현성을 남긴다.
 
 사용법
@@ -45,10 +45,10 @@ DEFAULT_PARAMS = {
 # 설계상 고정(노트북에서 못 바꿈) — 파이프라인 일관성 유지
 _FIXED = {
     "remove_duplicates":  True,         # 완전 중복 컬럼은 항상 제거
-    "imputation_method":  "spatial",    # 결측은 공간 보간 → lot 평균 → 전체 평균
-    "outlier_method":     "winsorize",  # 이상치는 분위수 winsorize
-    "outlier_lower_pct":  0.0,          # 하한 clip 없음 (0%)
-    "outlier_upper_pct":  0.99,         # 상위 1%만 99 분위수로 clip
+    "imputation_method":  "spatial",    # 결측은 공간 보간 → lot 중앙값 → 전체 중앙값
+    "outlier_method":     "none",       # X 피처 이상치 처리 안 함 (winsorize 전체 비활성화)
+    "outlier_lower_pct":  0.0,          # (outlier_method='none'이라 미사용)
+    "outlier_upper_pct":  0.99,         # (outlier_method='none'이라 미사용)
 }
 
 # 웨이퍼맵 육안 판정 결과 "target과 무관/유해"로 분류된 feature — cleaning 이전에 통째로 제외.
@@ -91,7 +91,7 @@ def _merge_params(params):
 
 
 def run(xs, ys, feat_cols, xs_dict, params=None, exclude_cols=None):
-    """전처리 실행: Stage 0 제외 → Cleaning → Outlier winsorize.
+    """전처리 실행: Stage 0 제외 → Cleaning → Outlier(현재 'none'=스킵).
 
     Parameters
     ----------
@@ -144,7 +144,7 @@ def run(xs, ys, feat_cols, xs_dict, params=None, exclude_cols=None):
         post_impute_corr_keep_by=effective["post_impute_corr_keep_by"],
     )
 
-    # --- Outlier: winsorize(0.0, 0.99) 고정 — 상위 1%만 잘라냄 ---
+    # --- Outlier: method='none' 고정 — X 피처 이상치 처리 안 함 (winsorize 비활성화) ---
     xs_train, xs_val, xs_test, outlier_report = run_outlier_treatment(
         xs_train, xs_val, xs_test, clean_feat_cols,
         method=_FIXED["outlier_method"],
