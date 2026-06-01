@@ -15,12 +15,22 @@ ZITboost — Zero-Inflated Tweedie + LightGBM (EM 알고리즘) 회귀 모델.
 
 Two-Stage(분류→회귀)와 달리 분류·회귀가 joint로 학습돼 분류가 약해도 μ가 보완한다.
 
-이 모듈은 ZITboostRegressor(기본)와 BagZITboostRegressor(unit 제약을 추가한 변형) 두 클래스를 제공한다.
+이 모듈은 네 클래스를 제공한다 (φ 추정방식 × bag 제약의 2×2):
+  - ZITboostRegressor      : 기본('우리버전'). φ를 Pearson 잔차(=(y-μ)²/μ^ζ)로 추정 (가볍고 빠른 근사).
+  - ZITboostEQLRegressor   : '논문충실'. Gu 2024(arXiv:2405.14990) 방향.
+                             φ를 extended quasi-likelihood/saddlepoint(=Tweedie unit deviance)로 추정하고
+                             zero-truncated Tweedie로 초기화. ZITboostRegressor와 다른 점은 이 2곳뿐
+                             (나머지 E/M-step·predict는 동일해서 상속).
+  - BagZITboostRegressor   : ZITboost('우리버전' φ) + unit 제약(bag constraint) 변형 (논문 외).
+                             fit(X, y, unit_id), die→unit 집계는 SUM(predict_unit).
+  - BagZITEQLRegressor     : BagZIT('논문충실' φ) — bag 제약 + EQL φ M-step. _m_step만 ZITboostEQL과 동일.
+
+ζ profile likelihood(Algorithm 2)용 score_loglik은 부모 ZITboostRegressor에 있어 네 클래스가 공유한다.
 
 사용법:
-    from modules.zit import ZITboostRegressor
+    from modules.zit import ZITboostRegressor, ZITboostEQLRegressor
 
-    model = ZITboostRegressor(zeta=1.5, n_em_iters=10)
+    model = ZITboostEQLRegressor(zeta=1.5, n_em_iters=10)   # 논문 충실 버전
     model.fit(X_train, y_train)
     pred = model.predict(X_test)
     pi, mu, phi = model.predict_components(X_test)
@@ -59,6 +69,73 @@ def _estimate_phi(y_pos, mu_pos, zeta):
     var_y = np.var(y_pos, ddof=1)
     phi = var_y / np.maximum(np.power(mu_mean, zeta), 1e-10)
     return np.clip(phi, 1e-6, 1e6)   # 극단값 클립 (수치 안정성)
+
+
+def _tweedie_unit_deviance(y, mu, zeta):
+    """Tweedie unit deviance D_ζ(y, μ), 1 < ζ < 2 에서 유효.
+
+    Gu 2024의 extended quasi-likelihood(saddlepoint 근사)에서 φ를 추정할 때 쓰는 통계량.
+    표준형(Dunn & Smyth):
+      D_ζ(y,μ) = 2[ y^(2-ζ)/((1-ζ)(2-ζ)) − y·μ^(1-ζ)/(1-ζ) + μ^(2-ζ)/(2-ζ) ]   (y>0)
+               = 2·μ^(2-ζ)/(2-ζ)                                                (y=0; 앞 두 항 소거)
+    saddlepoint 하에서 E[D_ζ] ≈ φ 이므로, D_ζ를 타깃으로 gamma 회귀를 돌리면 φ(x)를 추정한다.
+    (프로젝트의 BagZITEQLRegressor와 동일한 수식·클립.)
+    """
+    y = np.asarray(y, dtype=np.float64)
+    mu = np.maximum(np.asarray(mu, dtype=np.float64), 1e-10)
+    y = np.maximum(y, 0.0)
+    p = float(zeta)
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        y_term = np.where(
+            y > 0,
+            np.power(y, 2.0 - p) / ((1.0 - p) * (2.0 - p)),
+            0.0,
+        )                                                   # y=0이면 0 (2-ζ>0이라 0^(2-ζ)=0)
+        cross_term = -y * np.power(mu, 1.0 - p) / (1.0 - p)  # y=0이면 자동 0
+        mu_term = np.power(mu, 2.0 - p) / (2.0 - p)
+        dev = 2.0 * (y_term + cross_term + mu_term)
+
+    dev = np.nan_to_num(dev, nan=1e6, posinf=1e6, neginf=1e-8)
+    return np.clip(dev, 1e-8, 1e6)
+
+
+def _zitweedie_loglik(y, pi, mu, phi, zeta, w=1.0):
+    """ZI-Tweedie 로그우도 합 — Gu 2024가 채택한 EQL/saddlepoint **근사** 로그우도.
+
+    주의: exact Tweedie 밀도가 아니라 saddlepoint 근사다(논문도 이 EQL을 씀 → 접근은 일치).
+    아래 수식은 arXiv HTML에서 전사한 것으로, PDF 원문과 한 줄씩 대조한 'verbatim'은 아니다.
+
+    y=0 :  log( π + (1-π)·exp(−w·μ^(2-ζ) / (φ(2-ζ))) )
+    y>0 :  log(1-π) − ½·(w/φ)·D_ζ(y;μ) − ½·log(2π·φ·y^ζ / w)
+
+    Algorithm 2(ζ를 profile likelihood로 선택)에서 후보 ζ들을 비교하는 목적함수.
+    w(exposure)는 우리 데이터에 노출량 개념이 없어 1.0(스칼라) 기본 — 논문 일반식의 w_i=1 특수화.
+    """
+    y = np.asarray(y, dtype=np.float64).ravel()
+    pi = np.clip(np.asarray(pi, dtype=np.float64), 1e-8, 1 - 1e-8)
+    mu = np.maximum(np.asarray(mu, dtype=np.float64), 1e-10)
+    phi = np.maximum(np.asarray(phi, dtype=np.float64), 1e-10)
+
+    is_zero = (y == 0)
+    is_pos = ~is_zero
+    ll = np.zeros(len(y), dtype=np.float64)
+
+    # y=0: structural zero 또는 Tweedie 상태에서 0이 나온 경우의 혼합 확률 (해당 행만 계산)
+    if is_zero.any():
+        piz, muz, phiz = pi[is_zero], mu[is_zero], phi[is_zero]
+        lam = w * np.power(muz, 2 - zeta) / (phiz * (2 - zeta))   # Tweedie 상태에서 0일 rate
+        ll[is_zero] = np.log(np.maximum(piz + (1 - piz) * np.exp(-lam), 1e-300))
+
+    # y>0: Tweedie 상태(1-π) × saddlepoint Tweedie 밀도 (해당 행만 계산 → y=0의 log(0) 회피)
+    if is_pos.any():
+        yp, pip, mup, phip = y[is_pos], pi[is_pos], mu[is_pos], phi[is_pos]
+        devp = _tweedie_unit_deviance(yp, mup, zeta)
+        ll[is_pos] = (np.log(np.maximum(1 - pip, 1e-300))
+                      - 0.5 * (w / phip) * devp
+                      - 0.5 * np.log(2 * np.pi * phip * np.power(yp, zeta) / w))
+
+    return float(ll.sum())
 
 
 # --- ZITboostRegressor ---
@@ -399,6 +476,106 @@ class ZITboostRegressor(BaseEstimator, RegressorMixin):
         phi = np.clip(phi, 1e-8, 1e6)
         return pi, mu, phi
 
+    def score_loglik(self, X, y):
+        """학습된 π/μ/φ로 (X, y)에서 ZI-Tweedie EQL 로그우도 합을 계산.
+
+        Algorithm 2(ζ profile likelihood)에서 후보 ζ들을 비교할 때 쓴다.
+        fit()은 self.zeta 한 값으로 EM(Algorithm 1)을 돌리므로, ζ 추정은 노트북에서
+        여러 ζ로 fit→score_loglik 해 최대값을 고르는 식으로 수행한다 (논문 Algorithm 2).
+
+        로그우도식 _zitweedie_loglik은 π/μ/φ 값만으로 계산되고 φ의 *학습 방식*(Pearson vs EQL)과
+        무관하므로, 이 메서드는 부모에 두어 ZITboost/ZITboostEQL/BagZIT/BagZITEQL 4종이 공유한다.
+        """
+        pi, mu, phi = self.predict_components(X)
+        return _zitweedie_loglik(np.asarray(y, dtype=np.float64).ravel(), pi, mu, phi, self.zeta)
+
+
+# --- ZITboostEQLRegressor (Gu 2024 충실 버전) ---
+#
+# ZITboostRegressor 대비 논문(arXiv:2405.14990)과 다른 곳은 정확히 2곳뿐이라, 그 2곳만 오버라이드한다.
+#   ① _initialize : φ₀ 를 zero-truncated Tweedie deviance moment 로 (기존: Var(y)/μ^ζ Pearson moment)
+#   ② _m_step     : φ 타깃을 Tweedie unit deviance 로 (기존: (y-μ)²/μ^ζ Pearson) — extended quasi-likelihood
+# 나머지(E-step posterior, π=cross_entropy soft-label, μ=tweedie weight (1-Π)/φ, predict=(1-π)μ,
+#        세 LightGBM 파라미터 빌더 _pi/_mu/_phi_params)는 ZITboostRegressor가 이미 논문과 일치하므로 그대로 상속.
+
+class ZITboostEQLRegressor(ZITboostRegressor):
+    """Gu 2024(arXiv:2405.14990)에 100% 충실한 ZI-Tweedie + LightGBM EM.
+
+    부모 ZITboostRegressor와 모델/EM 구조는 동일하고, 분산 φ의 추정 방식만 논문 방향으로 교체한다:
+      - 초기화(스칼라부) : μ₀=Σ_{y>0}wy/Σ_{y>0}w (=mean(y>0), w=1),
+                          φ₀=Σ_{y>0} w·D_ζ(y;μ₀)/ΣI(y>0) (deviance moment). 이 스칼라 식은 논문과 일치.
+      - φ M-step : extended quasi-likelihood + saddlepoint → "weighted gamma regression"
+                   (target = Tweedie unit deviance D_ζ(y;μ̂), sample_weight=(1-Π)).
+    __init__/HP는 부모와 동일(추가 인자 없음) — 노트북에서 LightGBM 라이브러리 기본값을 넘기면 그대로 기본값으로 돈다.
+
+    ⚠️ 논문과 다른/근사인 지점 (이 클래스는 'Gu 2024 구조를 따른 적응 구현'이지 100% 충실 구현이 아님):
+      - 초기화(GBT부): 논문은 스칼라 μ₀/φ₀를 구한 뒤 *초기 GBT F̂μ^(0)/F̂φ^(0)/F̂π^(0)를 따로 적합*한다.
+        여기서는 그 단계를 생략하고 스칼라 μ₀/φ₀/π₀(=zero율)를 첫 E-step에 그대로 써, 첫 M-step이 사실상 F^(0) 역할을 한다(근사).
+      - 로그우도/φ: exact Tweedie가 아니라 EQL/saddlepoint 근사(논문도 EQL을 쓰지만, '근사'임을 명시).
+      - ζ: fit()은 Algorithm 1(주어진 ζ EM). ζ는 Algorithm 2(profile likelihood)로 노트북에서 추정(score_loglik).
+        단 ζ 그리드 간격은 논문 verbatim이 아니라 임의(0.1).
+      - exposure w_i=1(노출량 없음), unit target→die broadcast→die 평균 집계: die/unit 구조에 맞춘 프로젝트 적응.
+      - 위 수식들은 arXiv HTML 전사 기준이며 PDF 원문 한 줄 대조는 아직 아님.
+    """
+
+    def _initialize(self, X, y):
+        """zero-truncated Tweedie 초기화 (논문 식).
+
+        μ₀ = (Σ_{i:y_i>0} y_i) / n_pos                      (양수만의 평균; w_i=1)
+        φ₀ = (Σ_{i:y_i>0} D_ζ(y_i; μ₀)) / n_pos             (deviance moment)
+        π₀ = zero 비율 (0/1에 붙지 않게 [0.01,0.99] 클립)
+        부모와 다른 곳은 φ₀ 한 줄뿐 (부모는 Var(y)/μ^ζ Pearson moment).
+        """
+        n = len(y)
+        is_zero = (y == 0)
+        is_pos = ~is_zero
+        n_pos = int(is_pos.sum())
+
+        pi_init = np.clip(is_zero.mean(), 0.01, 0.99)
+
+        mu_init_val = y[is_pos].mean() if n_pos > 0 else 1e-4
+        mu_arr = np.full(n, mu_init_val, dtype=np.float64)
+
+        # φ₀: zero-truncated Tweedie deviance moment (saddlepoint 하 E[D_ζ]≈φ)
+        if n_pos > 0:
+            dev_pos = _tweedie_unit_deviance(y[is_pos], mu_arr[is_pos], self.zeta)
+            phi_scalar = float(np.clip(dev_pos.sum() / n_pos, 1e-6, 1e6))
+        else:
+            phi_scalar = 1.0
+        phi_arr = np.full(n, phi_scalar, dtype=np.float64)
+
+        pi_arr = np.full(n, pi_init, dtype=np.float64)
+        return pi_arr, mu_arr, phi_arr
+
+    def _m_step(self, X, y, posterior):
+        """M-step: 부모와 동일하되 φ 타깃만 Tweedie unit deviance(EQL/saddlepoint)로 교체.
+
+        1) lgb_pi  : target = Π            (cross_entropy)                  — 부모와 동일
+        2) lgb_mu  : target = y, weight=(1-Π)/φ̂   (tweedie)               — 부모와 동일
+        3) lgb_phi : target = D_ζ(y;μ̂),  weight=(1-Π)  (gamma, EQL)        — 부모(Pearson)와 다름
+        """
+        w_tw = 1.0 - posterior   # "Tweedie 상태일 확률"
+
+        # 1) π 모델 — structural zero 확률을 soft label Π로 회귀 (부모와 동일)
+        lgb_pi = lgb.LGBMRegressor(**self._pi_params())
+        lgb_pi.fit(X, posterior)
+        pi_pred = np.clip(lgb_pi.predict(X), 1e-8, 1 - 1e-8)
+
+        # 2) μ 모델 — weighted Tweedie deviance, weight=(1-Π)/φ̂^(k) (부모와 동일)
+        phi_for_weight = np.maximum(self._phi_current, 1e-10)
+        mu_weight = w_tw / phi_for_weight
+        lgb_mu = lgb.LGBMRegressor(**self._mu_params())
+        lgb_mu.fit(X, y, sample_weight=mu_weight)
+        mu_pred = np.maximum(lgb_mu.predict(X), 1e-10)
+
+        # 3) φ 모델 — EQL/saddlepoint: target = Tweedie unit deviance, weight=(1-Π) (논문 충실 지점)
+        phi_target = _tweedie_unit_deviance(y, mu_pred, self.zeta)
+        lgb_phi = lgb.LGBMRegressor(**self._phi_params())
+        lgb_phi.fit(X, phi_target, sample_weight=w_tw)
+        phi_pred = np.clip(lgb_phi.predict(X), 1e-8, 1e6)
+
+        return lgb_pi, lgb_mu, lgb_phi, pi_pred, mu_pred, phi_pred
+
 
 # --- BagZITboostRegressor ---
 #
@@ -503,3 +680,30 @@ class BagZITboostRegressor(ZITboostRegressor):
         pred_unit = np.zeros(n_units)
         np.add.at(pred_unit, inverse, pred_die)   # unit별 die 예측 합 = unit 예측
         return pred_unit, unique_units
+
+
+# --- BagZITEQLRegressor (BagZIT의 EQL/논문충실 φ 변종) ---
+#
+# BagZITboostRegressor(bag constraint) 에 ZITboostEQLRegressor 의 φ M-step(EQL/saddlepoint =
+# Tweedie unit deviance 타깃) 만 얹은 변형. 즉 두 축의 조합이다:
+#   ① bag(unit) constraint  : BagZITboostRegressor 로부터 상속 (fit(X,y,unit_id)·B3 allocation·predict_unit)
+#   ② EQL φ M-step          : ZITboostEQLRegressor._m_step 재사용 (φ 타깃 = Tweedie unit deviance)
+# _initialize 는 부모 BagZIT(→ZITboostRegressor)의 Pearson moment 초기화를 그대로 쓴다
+#   (02_bag_zit_eql_parallel_hpo.py 워커의 BagZITEQLRegressor 와 동일: 워커도 _m_step 만 EQL로 교체했음).
+# BagZIT 자체가 논문 외 변형이므로 '논문충실'은 φ M-step 한정 의미.
+
+class BagZITEQLRegressor(BagZITboostRegressor):
+    """BagZIT + EQL φ M-step (Tweedie unit deviance) — BagZIT의 논문충실(EQL) 변종.
+
+    bag(unit) constraint·EM·예측·초기화는 BagZITboostRegressor 그대로 상속하고,
+    φ의 M-step 타깃만 Pearson 잔차에서 Tweedie unit deviance(extended quasi-likelihood)로 교체한다.
+    이 교체분이 ZITboostEQLRegressor._m_step 과 수식이 동일하므로 그대로 재사용한다.
+
+    시그니처는 부모와 동일: fit(X, y, unit_id) — unit_id 필수, die→unit 집계는 SUM(predict_unit).
+    score_loglik(부모 ZITboostRegressor 제공)도 상속하므로 ζ profile likelihood(Algorithm 2) 가능.
+    """
+
+    def _m_step(self, X, y, posterior):
+        # ZITboostEQLRegressor 와 동일한 EQL(Tweedie unit deviance) φ M-step 을 재사용.
+        # (self 는 BagZITEQL 인스턴스로 바인딩되어 _pi/_mu/_phi_params·_phi_current·zeta 는 BagZIT 것을 쓴다.)
+        return ZITboostEQLRegressor._m_step(self, X, y, posterior)
