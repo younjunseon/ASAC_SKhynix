@@ -279,6 +279,30 @@ class ZITboostRegressor(BaseEstimator, RegressorMixin):
             device=self.device,
         )
 
+    def _fit_lgb_phi(self, X, phi_target, w_tw):
+        """φ(gamma) 모델 적합 — 라이브러리 기본값이 퇴화 split을 만들면 보수적으로 1회 재적합.
+
+        BagZIT는 unit health를 die에 ¼ 스케일로 분배한 타깃으로 φ를 적합하는데, 그 타깃이
+        clip 경계([1e-8, 1e6])에 몰리고 가중치 w_tw(=1-Π)의 동적범위가 커서, LightGBM 기본값
+        (min_child_samples 작음 + max_depth 무제한)이 한쪽 count=0 split을 골라
+        'Check failed: best_split_info.left_count > 0'로 죽는 경우가 있다(특히 bag 변형).
+        정상 적합되면 그대로 통과(=결과 불변), 그 CHECK로 죽을 때만 φ 트리를 보수적으로
+        (잎 최소표본↑·깊이 cap) 재적합해 구조를 안정화한다. μ/π 및 그 외 HP는 건드리지 않음.
+        base(Pearson)·EQL _m_step이 공유한다.
+        """
+        params = self._phi_params()
+        lgb_phi = lgb.LGBMRegressor(**params)
+        try:
+            lgb_phi.fit(X, phi_target, sample_weight=w_tw)
+        except lgb.basic.LightGBMError:
+            safe = dict(params)
+            safe["min_child_samples"] = max(int(params.get("min_child_samples", 20) or 20), 100)
+            md = params.get("max_depth", -1)
+            safe["max_depth"] = 8 if (md is None or md <= 0) else min(int(md), 8)
+            lgb_phi = lgb.LGBMRegressor(**safe)
+            lgb_phi.fit(X, phi_target, sample_weight=w_tw)
+        return lgb_phi
+
     # --- EM 알고리즘 ---
 
     def _initialize(self, X, y):
@@ -357,8 +381,7 @@ class ZITboostRegressor(BaseEstimator, RegressorMixin):
         phi_target = residual_sq / np.maximum(mu_pow_zeta, 1e-10)
         phi_target = np.clip(phi_target, 1e-8, 1e6)
 
-        lgb_phi = lgb.LGBMRegressor(**self._phi_params())
-        lgb_phi.fit(X, phi_target, sample_weight=w_tw)
+        lgb_phi = self._fit_lgb_phi(X, phi_target, w_tw)   # 퇴화 split 시 보수적 재적합(성공 시 결과 불변)
         phi_pred = lgb_phi.predict(X)
         phi_pred = np.clip(phi_pred, 1e-8, 1e6)
 
@@ -570,8 +593,7 @@ class ZITboostEQLRegressor(ZITboostRegressor):
 
         # 3) φ 모델 — EQL/saddlepoint: target = Tweedie unit deviance, weight=(1-Π) (논문 충실 지점)
         phi_target = _tweedie_unit_deviance(y, mu_pred, self.zeta)
-        lgb_phi = lgb.LGBMRegressor(**self._phi_params())
-        lgb_phi.fit(X, phi_target, sample_weight=w_tw)
+        lgb_phi = self._fit_lgb_phi(X, phi_target, w_tw)   # 퇴화 split 시 보수적 재적합(성공 시 결과 불변)
         phi_pred = np.clip(lgb_phi.predict(X), 1e-8, 1e6)
 
         return lgb_pi, lgb_mu, lgb_phi, pi_pred, mu_pred, phi_pred

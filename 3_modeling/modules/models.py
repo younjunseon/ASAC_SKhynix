@@ -28,7 +28,7 @@ import numpy as np
 import lightgbm as lgb
 import xgboost as xgb_lib
 from catboost import CatBoostRegressor
-from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
 from sklearn.linear_model import ElasticNet
 
 from utils.config import SEED
@@ -44,6 +44,7 @@ MODEL_REGISTRY = {
     "xgb":      xgb_lib.XGBRegressor,
     "catboost": CatBoostRegressor,
     "et":       ExtraTreesRegressor,
+    "rf":       RandomForestRegressor,
     "enet":     ElasticNet,
     "zitboost": ZITboostRegressor,
 }
@@ -349,13 +350,14 @@ def get_search_space(name, variant="default"):
 # 나머지는 hpo 쪽에서 fold마다 클래스 비율로 자동 계산한다(resolve_clf_imbalance).
 
 from catboost import CatBoostClassifier
-from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 
 CLF_REGISTRY = {
     "lgbm":     lgb.LGBMClassifier,
     "xgb":      xgb_lib.XGBClassifier,
     "catboost": CatBoostClassifier,
     "et":       ExtraTreesClassifier,
+    "rf":       RandomForestClassifier,
 }
 
 CLF_AVAILABLE_MODELS = list(CLF_REGISTRY)
