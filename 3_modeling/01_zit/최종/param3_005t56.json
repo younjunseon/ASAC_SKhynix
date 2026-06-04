@@ -1,0 +1,222 @@
+{
+  "exp_id": "bag-zit-eql-final-005",
+  "model_name": "bag_zit_eql",
+  "source_db": "4_output\\01_zit\\bag_zit\\hp\\005\\optuna_jh_bag-zit-eql-final-005.db",
+  "source_study_name": "bag-zit-eql-final-005",
+  "best_trial_number": 56,
+  "best_trial_state": "TrialState.COMPLETE",
+  "best_oof_rmse": 0.00549449732852786,
+  "best_params_resolved": {
+    "zeta": 1.0436659218305735,
+    "n_em_iters": 17,
+    "mu_n_estimators": 67,
+    "mu_learning_rate": 0.004050156548764772,
+    "mu_num_leaves": 201,
+    "mu_max_depth": 5,
+    "mu_min_child_samples": 78,
+    "mu_subsample": 0.8358598473943858,
+    "mu_colsample_bytree": 0.25008270645707986,
+    "mu_reg_alpha": 0.0002351013661913117,
+    "mu_reg_lambda": 0.021557720268457602,
+    "pi_n_estimators": 253,
+    "pi_learning_rate": 0.015161054219535779,
+    "pi_num_leaves": 157,
+    "pi_max_depth": 23,
+    "pi_min_child_samples": 37,
+    "phi_n_estimators": 135,
+    "phi_learning_rate": 0.00504104148224701,
+    "phi_num_leaves": 35,
+    "phi_max_depth": 3,
+    "phi_min_child_samples": 234
+  },
+  "best_tau_pi": 0.9974273502548279,
+  "effective_pp_params": {
+    "missing_threshold": 0.3,
+    "corr_threshold": 0.9,
+    "corr_keep_by": "std",
+    "add_indicator": true,
+    "indicator_threshold": 0.05,
+    "spatial_max_dist": 6.0,
+    "post_impute_corr_threshold": 0.96,
+    "post_impute_corr_keep_by": "std"
+  },
+  "feature_names": null,
+  "n_features": null,
+  "unit_ids_hash": null,
+  "study_meta": {
+    "CLIP_Y_EXTREME": true,
+    "anchor": {
+      "zeta": 1.0268864552766277,
+      "n_em_iters": 22,
+      "mu_n_estimators": 70,
+      "mu_learning_rate": 0.0060766387987241915,
+      "mu_num_leaves": 165,
+      "mu_max_depth": 3,
+      "mu_min_child_samples": 135,
+      "mu_subsample": 0.522143096780092,
+      "mu_colsample_bytree": 0.5375972225613537,
+      "mu_reg_alpha": 4.8410077812888856e-05,
+      "mu_reg_lambda": 0.016081378287710623,
+      "pi_n_estimators": 399,
+      "pi_learning_rate": 0.017901499304118572,
+      "pi_num_leaves": 103,
+      "pi_max_depth": 17,
+      "pi_min_child_samples": 53,
+      "phi_n_estimators": 125,
+      "phi_learning_rate": 0.00795967360245769,
+      "phi_num_leaves": 52,
+      "phi_max_depth": 4,
+      "phi_min_child_samples": 200
+    },
+    "anchor_source": "bag-zit-eql-final-002 best trial #58 (OOF 0.005494691)",
+    "anchor_tau_pi": 0.9397668379445991,
+    "clip_y_extreme": true,
+    "data_source": "precomputed mmap (00_precompute_pp.py)",
+    "exp_id": "bag-zit-eql-final-005",
+    "model": "BagZIT-EQL PRECOMPUTED-MMAP parallel HPO worker",
+    "model_random_state": "SEED + trial.number",
+    "n_features": 576,
+    "n_folds": 5,
+    "n_jobs": 3,
+    "n_trials_per_worker": 100000,
+    "phi_update": "EQL Tweedie unit deviance target (modules.zit.BagZITEQLRegressor)",
+    "pp_fixed": {
+      "missing_threshold": 0.3,
+      "corr_threshold": 0.9,
+      "corr_keep_by": "std",
+      "add_indicator": true,
+      "indicator_threshold": 0.05,
+      "spatial_max_dist": 6.0,
+      "post_impute_corr_threshold": 0.96,
+      "post_impute_corr_keep_by": "std"
+    },
+    "precompute_fingerprint": 412069368.8727071,
+    "precomputed_dir": "C:\\Users\\Dell5371\\Desktop\\sk-hynix\\ASAC_SKhynix\\0_data\\precomputed\\bag_zit_pp",
+    "pruner": "MedianPruner n_startup=12 n_warmup=2",
+    "sampler": "TPE seed=None multivariate group",
+    "search_space": {
+      "zeta": {
+        "type": "float",
+        "low": 1.01,
+        "high": 1.3,
+        "log": false
+      },
+      "n_em_iters": {
+        "type": "int",
+        "low": 12,
+        "high": 30
+      },
+      "mu_n_estimators": {
+        "type": "int",
+        "low": 50,
+        "high": 180
+      },
+      "mu_learning_rate": {
+        "type": "float",
+        "low": 0.0035,
+        "high": 0.012,
+        "log": true
+      },
+      "mu_num_leaves": {
+        "type": "int",
+        "low": 80,
+        "high": 256
+      },
+      "mu_max_depth": {
+        "type": "int",
+        "low": 3,
+        "high": 7
+      },
+      "mu_min_child_samples": {
+        "type": "int",
+        "low": 60,
+        "high": 220
+      },
+      "mu_subsample": {
+        "type": "float",
+        "low": 0.4,
+        "high": 0.95,
+        "log": false
+      },
+      "mu_colsample_bytree": {
+        "type": "float",
+        "low": 0.22,
+        "high": 0.85,
+        "log": false
+      },
+      "mu_reg_alpha": {
+        "type": "float",
+        "low": 1e-06,
+        "high": 0.0005,
+        "log": true
+      },
+      "mu_reg_lambda": {
+        "type": "float",
+        "low": 0.003,
+        "high": 0.06,
+        "log": true
+      },
+      "pi_n_estimators": {
+        "type": "int",
+        "low": 250,
+        "high": 550
+      },
+      "pi_learning_rate": {
+        "type": "float",
+        "low": 0.01,
+        "high": 0.045,
+        "log": true
+      },
+      "pi_num_leaves": {
+        "type": "int",
+        "low": 70,
+        "high": 180
+      },
+      "pi_max_depth": {
+        "type": "int",
+        "low": 8,
+        "high": 24
+      },
+      "pi_min_child_samples": {
+        "type": "int",
+        "low": 30,
+        "high": 90
+      },
+      "phi_n_estimators": {
+        "type": "int",
+        "low": 90,
+        "high": 250
+      },
+      "phi_learning_rate": {
+        "type": "float",
+        "low": 0.004,
+        "high": 0.014,
+        "log": true
+      },
+      "phi_num_leaves": {
+        "type": "int",
+        "low": 24,
+        "high": 110
+      },
+      "phi_max_depth": {
+        "type": "int",
+        "low": 2,
+        "high": 6
+      },
+      "phi_min_child_samples": {
+        "type": "int",
+        "low": 80,
+        "high": 260
+      }
+    },
+    "seed": 42,
+    "tau_pi_range": [
+      0.8,
+      1.0
+    ],
+    "user": "jh",
+    "variant": "v5",
+    "variant_intent": "explore",
+    "worker_id_last_writer": "w5"
+  }
+}
