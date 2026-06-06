@@ -10,7 +10,8 @@
   - position : 모든 모델 사용 (ElasticNet은 OHE 4컬럼, 트리/ET는 raw 정수 1컬럼)
   - die_x, die_y : 트리/ET만 사용 (연속형), ElasticNet 제외
   - 위치기반 X(X1073 등)의 OHE : ElasticNet만 사용 (sector/strip ID라 순서 가정이 부적절), 트리/ET 제외
-  - lot / wafer_no / lot_wafer : 전 모델 제외 (target leak + production 일반화 약화 우려라 인자 자체가 없음)
+  - wafer_no : 선택적 (use_wafer_no=True 시 추가). 1~25 정수(카세트 슬롯). train/val/test 모두 1~25로 공유되어 leakage 없음
+  - lot / lot_wafer : 전 모델 제외 (lot 단위 target leak 우려)
 """
 import pandas as pd
 import numpy as np
@@ -63,7 +64,7 @@ def parse_run_wf_xy(xs, prefix="", inplace=False, verbose=True):
 
 
 def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
-                      position_mode, use_die_xy, verbose=True,
+                      position_mode, use_die_xy=True, use_wafer_no=True, verbose=True,
                       use_loc_x_ohe=False,
                       loc_x_required=("X1073",),
                       loc_x_optional=("X1059", "X1075", "X1076", "X1077")):
@@ -73,7 +74,8 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
     - position: 모든 모델 (enet은 OHE 4, 트리/ET는 raw int 1)
     - die_x, die_y: 트리/ET True, ElasticNet False
     - loc_x OHE (X1073 등 위치기반 X): ElasticNet True, 트리/ET False
-    - lot / wafer_no / lot_wafer: 전 모델 제외 (인자 없음)
+    - wafer_no: use_wafer_no=True 시 선택적 추가 (1~25 정수, 카세트 슬롯 번호)
+    - lot / lot_wafer: 전 모델 제외
 
     Parameters
     ----------
@@ -85,7 +87,10 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
         - 'ohe': pos_1~pos_4 4컬럼 OHE → ElasticNet 권장
         - 'raw': position 컬럼을 그대로 numeric feature로 추가 → 트리/ET 권장
     use_die_xy : bool
-        True면 die_x, die_y continuous 추가. ElasticNet은 False, 트리/ET는 True.
+        True(기본)면 die_x, die_y continuous 추가. ElasticNet은 False로 명시.
+    use_wafer_no : bool
+        True(기본)면 wafer_no(1~25 정수) 1컬럼 추가.
+        use_die_xy=True/False 여부와 무관하게 독립 동작.
     verbose : bool
         True(기본)면 추가된 컬럼 요약 print.
     use_loc_x_ohe : bool
@@ -107,8 +112,8 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
     -----
     - position 컬럼은 xs DataFrame에 이미 존재 (1~4 정수). 'raw'면 그대로 등록,
       'ohe'면 dummy 4개 생성 후 등록 (원본 'position'은 등록 안 함).
-    - die_x/die_y는 parse_run_wf_xy() 재사용 (lot/wafer_no도 컬럼은 추가되지만
-      feat_cols에는 등록 안 해 모델 입력에서 제외).
+    - die_x/die_y는 parse_run_wf_xy() 재사용. wafer_no는 use_wafer_no=True 시에만
+      feat_cols에 등록됨. lot은 항상 feat_cols 제외.
     - loc_x_required/optional 컬럼이 feat_cols에 없으면 (cleaning에서 제거됐거나
       EXCLUDE_COLS에 있는 경우) 해당 컬럼 스킵. 에러 안 발생.
     """
@@ -147,7 +152,21 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
     else:
         added_diexy = []
 
-    # --- 3) 위치기반 X 컬럼의 OHE (ElasticNet 전용) ---
+    # --- 3) wafer_no (선택적, 1~25 정수) ---
+    # run_wf_xy 두 번째 토큰을 int32로 파싱. use_die_xy=True 시 parse_run_wf_xy가 이미
+    # 문자열 wafer_no를 추가하므로 여기서 정수로 덮어씀. use_die_xy=False 시에도 독립 동작.
+    if use_wafer_no:
+        from utils.config import DIE_KEY_COL
+        for split_df in splits:
+            split_df['wafer_no'] = (
+                split_df[DIE_KEY_COL].str.split("_", expand=True)[1].astype(np.int32)
+            )
+        feat_cols.append('wafer_no')
+        added_wafer_no = ['wafer_no']
+    else:
+        added_wafer_no = []
+
+    # --- 4) 위치기반 X 컬럼의 OHE (ElasticNet 전용) ---
     # X1073 같은 컬럼은 값이 sector/strip ID라 "1<2<3"이라는 순서 가정이 부적절 → 더미로 펼침.
     # 더미 카테고리는 train 값 기준으로 정함. val/test에만 나오는 새 카테고리는 모든 더미가 0이 되어 자연스럽게 처리됨.
     added_loc, removed_loc = [], []
@@ -172,8 +191,8 @@ def add_meta_features(xs_train, xs_val, xs_test, feat_cols,
 
     if verbose:
         msg = (f"[add_meta_features] position_mode={position_mode!r}, "
-               f"use_die_xy={use_die_xy}, use_loc_x_ohe={use_loc_x_ohe} → "
-               f"position={added_pos}, die_xy={added_diexy}")
+               f"use_die_xy={use_die_xy}, use_wafer_no={use_wafer_no}, use_loc_x_ohe={use_loc_x_ohe} → "
+               f"position={added_pos}, die_xy={added_diexy}, wafer_no={added_wafer_no}")
         if use_loc_x_ohe:
             msg += f", loc_x: -{removed_loc} +{len(added_loc)} dummy"
         msg += f" (feat_cols: {len(feat_cols)})"
