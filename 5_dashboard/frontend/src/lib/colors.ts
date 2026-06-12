@@ -3,8 +3,6 @@
  * 임계값(threshold)을 기준으로 두 영역을 다른 팔레트로 분리:
  *   - threshold 미만 (정상): 옅은 회색 → 옅은 청록
  *   - threshold 이상 (위험): 노랑 → 주황 → 빨강
- *
- * 기존 단일 그라데이션은 모든 cell을 빨강 톤으로 보이게 했음 — 정상이 안 보이는 문제.
  */
 type RGB = [number, number, number];
 

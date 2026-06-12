@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { fetchTriage } from "../lib/api";
+import { fetchAlertsToday } from "../lib/api";
 import { fmtPpm, healthToPpm } from "../lib/format";
+
+const POS_COLORS: Record<number, string> = { 1: "#3b82f6", 2: "#f59e0b", 3: "#10b981", 4: "#8b5cf6" };
 
 export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // 오늘 검사된 위험 항목으로 알림 구성 — PI가 가장 먼저 봐야 하는 것
   const { data } = useQuery({
-    queryKey: ["alerts-today"],
-    queryFn: () => fetchTriage({ status: "today", top_units: 5, top_wafers: 5 }),
+    queryKey: ["alerts-today-v2"],
+    queryFn: fetchAlertsToday,
   });
 
   useEffect(() => {
@@ -22,9 +23,21 @@ export default function NotificationBell() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  const wafers = data?.top_wafers ?? [];
-  const units = data?.top_units ?? [];
-  const totalAlerts = wafers.length + units.length;
+  const positionAlerts = data?.position_alerts ?? [];
+  const lotClusters = data?.lot_cluster_alerts ?? [];
+  const pointClusters = data?.point_cluster_alerts ?? [];
+  const systematicLots = data?.systematic_lot_alerts ?? [];
+  const totalAlerts =
+    positionAlerts.length + lotClusters.length + pointClusters.length + systematicLots.length;
+
+  const sectionHeader = (text: string, color: string) => (
+    <div
+      className="px-4 py-2 text-[10px] font-semibold uppercase tracking-wider sticky top-0 border-b border-red-100"
+      style={{ background: `${color}14`, color }}
+    >
+      {text}
+    </div>
+  );
 
   return (
     <div className="relative" ref={ref}>
@@ -44,42 +57,47 @@ export default function NotificationBell() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-11 w-96 bg-white rounded-lg shadow-cardHover border border-brand-border z-50 overflow-hidden">
+        <div className="absolute right-0 top-11 w-[420px] bg-white rounded-lg shadow-cardHover border border-brand-border z-50 overflow-hidden">
           <div className="px-4 py-3 border-b border-brand-border bg-brand-subtle flex items-center justify-between">
             <div>
               <div className="text-[13px] font-semibold text-brand-text">오늘 알림</div>
               <div className="text-[11px] text-brand-textMuted">
-                오늘 검사된 위험 항목
+                연속/패턴 불량 시그널
               </div>
             </div>
-            <span className="text-[11px] text-brand-textMuted">
-              총 {totalAlerts}건
-            </span>
+            <span className="text-[11px] text-brand-textMuted">총 {totalAlerts}건</span>
           </div>
 
-          <div className="max-h-[420px] overflow-y-auto">
-            {wafers.length > 0 && (
+          <div className="max-h-[480px] overflow-y-auto">
+            {/* 1. 같은 lot 연속 불량 (위험 unit 임계 이상) */}
+            {lotClusters.length > 0 && (
               <div>
-                <div className="px-4 py-2 text-[10px] font-semibold text-brand-textMuted uppercase tracking-wider bg-white sticky top-0">
-                  위험 Wafer
-                </div>
-                {wafers.map((w) => (
+                {sectionHeader("⚠ 같은 로트에서 연속 불량 발생", "#dc2626")}
+                {lotClusters.map((c) => (
                   <Link
-                    key={w.wafer_key}
-                    to={`/drilldown?key=${encodeURIComponent(w.wafer_key)}`}
+                    key={`lot-${c.run_id}`}
+                    to={`/drilldown?key=${encodeURIComponent(c.sample_wafer_key)}`}
                     onClick={() => setOpen(false)}
-                    className="block px-4 py-2.5 hover:bg-brand-subtle border-b border-brand-border/50"
+                    className="block px-4 py-2.5 hover:bg-brand-subtle border-b border-brand-border/50 bg-red-50/30"
                   >
                     <div className="flex items-start gap-2">
                       <div className="w-1.5 h-1.5 rounded-full bg-brand-danger mt-1.5 flex-shrink-0"></div>
                       <div className="flex-1 min-w-0">
-                        <div className="font-mono text-[12px] text-brand-text font-semibold">
-                          {w.wafer_key}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-brand-danger bg-red-100 px-1.5 py-0.5 rounded">
+                            LOT
+                          </span>
+                          <span className="font-mono text-[12px] text-brand-text font-semibold">
+                            {c.run_id}
+                          </span>
                         </div>
                         <div className="text-[11px] text-brand-textMuted mt-0.5">
-                          평균 <span className="font-bold text-brand-danger">{fmtPpm(healthToPpm(w.mean_pred))}</span>
-                          {" · "}
-                          임계 초과 {w.n_risk}/{w.n_units}
+                          위험 unit{" "}
+                          <span className="font-bold text-brand-danger">{c.n_risk_units}개</span>
+                          {" 연속 발생 · 평균 "}
+                          <span className="font-bold text-brand-danger">
+                            {fmtPpm(healthToPpm(c.mean_pred))}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -88,28 +106,138 @@ export default function NotificationBell() {
               </div>
             )}
 
-            {units.length > 0 && (
+            {/* 2. 같은 포인트 연속 불량 (die hotspot) */}
+            {pointClusters.length > 0 && (
               <div>
-                <div className="px-4 py-2 text-[10px] font-semibold text-brand-textMuted uppercase tracking-wider bg-white sticky top-0">
-                  위험 Unit
-                </div>
-                {units.map((u) => (
+                {sectionHeader("📍 같은 포인트에서 연속 불량 발생", "#d97706")}
+                {pointClusters.map((c) => (
                   <Link
-                    key={u.ufs_serial}
-                    to={`/drilldown?key=${encodeURIComponent(u.wafer_key)}`}
+                    key={`pt-${c.die_x}-${c.die_y}`}
+                    to={`/drilldown?key=${encodeURIComponent(c.sample_wafer_key)}`}
                     onClick={() => setOpen(false)}
                     className="block px-4 py-2.5 hover:bg-brand-subtle border-b border-brand-border/50"
+                    style={{ background: "#fef3c714" }}
                   >
                     <div className="flex items-start gap-2">
-                      <div className="w-1.5 h-1.5 rounded-full bg-brand-warn mt-1.5 flex-shrink-0"></div>
+                      <div className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ background: "#d97706" }}></div>
                       <div className="flex-1 min-w-0">
-                        <div className="font-mono text-[12px] text-brand-text font-semibold">
-                          {u.ufs_serial}
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
+                            style={{ color: "#d97706", background: "#fef3c7" }}
+                          >
+                            POINT
+                          </span>
+                          <span className="font-mono text-[12px] text-brand-text font-semibold">
+                            ({c.die_x}, {c.die_y})
+                          </span>
                         </div>
                         <div className="text-[11px] text-brand-textMuted mt-0.5">
-                          예측 <span className="font-bold text-brand-danger">{fmtPpm(healthToPpm(u.pred))}</span>
+                          위험 die{" "}
+                          <span className="font-bold" style={{ color: "#d97706" }}>
+                            {c.n_risk_dies}개
+                          </span>
                           {" · "}
-                          <span className="font-mono">{u.wafer_key}</span>
+                          <span className="font-mono">{c.n_wafers}장 wafer</span>
+                          {" 걸쳐서 · 평균 "}
+                          <span className="font-bold" style={{ color: "#d97706" }}>
+                            {fmtPpm(healthToPpm(c.mean_pred))}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+
+            {/* 3. 포지션 N번 연속 불량 (position lift) */}
+            {positionAlerts.length > 0 && (
+              <div>
+                {sectionHeader("◆ 특정 포지션 연속 불량 발생", "#7c3aed")}
+                {positionAlerts.map((p) => {
+                  const c = POS_COLORS[p.position] ?? "#7c3aed";
+                  return (
+                    <div
+                      key={`pos-${p.position}`}
+                      className="block px-4 py-2.5 border-b border-brand-border/50"
+                      style={{ background: "#ede9fe22" }}
+                    >
+                      <div className="flex items-start gap-2">
+                        <div className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ background: c }}></div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
+                              style={{ color: c, background: `${c}1f` }}
+                            >
+                              POSITION
+                            </span>
+                            <span className="font-mono text-[12px] text-brand-text font-semibold">
+                              P{p.position}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-brand-textMuted mt-0.5">
+                            위험 die{" "}
+                            <span className="font-bold" style={{ color: c }}>
+                              {p.n_risk_dies}/{p.n_dies}
+                            </span>
+                            {" ("}
+                            <span className="font-bold" style={{ color: c }}>
+                              {(p.risk_ratio * 100).toFixed(1)}%
+                            </span>
+                            {") · 평균 대비 "}
+                            <span className="font-bold" style={{ color: c }}>
+                              ×{p.lift.toFixed(2)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* 4. 디펙성 lot 과다 발생 (lift) */}
+            {systematicLots.length > 0 && (
+              <div>
+                {sectionHeader("⚡ 디펙성 불량 특정 로트 과다 발생", "#b91c1c")}
+                {systematicLots.map((c) => (
+                  <Link
+                    key={`sys-${c.run_id}`}
+                    to={`/drilldown?key=${encodeURIComponent(c.sample_wafer_key)}`}
+                    onClick={() => setOpen(false)}
+                    className="block px-4 py-2.5 hover:bg-brand-subtle border-b border-brand-border/50"
+                    style={{ background: "#fee2e222" }}
+                  >
+                    <div className="flex items-start gap-2">
+                      <div className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ background: "#b91c1c" }}></div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
+                            style={{ color: "#b91c1c", background: "#fecaca" }}
+                          >
+                            SYSTEMATIC
+                          </span>
+                          <span className="font-mono text-[12px] text-brand-text font-semibold">
+                            {c.run_id}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-brand-textMuted mt-0.5">
+                          위험 비율{" "}
+                          <span className="font-bold" style={{ color: "#b91c1c" }}>
+                            {(c.risk_ratio * 100).toFixed(1)}%
+                          </span>
+                          {" ("}
+                          <span className="font-mono">
+                            {c.n_risk}/{c.n_units}
+                          </span>
+                          {") · baseline 대비 "}
+                          <span className="font-bold" style={{ color: "#b91c1c" }}>
+                            ×{c.lift.toFixed(2)}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -120,7 +248,7 @@ export default function NotificationBell() {
 
             {totalAlerts === 0 && (
               <div className="px-4 py-8 text-center text-[12px] text-brand-textMuted">
-                새로운 알림이 없습니다.
+                패턴 불량 시그널이 없습니다.
               </div>
             )}
           </div>

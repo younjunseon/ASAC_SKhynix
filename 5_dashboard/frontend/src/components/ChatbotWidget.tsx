@@ -65,7 +65,7 @@ export default function ChatbotWidget() {
       {/* 플로팅 버튼 */}
       <button
         onClick={() => setOpen((v) => !v)}
-        className="fixed bottom-4 right-4 xl:bottom-6 xl:right-6 w-11 h-11 xl:w-12 xl:h-12 rounded-full text-white flex items-center justify-center transition-all hover:scale-105 z-40"
+        className="fixed bottom-6 right-6 w-12 h-12 rounded-full text-white flex items-center justify-center transition-all hover:scale-105 z-50"
         style={{
           background: "linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)",
           boxShadow: "0 6px 20px rgba(37, 99, 235, 0.35)",
@@ -86,7 +86,7 @@ export default function ChatbotWidget() {
       {/* 챗봇 패널 */}
       {open && (
         <div
-          className="fixed bottom-20 right-6 w-[360px] h-[520px] bg-white rounded-2xl shadow-cardHover border border-brand-border z-40 flex flex-col overflow-hidden"
+          className="fixed bottom-24 right-6 w-[360px] h-[520px] bg-white rounded-2xl shadow-cardHover border border-brand-border z-50 flex flex-col overflow-hidden"
           style={{ boxShadow: "0 12px 40px rgba(15, 23, 42, 0.18)" }}
         >
           {/* 헤더 */}

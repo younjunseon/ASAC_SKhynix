@@ -62,6 +62,7 @@ export interface DieItem {
   run_wf_xy: string;
   die_x: number;
   die_y: number;
+  position?: number;
   pi: number;
   one_minus_pi: number;
   mu: number;
@@ -70,6 +71,8 @@ export interface DieItem {
   ufs_serial?: string;
   status?: Status;
 }
+
+
 
 export const fetchOverview = () =>
   api.get<Overview>("/api/overview").then((r) => r.data);
@@ -84,6 +87,47 @@ export interface WaferGrid {
 
 export const fetchWaferGrid = () =>
   api.get<WaferGrid>("/api/wafer-grid").then((r) => r.data);
+
+export interface AnomalyFeature {
+  feature: string;
+  unit_value: number;
+  normal_mean: number;
+  normal_std: number;
+  z_score: number;
+}
+
+export interface AnomalyFeaturesResponse {
+  ufs_serial: string;
+  top_n: number;
+  items: AnomalyFeature[];
+}
+
+export const fetchUnitAnomalyFeatures = (ufsSerial: string, topN: number = 10) =>
+  api
+    .get<AnomalyFeaturesResponse>(`/api/units/${ufsSerial}/anomaly_features`, {
+      params: { top_n: topN },
+    })
+    .then((r) => r.data);
+
+export interface GlobalAnomalyItem {
+  feature: string;
+  risk_mean: number;
+  normal_mean: number;
+  normal_std: number;
+  z_score: number;
+}
+
+export interface GlobalAnomalyResponse {
+  status: string;
+  n_risk_units: number;
+  top_n: number;
+  items: GlobalAnomalyItem[];
+}
+
+export const fetchGlobalAnomalyFeatures = (params: { status?: StatusFilter; top_n?: number }) =>
+  api
+    .get<GlobalAnomalyResponse>("/api/anomaly_features_global", { params })
+    .then((r) => r.data);
 
 export const fetchWafers = (params: {
   status?: StatusFilter;
@@ -292,6 +336,38 @@ export const fetchPsi = (top = 10) =>
     .get<{ items: PsiItem[] }>("/api/model/psi", { params: { top } })
     .then((r) => r.data);
 
+export interface FeatureCorrItem {
+  feature: string;
+  r: number;
+  abs_r: number;
+}
+
+export interface ShapItem {
+  feature: string;
+  shap: number;
+  abs_shap: number;
+  total_gain: number;
+  cohens_d: number;
+  mean_risk: number;
+  mean_norm: number;
+}
+
+export const fetchShap = (top = 10) =>
+  api
+    .get<{ items: ShapItem[]; n_total: number; max_abs_shap: number }>(
+      "/api/model/shap",
+      { params: { top } },
+    )
+    .then((r) => r.data);
+
+export const fetchFeatureCorr = (top = 10) =>
+  api
+    .get<{ items: FeatureCorrItem[]; n_total: number; max_abs_r: number }>(
+      "/api/model/feature-corr",
+      { params: { top } },
+    )
+    .then((r) => r.data);
+
 export interface VarCompareItem {
   feature: string;
   cohens_d: number;
@@ -306,3 +382,64 @@ export const fetchVarCompare = (top = 10) =>
   api
     .get<{ items: VarCompareItem[] }>("/api/model/var-compare", { params: { top } })
     .then((r) => r.data);
+
+export interface PositionRiskItem {
+  position: number;
+  n_dies: number;
+  mean_risk_prob: number;
+  mean_risk_pct: number;
+  p75_risk_pct: number;
+  p95_risk_pct: number;
+}
+
+export const fetchPositionRisk = () =>
+  api.get<{ items: PositionRiskItem[] }>("/api/position_risk").then((r) => r.data);
+
+
+/* ─── 알림 (오늘 데이터 기반 4종 패턴) ─────────────── */
+export interface PositionAlert {
+  position: number;
+  n_dies: number;
+  n_risk_dies: number;
+  risk_ratio: number;
+  lift: number;
+  mean_pred: number;
+}
+
+export interface LotClusterAlert {
+  run_id: string;
+  n_risk_units: number;
+  mean_pred: number;
+  sample_wafer_key: string;
+}
+
+export interface PointClusterAlert {
+  die_x: number;
+  die_y: number;
+  n_risk_dies: number;
+  n_wafers: number;
+  mean_pred: number;
+  sample_wafer_key: string;
+}
+
+export interface SystematicLotAlert {
+  run_id: string;
+  n_units: number;
+  n_risk: number;
+  risk_ratio: number;
+  lift: number;
+  mean_pred: number;
+  sample_wafer_key: string;
+}
+
+export interface AlertsTodayResponse {
+  baseline?: { die_risk_threshold: number; unit_risk_ratio: number };
+  position_alerts: PositionAlert[];
+  lot_cluster_alerts: LotClusterAlert[];
+  point_cluster_alerts: PointClusterAlert[];
+  systematic_lot_alerts: SystematicLotAlert[];
+}
+
+export const fetchAlertsToday = () =>
+  api.get<AlertsTodayResponse>("/api/alerts/today").then((r) => r.data);
+

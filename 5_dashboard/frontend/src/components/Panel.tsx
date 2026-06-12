@@ -6,13 +6,14 @@ interface Props {
   children: ReactNode;
   bodyClassName?: string;
   className?: string;
+  titleClassName?: string;
 }
 
-export default function Panel({ title, right, children, bodyClassName = "", className = "" }: Props) {
+export default function Panel({ title, right, children, bodyClassName = "", className = "", titleClassName = "" }: Props) {
   return (
     <div className={`panel flex flex-col ${className}`}>
       <div className="panel-title">
-        <span>{title}</span>
+        <span className={titleClassName || undefined}>{title}</span>
         {right}
       </div>
       <div className={`panel-body flex-1 ${bodyClassName}`}>{children}</div>

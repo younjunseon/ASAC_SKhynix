@@ -2,10 +2,18 @@ import type { StatusFilter } from "../lib/api";
 
 const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
   { value: "today", label: "오늘" },
-  { value: "pending", label: "대기" },
-  { value: "completed", label: "완료" },
   { value: "all", label: "전체" },
 ];
+
+/** 오늘 날짜를 "YYYY-MM-DD (요일)" 형식으로 표시 */
+function formatToday(): string {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const days = ["일", "월", "화", "수", "목", "금", "토"];
+  return `${yyyy}-${mm}-${dd} (${days[d.getDay()]})`;
+}
 
 interface Props {
   title: string;
@@ -27,6 +35,9 @@ export default function PageHeader({ title, subtitle, status, onStatusChange, ri
         )}
       </div>
       <div className="flex items-center gap-3 flex-wrap">
+        <div className="text-[11px] text-brand-textMuted tabular bg-brand-subtle rounded-md px-2.5 py-1.5">
+          오늘 <span className="font-semibold text-brand-text">{formatToday()}</span>
+        </div>
         {right}
         {status && onStatusChange && (
           <div className="inline-flex bg-white border border-brand-border rounded-lg overflow-hidden">

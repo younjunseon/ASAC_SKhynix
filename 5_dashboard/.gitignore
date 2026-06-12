@@ -29,3 +29,11 @@ Thumbs.db
 *.tmp
 *.bak
 *.log
+
+# ─── 원본 데이터 (큰 파일, 별도 공유) ─────────────
+data/x_data.csv
+data/x_data.zip
+data/y_data.csv
+
+# ─── 발표 자료 ────────────────────────────────────
+*.pptx

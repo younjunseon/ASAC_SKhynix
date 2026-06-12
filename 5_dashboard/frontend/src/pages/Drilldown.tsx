@@ -1,23 +1,26 @@
 /**
- * Drill-down 페이지.
+ * Drill-down 페이지 (= 사이드바 "다이 레벨 정밀 분석 > 다이 차원").
  *
+ * 상단  : 주별 생산량 (용인 이식, public/dashboard_dates.csv)
  * 좌측  : Lot 트리 (lot 그룹 → wafer 리스트)
  * 중앙  : Wafer Map (단일/lot 누적 토글)
  * 우측  : Unit Diagnosis (verdict + SHAP + Anomaly + 신뢰구간)
  *
  * SHAP / Anomaly / 신뢰구간 / lot 검정은 현재 산출물 미연결 — TBD placeholder로 비워둠.
+ * 웨이퍼 차원 / 로트 차원은 별도 라우트(/drilldown/wafer, /drilldown/lot)에 빈 페이지로 분리.
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import {
-  fetchLotMap,
   fetchLots,
   fetchTriage,
+  fetchUnitDetail,
   fetchUnitReport,
   fetchWaferDetail,
   fetchWaferGrid,
   fetchWafers,
+  fetchUnitAnomalyFeatures,
   type LotItem,
   type StatusFilter,
   type WaferSummary,
@@ -25,9 +28,10 @@ import {
 import WaferMap from "../components/WaferMap";
 import PageHeader from "../components/PageHeader";
 import Panel from "../components/Panel";
+import UnitReportModal from "../components/UnitReportModal";
+import WeeklyProductionChart from "../components/WeeklyProductionChart";
 import { fmtInt, fmtNum, fmtPct } from "../lib/format";
 
-type ViewMode = "single" | "lot";
 type LotSort = "risk_ratio" | "lot_id";
 type SortOrder = "asc" | "desc";
 
@@ -43,8 +47,8 @@ export default function Drilldown() {
   const [selectedLot, setSelectedLot] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(initialKey);
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("single");
   const [search, setSearch] = useState("");
+  const [reportOpen, setReportOpen] = useState(false);
   const [lotSort, setLotSort] = useState<LotSort>("risk_ratio");
   // 항목별 default 방향: 위험률은 ↓, 번호는 ↑
   const [lotOrder, setLotOrder] = useState<SortOrder>("desc");
@@ -74,15 +78,20 @@ export default function Drilldown() {
     queryFn: () => fetchWaferDetail(selectedKey!),
     enabled: !!selectedKey,
   });
-  // lot 자체를 선택한 경우 (wafer 미선택) lot 누적 wafer map 표시
-  const lotMapQ = useQuery({
-    queryKey: ["dd-lot-map", selectedLot, status],
-    queryFn: () => fetchLotMap(selectedLot!, { status, agg: "max" }),
-    enabled: !!selectedLot && !selectedKey,
+  const anomalyQ = useQuery({
+    queryKey: ["dd-unit-anomaly", selectedUnit],
+    queryFn: () => fetchUnitAnomalyFeatures(selectedUnit!, 5),
+    enabled: !!selectedUnit,
   });
   const reportQ = useQuery({
     queryKey: ["dd-unit-report", selectedUnit],
     queryFn: () => fetchUnitReport(selectedUnit!),
+    enabled: !!selectedUnit,
+    retry: false,
+  });
+  const unitDetailQ = useQuery({
+    queryKey: ["dd-unit-detail", selectedUnit],
+    queryFn: () => fetchUnitDetail(selectedUnit!),
     enabled: !!selectedUnit,
     retry: false,
   });
@@ -145,10 +154,16 @@ export default function Drilldown() {
   return (
     <div>
       <PageHeader
-        title="Drill-down"
+        title="다이 차원"
+        subtitle="주별 생산량 추이 + Lot/Wafer 트리 → Wafer Map → Unit 진단 (3-pane drill-down)"
         status={status}
         onStatusChange={setStatus}
       />
+
+      {/* 주별 생산량 (용인 이식) */}
+      <div className="mb-4 sm:mb-5">
+        <WeeklyProductionChart />
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
         {/* 좌: Lot 트리 */}
@@ -308,25 +323,10 @@ export default function Drilldown() {
                   <button
                     onClick={() => setSelectedKey(null)}
                     className="text-[10px] text-white/85 hover:text-white"
-                    title="lot 누적 view로 전환"
+                    title="wafer 선택 해제"
                   >
                     ↺ lot 전체 보기
                   </button>
-                  <div className="inline-flex bg-brand-subtle rounded-md overflow-hidden text-[10px]">
-                    {(["single", "lot"] as ViewMode[]).map((m) => (
-                      <button
-                        key={m}
-                        onClick={() => setViewMode(m)}
-                        className={`px-2.5 py-1 font-medium ${
-                          viewMode === m
-                            ? "bg-brand-primary text-white"
-                            : "text-brand-textMuted hover:text-brand-text"
-                        }`}
-                      >
-                        {m === "single" ? "단일" : "lot 누적"}
-                      </button>
-                    ))}
-                  </div>
                   <span className="text-[10px] text-brand-textMuted">
                     Units {fmtInt(detailQ.data.summary?.n_units)} · 위험{" "}
                     <span className="font-bold text-brand-warn">
@@ -336,11 +336,6 @@ export default function Drilldown() {
                 </div>
               }
             >
-              {viewMode === "lot" && (
-                <div className="text-[11px] text-brand-textMuted mb-2 px-1">
-                  lot 누적 보려면 좌측에서 wafer 선택 해제 (위 ↺ 버튼)
-                </div>
-              )}
               <WaferMap
                 dies={detailQ.data.dies}
                 scale={scale}
@@ -351,32 +346,121 @@ export default function Drilldown() {
             </Panel>
           )}
 
-          {/* lot 누적 view (wafer 미선택 + lot 선택) */}
-          {!selectedKey && selectedLot && lotMapQ.isLoading && (
-            <Panel title="Wafer Map">
-              <div className="text-[11px] text-brand-textMuted p-6 text-center">로딩…</div>
-            </Panel>
-          )}
-          {!selectedKey && selectedLot && lotMapQ.data && scale && (
+          {/* Die 단위 위험도 — wafer map 아래, 선택한 unit의 die 4개 게이지 */}
+          {selectedKey && selectedUnit && unitDetailQ.data && unitDetailQ.data.dies.length > 0 && scale && (
             <Panel
-              title={`Lot ${selectedLot} — 누적 (max)`}
+              title="Die 단위 위험도"
+              className="mt-4 sm:mt-5"
               right={
-                <span className="text-[10px] text-brand-textMuted">
-                  wafer {fmtInt(lotMapQ.data.n_wafers)} · die 좌표{" "}
-                  {fmtInt(lotMapQ.data.n_unique_positions)}개
-                </span>
+                <div className="flex items-center gap-3 text-[11px]">
+                  <span className="font-mono text-white/85">
+                    unit <span className="font-bold">{selectedUnit}</span>
+                  </span>
+                  <span className="text-white/70">
+                    τ = {(scale.risk_threshold * 1e6).toFixed(0)} ppm
+                  </span>
+                </div>
               }
             >
-              <div className="text-[11px] text-brand-textMuted mb-2 px-1">
-                lot 내 모든 wafer를 같은 die 좌표로 겹친 max 집계 — wafer 단일 보려면 좌측 트리에서 wafer 선택
+              <div className="space-y-2">
+                {[...unitDetailQ.data.dies]
+                  .sort((a, b) => (a.position ?? 99) - (b.position ?? 99))
+                  .map((d, i) => {
+                    const ppm = d.pred * 1e6;
+                    const tau = scale.risk_threshold;
+                    // 3단계 분류: 정상(<0.95τ) / 주의(0.95τ~τ) / 위험(≥τ)
+                    const cautionMin = tau * 0.95;
+                    const tier: "normal" | "caution" | "risk" =
+                      d.pred >= tau ? "risk" : d.pred >= cautionMin ? "caution" : "normal";
+                    // 게이지: 정상=0~40%, 주의=40~50%, 위험=50~100% (임계값 50% 지점 고정)
+                    let pct: number;
+                    if (tier === "risk") {
+                      const denom = Math.max(scale.pred_max - tau, 1e-9);
+                      pct = 50 + Math.min(50, ((d.pred - tau) / denom) * 50);
+                    } else if (tier === "caution") {
+                      const denom = Math.max(tau - cautionMin, 1e-9);
+                      pct = 40 + ((d.pred - cautionMin) / denom) * 10;
+                    } else {
+                      pct = Math.max(0, (d.pred / Math.max(cautionMin, 1e-9)) * 40);
+                    }
+                    const barColor =
+                      tier === "risk" ? "bg-brand-danger"
+                      : tier === "caution" ? "bg-amber-400"
+                      : "bg-brand-primary";
+                    const labelColor =
+                      tier === "risk" ? "text-brand-danger"
+                      : tier === "caution" ? "text-amber-600"
+                      : "text-brand-text";
+                    const chipClass =
+                      tier === "risk" ? "bg-red-50 text-brand-danger"
+                      : tier === "caution" ? "bg-amber-50 text-amber-700"
+                      : "bg-emerald-50 text-brand-success";
+                    const chipLabel =
+                      tier === "risk" ? "위험" : tier === "caution" ? "주의" : "정상";
+                    const borderColor =
+                      tier === "risk" ? "#dc2626"
+                      : tier === "caution" ? "#f59e0b"
+                      : "#10b981";
+                    const posBg =
+                      tier === "risk" ? "bg-red-50"
+                      : tier === "caution" ? "bg-amber-50"
+                      : "bg-emerald-50";
+                    return (
+                      <div
+                        key={`${d.die_x}-${d.die_y}-${i}`}
+                        className="rounded-lg border-2 px-3 py-2.5 flex items-center gap-3"
+                        style={{ borderColor }}
+                      >
+                        {/* 포지션 뱃지 */}
+                        <div className={`shrink-0 w-12 h-12 rounded-lg flex flex-col items-center justify-center ${posBg}`} style={{ border: `2px solid ${borderColor}` }}>
+                          <span className="text-[10px] font-semibold text-brand-textMuted leading-none">POS</span>
+                          <span className="text-[22px] font-black leading-none" style={{ color: borderColor }}>
+                            {d.position ?? "?"}
+                          </span>
+                        </div>
+
+                        {/* 게이지 + 수치 */}
+                        <div className="flex-1 flex flex-col gap-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono text-[11px] text-brand-textMuted">
+                              ({d.die_x}, {d.die_y})
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className={`font-mono tabular text-[15px] font-black ${labelColor}`}>
+                                {ppm.toFixed(0)} ppm
+                              </span>
+                              <span className={`text-[11px] px-1.5 py-0.5 rounded font-semibold ${chipClass}`}>
+                                {chipLabel}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="h-4 bg-brand-subtle rounded-full relative overflow-hidden border border-brand-border">
+                            <div
+                              className="absolute top-0 bottom-0 border-l border-dashed border-brand-danger/60 z-10"
+                              style={{ left: "50%" }}
+                            />
+                            <div
+                              className={`absolute top-0 bottom-0 left-0 rounded-full transition-all ${barColor}`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
               </div>
-              <WaferMap
-                dies={lotMapQ.data.dies}
-                scale={scale}
-                grid={gridQ.data}
-                selectedUnit={null}
-                onSelectUnit={undefined}
-              />
+              <div className="text-[10px] text-brand-textMuted mt-2 px-1 leading-snug">
+                점선 = 임계값 (게이지 50% 지점). 3단계 — <span className="text-brand-primary font-semibold">정상</span> (&lt;0.95τ) · <span className="text-amber-600 font-semibold">주의</span> (0.95τ~τ) · <span className="text-brand-danger font-semibold">위험</span> (≥τ).
+              </div>
+            </Panel>
+          )}
+
+          {/* lot만 선택, wafer 미선택 → wafer 선택 안내 */}
+          {!selectedKey && selectedLot && (
+            <Panel title={`Lot ${selectedLot}`}>
+              <div className="text-[12px] text-brand-textMuted p-6 text-center">
+                좌측 트리에서 <strong className="text-brand-text">wafer를 선택</strong>하면 wafer map과 비정상 변수 분석이 표시됩니다.
+              </div>
             </Panel>
           )}
         </div>
@@ -403,7 +487,7 @@ export default function Drilldown() {
                 >
                   <div className="flex items-center justify-between">
                     <span
-                      className={`text-[12px] font-bold ${
+                      className={`text-[22px] font-black leading-none ${
                         reportQ.data.verdict === "WARNING"
                           ? "text-brand-danger"
                           : "text-brand-success"
@@ -426,8 +510,8 @@ export default function Drilldown() {
                   </div>
                 </div>
 
-                <div className="flex flex-wrap gap-1.5">
-                  {reportQ.data.is_risk && (
+                {reportQ.data.is_risk && (
+                  <div className="flex flex-wrap gap-1.5">
                     <span
                       className="chip chip-danger"
                       title="pred > p95 (status 내 상위 5%)"
@@ -435,28 +519,80 @@ export default function Drilldown() {
                       <span aria-hidden>⚠</span>
                       <span>위험 분류</span>
                     </span>
-                  )}
-                  <span
-                    className="chip chip-info"
-                    title="status 내 pred 백분위 (실측값)"
-                  >
-                    <span aria-hidden>·</span>
-                    <span>백분위 {fmtPct(reportQ.data.pred_rank)}</span>
-                  </span>
-                </div>
+                  </div>
+                )}
 
                 <div>
-                  <div className="text-[11px] font-semibold text-brand-text mb-1.5 flex items-center gap-1.5">
-                    <span>주요 기여 변수 Top 20</span>
-                    <span className="chip chip-tbd chip-sm" title="unit별 SHAP 산출 미연결">
-                      <span aria-hidden>⚠</span>
-                      <span>TBD</span>
-                    </span>
+                  <div className="text-[11px] font-semibold text-brand-text mb-1">
+                    정상 unit 대비 비정상 변수 Top 5
                   </div>
-                  <div className="tbd-block">
-                    unit별 SHAP feature attribution이 아직 산출 파이프라인에 연결되지 않았습니다.
-                    회귀 stage(μ) / 분류 stage(π) 모델에 SHAP을 unit 단위로 계산해 채울 예정.
+                  <div className="text-[16px] text-brand-textMuted mb-2 font-mono bg-brand-subtle rounded px-2 py-1">
+                    z = |unit값 − 정상평균| / 정상std
                   </div>
+                  {anomalyQ.isLoading && (
+                    <div className="text-[11px] text-brand-textMuted p-2">로딩…</div>
+                  )}
+                  {anomalyQ.data && anomalyQ.data.items.length > 0 && (
+                    <div className="space-y-2">
+                      {anomalyQ.data.items.map((it) => {
+                        const minV = Math.min(it.normal_mean, it.unit_value);
+                        const maxV = Math.max(it.normal_mean, it.unit_value);
+                        const range = Math.max(Math.abs(maxV - minV), Math.abs(maxV) * 0.1, 1e-9);
+                        const axisMin = minV - range * 0.15;
+                        const axisMax = maxV + range * 0.15;
+                        const span = axisMax - axisMin || 1;
+                        const normalLen = ((it.normal_mean - axisMin) / span) * 100;
+                        const unitLen = ((it.unit_value - axisMin) / span) * 100;
+                        const isHigher = it.unit_value > it.normal_mean;
+                        const zSeverity =
+                          it.z_score >= 3 ? "text-brand-danger" : it.z_score >= 2 ? "text-brand-warn" : "text-brand-textMuted";
+                        return (
+                          <div key={it.feature} className="border border-brand-border rounded-md p-2">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="font-mono text-[11px] font-semibold text-brand-text">{it.feature}</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className={`text-[10px] text-brand-textMuted`}>
+                                  {isHigher ? "▲ 높음" : "▼ 낮음"}
+                                </span>
+                                <span className={`tabular text-[18px] font-black leading-none ${zSeverity}`}>
+                                  z={it.z_score.toFixed(1)}
+                                </span>
+                              </div>
+                            </div>
+                            {/* 정상 평균 막대 (위) */}
+                            <div className="flex items-center gap-1.5 mb-0.5">
+                              <span className="text-[9px] text-brand-textMuted w-8 shrink-0">정상</span>
+                              <div className="flex-1 h-3 bg-brand-subtle rounded-sm relative">
+                                <div
+                                  className="absolute top-0 bottom-0 left-0 bg-emerald-500 rounded-sm"
+                                  style={{ width: `${normalLen}%` }}
+                                />
+                              </div>
+                              <span className="text-[9px] text-brand-textMuted tabular w-12 shrink-0 text-right">
+                                {fmtNum(it.normal_mean, 2)}
+                              </span>
+                            </div>
+                            {/* 이 unit 막대 (아래) */}
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[9px] text-brand-text font-semibold w-8 shrink-0">unit</span>
+                              <div className="flex-1 h-3 bg-brand-subtle rounded-sm relative">
+                                <div
+                                  className={`absolute top-0 bottom-0 left-0 rounded-sm ${isHigher ? "bg-brand-danger" : "bg-brand-primary"}`}
+                                  style={{ width: `${unitLen}%` }}
+                                />
+                              </div>
+                              <span className={`text-[9px] tabular w-12 shrink-0 text-right font-semibold ${isHigher ? "text-brand-danger" : "text-brand-primary"}`}>
+                                {fmtNum(it.unit_value, 2)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {anomalyQ.data && anomalyQ.data.items.length === 0 && (
+                    <div className="text-[11px] text-brand-textMuted p-2">비정상 변수 없음</div>
+                  )}
                 </div>
 
                 <div className="border border-brand-border rounded-lg px-3 py-2 bg-brand-subtle">
@@ -472,22 +608,12 @@ export default function Drilldown() {
                   </div>
                 </div>
 
-                {reportQ.data.worst_die && (
-                  <div className="border border-brand-border rounded-lg px-3 py-2">
-                    <div className="text-[10px] text-brand-textMuted font-semibold mb-0.5">
-                      가장 위험한 die
-                    </div>
-                    <div className="font-mono text-[11px]">
-                      ({reportQ.data.worst_die.die_x},{" "}
-                      {reportQ.data.worst_die.die_y}) ·{" "}
-                      <span className="font-bold text-brand-danger">
-                        {fmtNum(reportQ.data.worst_die.pred)}
-                      </span>
-                    </div>
-                  </div>
-                )}
 
-                <button className="btn btn-primary w-full text-[11px]" disabled>
+                <button
+                  className="btn btn-primary w-full text-[11px]"
+                  onClick={() => setReportOpen(true)}
+                  disabled={!selectedUnit}
+                >
                   📄 보고서 생성
                 </button>
               </div>
@@ -495,6 +621,13 @@ export default function Drilldown() {
           </Panel>
         </div>
       </div>
+
+      {reportOpen && selectedUnit && (
+        <UnitReportModal
+          ufsSerial={selectedUnit}
+          onClose={() => setReportOpen(false)}
+        />
+      )}
     </div>
   );
 }

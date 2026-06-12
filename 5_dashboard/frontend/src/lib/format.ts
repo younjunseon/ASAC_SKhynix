@@ -42,7 +42,7 @@ export const fmtHealthAsPpm = (
  * 회귀 예측 결과를 운영 의사결정용으로 그루핑.
  * 모델은 여전히 연속 ppm을 예측 — Tier는 표시·필터링용 bucket.
  */
-export type Tier = "S" | "A" | "B" | "C" | "D";
+export type Tier = "A" | "B" | "C" | "D";
 
 export interface TierDef {
   tier: Tier;
@@ -56,11 +56,10 @@ export interface TierDef {
 }
 
 export const TIERS: TierDef[] = [
-  { tier: "S", minPpm: 0, maxPpm: 1, label: "S (정상)", color: "#10b981", desc: "0 ppm" },
-  { tier: "A", minPpm: 1, maxPpm: 100, label: "A (양호)", color: "#3b82f6", desc: "1~100 ppm" },
-  { tier: "B", minPpm: 100, maxPpm: 1_000, label: "B (관리)", color: "#06b6d4", desc: "100~1k ppm" },
-  { tier: "C", minPpm: 1_000, maxPpm: 10_000, label: "C (주의)", color: "#f59e0b", desc: "1k~10k ppm" },
-  { tier: "D", minPpm: 10_000, maxPpm: Infinity, label: "D (보류 후보)", color: "#ef4444", desc: "10k+ ppm" },
+  { tier: "A", minPpm: 0, maxPpm: 3_000, label: "A (양호)", color: "#3b82f6", desc: "0~3k ppm" },
+  { tier: "B", minPpm: 3_000, maxPpm: 3_500, label: "B (관리)", color: "#06b6d4", desc: "3k~3.5k ppm" },
+  { tier: "C", minPpm: 3_500, maxPpm: 3_700, label: "C (주의)", color: "#f59e0b", desc: "3.5k~3.7k ppm" },
+  { tier: "D", minPpm: 3_700, maxPpm: Infinity, label: "D (보류 후보)", color: "#ef4444", desc: "3.7k+ ppm" },
 ];
 
 /** ppm 값 → Tier */

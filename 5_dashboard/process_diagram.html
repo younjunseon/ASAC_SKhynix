@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Wafer Health 대시보드 — 작동 프로세스 다이어그램 (LLM 연동 가정)</title>
+<style>
+  :root{
+    --primary:#4c1d95; --primaryDark:#2e1065; --primaryLight:#7c3aed;
+    --accent:#a78bfa; --accentSoft:#c4b5fd; --mint:#5eead4; --mintDark:#0d9488;
+    --danger:#e53e3e; --warn:#f59e0b; --success:#10b981;
+    --bg:#f1f3f9; --surface:#ffffff; --border:#e2e8f0; --text:#1a202c; --muted:#64748b;
+    --ink:#0f172a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:"Inter","Segoe UI","Malgun Gothic",sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.55;
+    padding:32px 20px 80px;
+  }
+  .wrap{max-width:1180px;margin:0 auto}
+  header.page{
+    background:linear-gradient(135deg,var(--primary) 0%,var(--primaryDark) 100%);
+    color:#fff;border-radius:18px;padding:30px 34px;margin-bottom:34px;
+    box-shadow:0 12px 36px rgba(46,16,101,.28);
+  }
+  header.page h1{font-size:24px;font-weight:800;letter-spacing:-.3px}
+  header.page p{margin-top:8px;font-size:13.5px;color:#e9d5ff;max-width:880px}
+  header.page .tags{margin-top:14px;display:flex;gap:8px;flex-wrap:wrap}
+  header.page .tag{
+    background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22);
+    color:#fff;font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;
+  }
+  section.block{
+    background:var(--surface);border-radius:16px;padding:24px 26px 28px;
+    margin-bottom:26px;box-shadow:0 4px 18px rgba(15,23,42,.06);border:1px solid var(--border);
+  }
+  section.block > h2{
+    font-size:16.5px;font-weight:800;color:var(--primaryDark);margin-bottom:4px;
+    display:flex;align-items:center;gap:9px;
+  }
+  section.block > h2 .num{
+    width:24px;height:24px;border-radius:7px;background:var(--primary);color:#fff;
+    font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;
+  }
+  section.block > p.lead{font-size:12.5px;color:var(--muted);margin:2px 0 18px 33px}
+
+  /* ── 레이어 스택 ─────────────────────────── */
+  .layer{
+    border-radius:13px;padding:16px 18px;margin-bottom:0;position:relative;
+    border:1.5px solid var(--border);background:#fff;
+  }
+  .layer + .arrow-v, .arrow-v{display:flex;justify-content:center;align-items:center;color:var(--accent);}
+  .arrow-v{height:34px}
+  .arrow-v svg{filter:drop-shadow(0 1px 1px rgba(124,58,237,.15))}
+  .arrow-v .lbl{
+    position:absolute;background:#fff;border:1px solid var(--border);border-radius:999px;
+    font-size:10.5px;font-weight:600;color:var(--muted);padding:2px 9px;
+  }
+  .arrow-v.bidir .lbl{color:var(--primaryLight);border-color:var(--accentSoft)}
+
+  .layer .layer-head{display:flex;align-items:center;gap:10px;margin-bottom:11px}
+  .layer .badge{
+    font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
+    padding:3px 9px;border-radius:6px;
+  }
+  .layer .layer-title{font-size:14px;font-weight:700;color:var(--ink)}
+  .layer .layer-sub{font-size:11.5px;color:var(--muted);margin-left:auto}
+  .nodes{display:flex;gap:10px;flex-wrap:wrap}
+  .node{
+    flex:1 1 200px;min-width:180px;background:var(--bg);border:1px solid var(--border);
+    border-radius:10px;padding:10px 12px;
+  }
+  .node .nt{font-size:12.5px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px}
+  .node .nd{font-size:11px;color:var(--muted);margin-top:3px}
+  .node code{font-family:Consolas,Menlo,monospace;font-size:10.5px;background:#fff;border:1px solid var(--border);border-radius:4px;padding:1px 4px;color:var(--primaryDark)}
+  .node.hot{background:#fef2f2;border-color:#fecaca}
+  .node.hot .nt{color:#b91c1c}
+  .node.llm{background:#f5f3ff;border-color:var(--accentSoft)}
+  .node.llm .nt{color:var(--primaryDark)}
+  .node.mint{background:#ecfdf5;border-color:#a7f3d0}
+  .node.mint .nt{color:var(--mintDark)}
+
+  /* layer 색상 변형 */
+  .layer.user{border-color:#fcd34d;background:linear-gradient(180deg,#fffbeb,#fff)}
+  .layer.user .badge{background:#fef3c7;color:#92400e}
+  .layer.fe{border-color:var(--accentSoft);background:linear-gradient(180deg,#f5f3ff,#fff)}
+  .layer.fe .badge{background:#ede9fe;color:#5b21b6}
+  .layer.be{border-color:#bae6fd;background:linear-gradient(180deg,#f0f9ff,#fff)}
+  .layer.be .badge{background:#e0f2fe;color:#075985}
+  .layer.llm{border-color:var(--accent);background:linear-gradient(180deg,#faf5ff,#fff)}
+  .layer.llm .badge{background:#f3e8ff;color:#6b21a8}
+  .layer.data{border-color:#a7f3d0;background:linear-gradient(180deg,#ecfdf5,#fff)}
+  .layer.data .badge{background:#d1fae5;color:#065f46}
+  .layer.model{border-color:#cbd5e1;background:linear-gradient(180deg,#f8fafc,#fff)}
+  .layer.model .badge{background:#e2e8f0;color:#334155}
+
+  /* ── 시퀀스 스텝 ─────────────────────────── */
+  .seq{display:flex;flex-direction:column;gap:0}
+  .step{display:flex;gap:14px;align-items:flex-start;position:relative;padding-bottom:18px}
+  .step:not(:last-child)::before{
+    content:"";position:absolute;left:15px;top:32px;bottom:0;width:2px;
+    background:linear-gradient(var(--accentSoft),var(--accentSoft));
+  }
+  .step .sn{
+    flex:none;width:32px;height:32px;border-radius:50%;background:var(--primary);color:#fff;
+    font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;
+    box-shadow:0 2px 8px rgba(76,29,149,.3);z-index:1;
+  }
+  .step.llm-step .sn{background:var(--mintDark)}
+  .step .sc{
+    flex:1;background:var(--bg);border:1px solid var(--border);border-radius:11px;padding:12px 15px;
+  }
+  .step .sc .st{font-size:13px;font-weight:700;color:var(--ink);margin-bottom:3px}
+  .step .sc .sd{font-size:12px;color:#475569}
+  .step .sc .sd code, .step .sc .st code{font-family:Consolas,Menlo,monospace;font-size:11px;background:#fff;border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--primaryDark)}
+  .step .who{
+    display:inline-block;font-size:10px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;
+    padding:2px 7px;border-radius:5px;margin-bottom:6px;
+  }
+  .who.u{background:#fef3c7;color:#92400e}
+  .who.f{background:#ede9fe;color:#5b21b6}
+  .who.b{background:#e0f2fe;color:#075985}
+  .who.l{background:#d1fae5;color:#065f46}
+  .who.m{background:#e2e8f0;color:#334155}
+
+  .pill-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .pill{font-size:10.5px;font-weight:600;background:#fff;border:1px solid var(--border);border-radius:999px;padding:2px 9px;color:var(--muted)}
+  .pill.api{color:#075985;border-color:#bae6fd;background:#f0f9ff;font-family:Consolas,monospace}
+
+  /* ── ETL 가로 흐름 ───────────────────────── */
+  .flow-h{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+  .fbox{
+    flex:1 1 160px;min-width:150px;background:var(--bg);border:1.5px solid var(--border);border-radius:11px;
+    padding:13px 14px;display:flex;flex-direction:column;
+  }
+  .fbox .ft{font-size:12.5px;font-weight:700;color:var(--ink)}
+  .fbox .fd{font-size:11px;color:var(--muted);margin-top:4px}
+  .fbox code{font-family:Consolas,monospace;font-size:10.5px;color:var(--primaryDark)}
+  .fbox.src{border-color:#cbd5e1}
+  .fbox.etl{border-color:var(--accentSoft);background:#f5f3ff}
+  .fbox.store{border-color:#a7f3d0;background:#ecfdf5}
+  .fbox.serve{border-color:#bae6fd;background:#f0f9ff}
+  .arrow-h{display:flex;align-items:center;justify-content:center;padding:0 6px;color:var(--accent)}
+  @media(max-width:760px){.arrow-h{transform:rotate(90deg);padding:6px 0}}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px}
+  .legend .li{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted)}
+  .legend .sw{width:14px;height:14px;border-radius:4px;border:1.5px solid}
+  .footnote{font-size:11px;color:var(--muted);margin-top:18px;border-top:1px dashed var(--border);padding-top:12px}
+  .footnote b{color:var(--text)}
+  .star{color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page">
+    <h1>Wafer Health 예측 대시보드 — 작동 프로세스</h1>
+    <p>SK Hynix Wafer Test 기반 Field Health(RCC) 예측 결과를 모니터링하는 인터랙티브 대시보드의 동작 구조.
+       <b>본 다이어그램은 챗봇·보고서 생성에 LLM(Claude API)이 연동된 상태를 가정</b>합니다.
+       회색 점선 박스가 현재 mock → LLM 연동 시 채워지는 부분입니다.</p>
+    <div class="tags">
+      <span class="tag">React 19 + Vite (:5173)</span>
+      <span class="tag">FastAPI + pandas (:8765)</span>
+      <span class="tag">parquet 메모리 로드</span>
+      <span class="tag">TanStack Query 캐싱</span>
+      <span class="tag">LLM: Claude API · RAG</span>
+    </div>
+  </header>
+
+  <!-- ───────────────────────────────────────── 1. 전체 아키텍처 ─ -->
+  <section class="block">
+    <h2><span class="num">1</span> 전체 아키텍처 — 레이어 구조</h2>
+    <p class="lead">사용자 → 프론트엔드 → 백엔드 → (LLM/Agent) → 데이터 저장소 → 모델링 파이프라인. 위에서 아래로 의존, 데이터는 아래에서 위로 흐름.</p>
+
+    <!-- USER -->
+    <div class="layer user">
+      <div class="layer-head">
+        <span class="badge">User</span>
+        <span class="layer-title">PI(Process Integration) 엔지니어 · 모델러</span>
+        <span class="layer-sub">"오늘 어떤 lot/wafer를 잡아야 하나?" → 검사 의뢰 / 격리 / 공정팀 알림 / 보고서</span>
+      </div>
+      <div class="nodes">
+        <div class="node"><div class="nt">① 모니터링</div><div class="nd">Overview에서 위험 unit 비율·추이·알람 확인</div></div>
+        <div class="node"><div class="nt">② Drill-down</div><div class="nd">위험 lot/wafer → die 위치 + 기여 변수(z-score) 확인</div></div>
+        <div class="node llm"><div class="nt">③ 질의 / 보고서</div><div class="nd">챗봇에 자연어 질문 · "보고서 생성" 클릭</div></div>
+      </div>
+    </div>
+
+    <div class="arrow-v bidir">
+      <span class="lbl">HTTP (axios) ↑↓ JSON · 사용자 입력 ↑↓ 화면 렌더</span>
+      <svg width="22" height="34" viewBox="0 0 22 34"><path d="M11 0v26M11 34v-8M4 19l7 7 7-7M4 15l7-7 7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- FRONTEND -->
+    <div class="layer fe">
+      <div class="layer-head">
+        <span class="badge">Frontend</span>
+        <span class="layer-title">React 19 · Vite · TanStack Query · Recharts/ECharts</span>
+        <span class="layer-sub">port 5173 (배포 시 FastAPI가 <code>dist/</code> 서빙 → 8765 단일 포트)</span>
+      </div>
+      <div class="nodes">
+        <div class="node"><div class="nt">📊 4 페이지</div><div class="nd">Overview <code>/</code> · Drilldown <code>/drilldown</code> · Model <code>/model</code> · Data <code>/data</code></div></div>
+        <div class="node"><div class="nt">🔔 NotificationBell</div><div class="nd">위험 wafer/unit 알람 → 클릭 시 해당 페이지 jump</div></div>
+        <div class="node"><div class="nt">🗺 WaferMap · ShapBar · KpiCard</div><div class="nd">die 히트맵 · SHAP bar · KPI 카드 + 변화 chip</div></div>
+        <div class="node llm"><div class="nt">💬 ChatbotWidget</div><div class="nd">우하단 floating. 현재 키워드 mock → LLM 연동 시 <code>/api/chat</code></div></div>
+      </div>
+    </div>
+
+    <div class="arrow-v bidir">
+      <span class="lbl">GET /api/* (캐싱·자동 refetch) &nbsp;|&nbsp; POST /api/chat · /api/agent/report</span>
+      <svg width="22" height="34" viewBox="0 0 22 34"><path d="M11 0v26M11 34v-8M4 19l7 7 7-7M4 15l7-7 7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- BACKEND -->
+    <div class="layer be">
+      <div class="layer-head">
+        <span class="badge">Backend</span>
+        <span class="layer-title">FastAPI — <code>api/main.py</code></span>
+        <span class="layer-sub">startup 시 parquet 4개+모델 산출물 메모리 로드 → DataFrame 인덱싱/필터로 응답</span>
+      </div>
+      <div class="nodes">
+        <div class="node"><div class="nt">읽기 전용 데이터 API</div><div class="nd"><code>/api/overview</code> · <code>/triage</code> · <code>/wafers</code> · <code>/units</code> · <code>/lots</code> · <code>/position_risk</code></div></div>
+        <div class="node hot"><div class="nt">알람 · 진단 API</div><div class="nd"><code>/api/alerts/today</code> (4종 패턴) · <code>/units/{id}/report</code> · <code>/units/{id}/anomaly_features</code> (z-score)</div></div>
+        <div class="node"><div class="nt">모델 진단 API</div><div class="nd"><code>/api/model/fold-metrics · feature-importance · psi · feature-corr · shap · var-compare</code></div></div>
+        <div class="node llm"><div class="nt">⚡ LLM 오케스트레이터 <span class="star">(연동 시 신규)</span></div><div class="nd"><code>POST /api/chat</code> · <code>POST /api/agent/report</code> — 위 API들을 tool로 호출해 컨텍스트 구성 → LLM</div></div>
+      </div>
+    </div>
+
+    <div class="arrow-v">
+      <span class="lbl" style="color:#6b21a8;border-color:var(--accentSoft)">LLM 관련 요청만 분기 — 그 외 API는 데이터 저장소에서 바로 응답</span>
+      <svg width="18" height="34" viewBox="0 0 18 34"><path d="M9 0v26M2 19l7 7 7-7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- LLM LAYER -->
+    <div class="layer llm">
+      <div class="layer-head">
+        <span class="badge">LLM / AI Agent</span>
+        <span class="layer-title">Claude API + RAG <span class="star">(연동 가정 — 점선 영역)</span></span>
+        <span class="layer-sub">자연어 질의 응답 · 위험 unit 보고서 자동 작성</span>
+      </div>
+      <div class="nodes">
+        <div class="node llm"><div class="nt">🧰 Tool / Function calling</div><div class="nd">LLM이 필요 시 백엔드 데이터 API를 호출 (예: 오늘 위험 lot → <code>/api/alerts/today</code>) → 결과를 컨텍스트로</div></div>
+        <div class="node mint"><div class="nt">📚 RAG 검색</div><div class="nd">반도체 WT / Two-Stage·ZITboost / 통계 검정 도메인 문서 벡터 DB에서 관련 청크 retrieve</div></div>
+        <div class="node llm"><div class="nt">🗣 응답 생성</div><div class="nd">시스템 프롬프트 + 조회 데이터 + RAG 청크 → Claude 호출 → 근거 포함 자연어 답변(스트리밍)</div></div>
+        <div class="node llm"><div class="nt">📄 보고서 작성</div><div class="nd">unit 진단(SHAP Top20 + z-score + π/μ + worst die + narrative) → LLM → HTML/PDF 요약</div></div>
+      </div>
+    </div>
+
+    <div class="arrow-v">
+      <span class="lbl" style="color:#065f46;border-color:#a7f3d0">메모리 로드 (앱 시작 시 1회) — 이후 재요청 없이 재사용</span>
+      <svg width="18" height="34" viewBox="0 0 18 34"><path d="M9 8v26M2 15l7-7 7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- DATA STORE -->
+    <div class="layer data">
+      <div class="layer-head">
+        <span class="badge">Data store</span>
+        <span class="layer-title"><code>5_dashboard/data/</code> — 미리 구워진 산출물 (자립 패키지, 부모 프로젝트 불필요)</span>
+        <span class="layer-sub">FastAPI <code>DataStore</code>가 시작 시 통째 메모리 적재 (~250 MB)</span>
+      </div>
+      <div class="nodes">
+        <div class="node"><div class="nt">예측 결과</div><div class="nd"><code>die_predictions.parquet</code> (174K행, pi/mu/pred) · <code>unit_predictions.parquet</code> (43K행) · <code>wafer_summary.parquet</code></div></div>
+        <div class="node"><div class="nt">집계 · KPI</div><div class="nd"><code>overview_stats.json</code> (split별 RMSE) · <code>position_stats.parquet</code> (position 1~4 위험도)</div></div>
+        <div class="node"><div class="nt">변수 진단 입력</div><div class="nd"><code>unit_features.parquet</code> (unit×feature 평균) · <code>normal_baseline.parquet</code> (정상 unit 평균/std)</div></div>
+        <div class="node"><div class="nt">모델 산출물</div><div class="nd"><code>model/feature_importance.csv · psi.csv · var_compare.csv · fold_metrics.json · oof/blend/stack</code></div></div>
+      </div>
+    </div>
+
+    <div class="arrow-v">
+      <span class="lbl" style="color:#334155;border-color:#cbd5e1">prepare_data.py / build_model_artifacts.py 로 1회 ETL (오프라인)</span>
+      <svg width="18" height="34" viewBox="0 0 18 34"><path d="M9 8v26M2 15l7-7 7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- MODELING -->
+    <div class="layer model">
+      <div class="layer-head">
+        <span class="badge">Modeling</span>
+        <span class="layer-title">모델링 파이프라인 (<code>3_modeling/</code>) — ZITboost / Two-Stage · 앙상블</span>
+        <span class="layer-sub">Optuna HPO 실험 → oof/val/test die·unit CSV + feature importance / PSI / var-compare</span>
+      </div>
+      <div class="nodes">
+        <div class="node"><div class="nt">학습 데이터</div><div class="nd">WT die-level X (1,087 feat) → position pivot / 집계 → unit-level. 전처리·FS 파이프라인</div></div>
+        <div class="node"><div class="nt">모델</div><div class="nd">ZI-Tweedie+LightGBM (π·μ·φ EM) / Two-Stage(분류→회귀) / ExtraTrees · ElasticNet 앙상블</div></div>
+        <div class="node"><div class="nt">산출</div><div class="nd">예측값(pi/mu/pred) · CV fold RMSE · gain importance · train↔val PSI · 위험vs정상 Cohen's d</div></div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <div class="li"><span class="sw" style="background:#fffbeb;border-color:#fcd34d"></span>사용자</div>
+      <div class="li"><span class="sw" style="background:#f5f3ff;border-color:var(--accentSoft)"></span>프론트엔드</div>
+      <div class="li"><span class="sw" style="background:#f0f9ff;border-color:#bae6fd"></span>백엔드 API</div>
+      <div class="li"><span class="sw" style="background:#faf5ff;border-color:var(--accent)"></span>LLM / Agent <span class="star">(연동 가정)</span></div>
+      <div class="li"><span class="sw" style="background:#ecfdf5;border-color:#a7f3d0"></span>데이터 저장소</div>
+      <div class="li"><span class="sw" style="background:#f8fafc;border-color:#cbd5e1"></span>모델링</div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────────────────────── 2. LLM 챗봇 시퀀스 ─ -->
+  <section class="block">
+    <h2><span class="num">2</span> AI Agent 챗봇 — 자연어 질의 처리 흐름</h2>
+    <p class="lead">예: 사용자가 "오늘 위험 wafer 알려줘" 라고 입력했을 때의 end-to-end 경로 (LLM 연동 가정).</p>
+
+    <div class="seq">
+      <div class="step">
+        <div class="sn">1</div>
+        <div class="sc">
+          <span class="who u">User → Frontend</span>
+          <div class="st">자연어 질문 입력</div>
+          <div class="sd">우하단 <code>ChatbotWidget</code>에 "오늘 위험 wafer 알려줘" 입력 또는 추천 질문 클릭.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="sn">2</div>
+        <div class="sc">
+          <span class="who f">Frontend → Backend</span>
+          <div class="st">요청 전송 <code>POST /api/chat</code></div>
+          <div class="sd">메시지 + 현재 화면 컨텍스트(선택한 split·페이지)를 함께 전송. SSE/스트리밍 응답 구독.</div>
+        </div>
+      </div>
+      <div class="step llm-step">
+        <div class="sn">3</div>
+        <div class="sc">
+          <span class="who b">Backend (LLM 오케스트레이터)</span>
+          <div class="st">의도 파악 + 도구 준비</div>
+          <div class="sd">시스템 프롬프트 + 사용 가능한 <b>tool 스키마</b>(데이터 API 래퍼)를 붙여 Claude API 1차 호출.</div>
+          <div class="pill-row">
+            <span class="pill api">get_alerts_today()</span><span class="pill api">get_overview()</span>
+            <span class="pill api">list_wafers(status,sort)</span><span class="pill api">list_units(risk_only)</span>
+            <span class="pill api">unit_report(ufs)</span><span class="pill api">model_var_compare()</span>
+          </div>
+        </div>
+      </div>
+      <div class="step llm-step">
+        <div class="sn">4</div>
+        <div class="sc">
+          <span class="who l">LLM → Backend (tool call)</span>
+          <div class="st">필요한 데이터 호출 결정</div>
+          <div class="sd">Claude가 <code>get_alerts_today()</code> + <code>list_wafers(status="today", sort="risk_ratio")</code> 호출을 요청 → 백엔드가 in-memory DataFrame에서 즉시 조회해 결과 반환.</div>
+        </div>
+      </div>
+      <div class="step llm-step">
+        <div class="sn">5</div>
+        <div class="sc">
+          <span class="who b">Backend (RAG)</span>
+          <div class="st">도메인 지식 보강 (선택)</div>
+          <div class="sd">질문이 개념·근거 설명을 요하면 벡터 DB에서 관련 청크 retrieve (예: "위험 임계값=split별 pred 상위 5%", "ZITboost π·μ 의미", "PSI 0.25 경계").</div>
+        </div>
+      </div>
+      <div class="step llm-step">
+        <div class="sn">6</div>
+        <div class="sc">
+          <span class="who l">LLM</span>
+          <div class="st">최종 답변 생성</div>
+          <div class="sd">조회 데이터 + RAG 청크를 컨텍스트로 Claude 2차 호출 → "오늘 위험 wafer Top: <b>L0421_w002</b>(위험률 15.6%) … 주요 기여 변수 X1083(+2.3σ)" 형태의 근거 포함 답변을 토큰 스트리밍.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="sn">7</div>
+        <div class="sc">
+          <span class="who f">Backend → Frontend → User</span>
+          <div class="st">답변 표시 + 화면 연동</div>
+          <div class="sd">ChatbotWidget이 스트리밍 출력. 답변 내 wafer/unit 링크 클릭 시 Drill-down으로 jump해 동일 데이터를 시각적으로 확인.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────────────────────── 3. 보고서 생성 ─ -->
+  <section class="block">
+    <h2><span class="num">3</span> AI Agent — 위험 unit 보고서 자동 생성 흐름</h2>
+    <p class="lead">Drill-down에서 위험 unit 선택 → "보고서 생성" 버튼 → LLM이 통계 근거를 엮어 HTML/PDF 산출.</p>
+    <div class="seq">
+      <div class="step">
+        <div class="sn">1</div>
+        <div class="sc"><span class="who u">User</span>
+          <div class="st">Drill-down → Unit Diagnosis → "📄 보고서 생성" 클릭</div>
+          <div class="sd">대상 <code>ufs_serial</code>과 현재 wafer map 상태를 함께 전달.</div></div>
+      </div>
+      <div class="step">
+        <div class="sn">2</div>
+        <div class="sc"><span class="who b">Backend</span>
+          <div class="st">진단 데이터 수집</div>
+          <div class="sd"><code>/api/units/{id}/report</code> (verdict·pred·π/μ·worst die·narrative) + <code>/anomaly_features</code> (z-score Top) + <code>/model/shap</code>·<code>var-compare</code>를 합쳐 구조화 JSON 구성.</div></div>
+      </div>
+      <div class="step llm-step">
+        <div class="sn">3</div>
+        <div class="sc"><span class="who l">LLM</span>
+          <div class="st">보고서 문안 작성</div>
+          <div class="sd">"WARNING: pred 0.0234 — 상위 5% 임계 초과. (12,7) die가 최대 기여. X1083 +2.3σ, Cohen's d 0.78(p&lt;10⁻⁶) — 위험을 가르는 강한 신호. 권고: 해당 lot 추가 검사 의뢰." 같은 PI용 narrative 생성.</div></div>
+      </div>
+      <div class="step llm-step">
+        <div class="sn">4</div>
+        <div class="sc"><span class="who b">Backend</span>
+          <div class="st">렌더링 → 반환</div>
+          <div class="sd">narrative + wafer map 이미지 + SHAP bar + 통계 표를 템플릿에 끼워 HTML/PDF 생성 → 다운로드 응답.</div></div>
+      </div>
+      <div class="step">
+        <div class="sn">5</div>
+        <div class="sc"><span class="who u">User</span>
+          <div class="st">의사결정 산출물</div>
+          <div class="sd">보고서를 근거로 검사 의뢰 / 격리 / 공정팀 알림 — 통계 근거가 첨부된 형태로 공유.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────────────────────── 4. ETL ─ -->
+  <section class="block">
+    <h2><span class="num">4</span> 데이터 파이프라인 — 모델 산출물이 대시보드에 실리기까지</h2>
+    <p class="lead">오프라인에서 1회 빌드 → 대시보드는 결과 parquet/json만 읽음. 모델이 갱신되면 ETL 재실행 후 <code>data/</code> 교체.</p>
+    <div class="flow-h">
+      <div class="fbox src">
+        <div class="ft">① 모델링 실험</div>
+        <div class="fd"><code>3_modeling/</code> ZITboost·Two-Stage·앙상블, Optuna HPO → <code>4_output/final/zit_only/{oof,val,test}_{die,unit}.csv</code> + importance/PSI/var-compare</div>
+      </div>
+      <div class="arrow-h"><svg width="26" height="16" viewBox="0 0 26 16"><path d="M0 8h22M15 1l7 7-7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div class="fbox etl">
+        <div class="ft">② ETL 스크립트</div>
+        <div class="fd"><code>prepare_data.py</code> · <code>build_model_artifacts.py</code> — CSV → parquet 변환, wafer/position 집계, normal baseline 산출</div>
+      </div>
+      <div class="arrow-h"><svg width="26" height="16" viewBox="0 0 26 16"><path d="M0 8h22M15 1l7 7-7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div class="fbox store">
+        <div class="ft">③ <code>5_dashboard/data/</code></div>
+        <div class="fd">die/unit/wafer parquet · overview_stats.json · unit_features · normal_baseline · position_stats · model/* (레포에 커밋됨)</div>
+      </div>
+      <div class="arrow-h"><svg width="26" height="16" viewBox="0 0 26 16"><path d="M0 8h22M15 1l7 7-7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div class="fbox serve">
+        <div class="ft">④ FastAPI startup</div>
+        <div class="fd"><code>DataStore</code>가 전부 메모리 적재 + status/검사일 분배(데모) + wafer 재집계 + feature↔health Pearson r 계산 → <code>/api/*</code> 서빙</div>
+      </div>
+      <div class="arrow-h"><svg width="26" height="16" viewBox="0 0 26 16"><path d="M0 8h22M15 1l7 7-7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div class="fbox serve">
+        <div class="ft">⑤ React + (LLM)</div>
+        <div class="fd">TanStack Query가 캐싱하며 화면 렌더 · ChatbotWidget/보고서는 같은 API를 LLM tool로 재사용</div>
+      </div>
+    </div>
+    <div class="footnote">
+      <b>핵심 특징.</b>
+      ⓐ 대시보드 런타임은 <b>읽기 전용</b> — 모델을 직접 호출하지 않고 미리 구운 예측 결과만 사용 (재현성·속도).
+      ⓑ <code>5_dashboard/</code> 폴더만으로 자립 실행 (부모 프로젝트 의존 X).
+      ⓒ status(today/pending/completed)와 검사일은 현재 데모용 분배 로직 — 실 운영 시 데이터의 실제 검사일 컬럼으로 교체.
+      ⓓ <span class="star">★</span> 표시 항목(LLM 오케스트레이터·RAG·<code>/api/chat</code>·<code>/api/agent/report</code>)은 본 다이어그램의 <b>연동 가정</b> 부분 — 현재 코드에서 ChatbotWidget은 키워드 기반 mock.
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

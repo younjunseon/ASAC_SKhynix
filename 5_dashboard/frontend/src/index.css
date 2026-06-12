@@ -190,3 +190,37 @@ table.spotfire tr.active td { background: #3b82f6; color: #ffffff; }
 .chip-today    { background: #fef3c7; color: #b45309; }  /* amber — 오늘 강조 */
 .chip-pending  { background: #eff6ff; color: #1d4ed8; }  /* blue — 대기 */
 .chip-completed{ background: #f1f5f9; color: #475569; }  /* gray — 완료 */
+
+/* ───────── 인쇄 ───────── */
+@media print {
+  @page { size: A4; margin: 10mm; }
+
+  /* 모달이 떠 있을 때: 페이지 전체를 숨기고 모달만 출력 */
+  body:has(.print-root) > #root > *:not(:has(.print-root)),
+  body:has(.print-root) > #root > * { visibility: hidden; }
+  body:has(.print-root) .print-root,
+  body:has(.print-root) .print-root * { visibility: visible; }
+
+  /* 오버레이 → 일반 흐름으로 변환, 한 페이지에 맞게 */
+  .print-root {
+    position: static !important;
+    background: transparent !important;
+    display: block !important;
+  }
+  .print-area {
+    box-shadow: none !important;
+    border: none !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: none !important;
+    overflow: visible !important;
+    border-radius: 0 !important;
+  }
+  .print-body {
+    overflow: visible !important;
+    page-break-inside: avoid;
+  }
+  .print-body > div { page-break-inside: avoid; }
+
+  .no-print { display: none !important; }
+}

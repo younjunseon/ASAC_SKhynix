@@ -9,6 +9,9 @@ interface Props {
   grid?: WaferGrid;
   selectedUnit?: string | null;
   onSelectUnit?: (ufsSerial: string) => void;
+  /** die 단위 선택 콜백 — ufs_serial 없는 die도 선택 가능 */
+  selectedDie?: { die_x: number; die_y: number } | null;
+  onSelectDie?: (die: DieItem) => void;
   title?: string;
 }
 
@@ -19,7 +22,7 @@ interface Props {
  * - cell 종횡비를 데이터 비율에 맞춰 분리 (정사각형 X)
  */
 export default function WaferMap({
-  dies, scale, grid, selectedUnit, onSelectUnit, title,
+  dies, scale, grid, selectedUnit, onSelectUnit, selectedDie, onSelectDie, title,
 }: Props) {
   const layout = useMemo(() => {
     let bounds: WaferGrid["bounds"];
@@ -92,7 +95,9 @@ export default function WaferMap({
                 const die = dieMap.get(`${dx},${dy}`);
                 const x = cx + (dx - centerX) * cellWidth - cellWidth / 2;
                 const y = cy + (dy - centerY) * cellHeight - cellHeight / 2;
-                const isSelected = die?.ufs_serial === selectedUnit;
+                const isSelectedUnit = die?.ufs_serial != null && die.ufs_serial === selectedUnit;
+                const isSelectedDie = selectedDie != null && dx === selectedDie.die_x && dy === selectedDie.die_y;
+                const isSelected = isSelectedUnit || isSelectedDie;
                 const fill = die
                   ? predColor(die.pred, scale.pred_min, scale.pred_max, scale.risk_threshold)
                   : "#f1f5f9";
@@ -112,8 +117,12 @@ export default function WaferMap({
                       fill={fill}
                       stroke={isSelected ? "#0f172a" : die ? "rgba(15,23,42,0.12)" : "rgba(15,23,42,0.04)"}
                       strokeWidth={isSelected ? 3 : 0.6}
-                      className={die && onSelectUnit ? "cursor-pointer" : ""}
-                      onClick={() => die?.ufs_serial && onSelectUnit?.(die.ufs_serial)}
+                      className={die ? "cursor-pointer" : ""}
+                      onClick={() => {
+                        if (!die) return;
+                        onSelectDie?.(die);
+                        if (die.ufs_serial) onSelectUnit?.(die.ufs_serial);
+                      }}
                     />
                   </g>
                 );
