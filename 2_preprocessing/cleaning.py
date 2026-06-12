@@ -5,11 +5,13 @@ die-level X에서 "예측에 방해되거나 의미 없는 컬럼"을 단계적�
 순서대로:
   1) 상수 / 극저분산 feature 제거 (std ≤ threshold)
   2) 고결측 feature 제거 (결측률 ≥ threshold)
-  3) 완전 중복 컬럼 제거 (값이 똑같은 쌍에서 한쪽)
-  4) 고상관 feature 제거 (|r| > threshold 쌍에서 한쪽 — 다중공선성 감소)
-  5) 결측치 imputation (median / KNN / 공간보간) + 결측 indicator 옵션
-  6) (선택) imputation 후 2차 고상관 제거 — 보간으로 인위적으로 닮아진 컬럼 정리
+  3) 고상관 feature 제거 (|r| > threshold 쌍에서 한쪽 — 다중공선성 감소, 전체 행 풀스캔)
+  4) 결측치 imputation (median / KNN / 공간보간) + 결측 indicator 옵션
 별도로 binarize_degenerate(): "거의 한 값"인 feature를 0/1 indicator로 압축.
+
+참고: 완전 중복 컬럼 제거(remove_duplicate_features)와 imputation 후 2차 고상관 제거는
+제거되었다. 관련 파라미터(remove_duplicates / post_impute_corr_*)는 하위 호환을 위해
+시그니처에만 남아 있고 동작하지 않는 no-op이다.
 
 핵심 규칙: 모든 fit(median, 상관, KNN 등)은 train split에서만 하고 val/test엔 transform만 적용한다 (data leakage 방지).
 """
@@ -73,68 +75,12 @@ def remove_high_missing_features(xs, feat_cols, threshold=0.5):
     return keep, removed
 
 
-def remove_duplicate_features(xs, feat_cols, sample_n=5000, seed=42):
-    """
-    완전 중복 컬럼 쌍에서 하나씩 제거 (샘플 기반, 해시 사전 필터링)
-
-    Parameters
-    ----------
-    xs : DataFrame
-    feat_cols : list
-    sample_n : int
-    seed : int
-
-    Returns
-    -------
-    keep_cols : list
-    removed_cols : list
-    """
-    from collections import defaultdict
-
-    # 전체 17만 행을 다 비교하면 느리므로 sample_n행만 뽑아 비교 (중복이면 샘플에서도 같음)
-    sample = xs[feat_cols].sample(n=min(sample_n, len(xs)), random_state=seed)
-    removed = set()
-
-    # 모든 쌍을 .equals()로 비교하면 O(F^2)라 비쌈 → 먼저 컬럼별 해시를 구해
-    # 해시가 같은 컬럼끼리만 실제 비교(같은 버킷 안에서만 .equals())
-    col_hashes = {}
-    for col in feat_cols:
-        h = pd.util.hash_pandas_object(sample[col], index=False)   # 행 순서 기준 해시 시퀀스
-        col_hashes[col] = hash(h.values.tobytes())                  # 그 시퀀스를 다시 한 정수로 압축
-
-    hash_groups = defaultdict(list)
-    for col in feat_cols:  # feat_cols 순서를 유지해 "먼저 나온 컬럼을 남김"이 되도록
-        hash_groups[col_hashes[col]].append(col)
-
-    for h, cols in hash_groups.items():
-        if len(cols) < 2:          # 해시가 유일하면 중복 아님
-            continue
-        # 같은 해시 버킷 안에서 i<j 쌍을 비교, 진짜 같으면 뒤 컬럼(j)을 제거 대상으로
-        for i in range(len(cols)):
-            if cols[i] in removed:
-                continue
-            for j in range(i + 1, len(cols)):
-                if cols[j] in removed:
-                    continue
-                if sample[cols[i]].equals(sample[cols[j]]):
-                    removed.add(cols[j])
-
-    removed = list(removed)
-    keep = [c for c in feat_cols if c not in removed]
-
-    print(f"[중복 컬럼 제거] sample_n={sample_n}")
-    print(f"  제거: {len(removed)}개, 잔여: {len(keep)}개")
-    return keep, removed
-
-
 def remove_high_corr_features(
     xs, feat_cols,
     threshold=0.95,
     keep_by="std",
     ys_train=None,
     winsorize_pct=0.0,
-    sample_n=10000,
-    seed=42,
 ):
     """
     피처 간 |상관계수| > threshold인 쌍에서 한쪽 제거 (다중공선성 감소)
@@ -166,18 +112,14 @@ def remove_high_corr_features(
     winsorize_pct : float
         keep_by="std"일 때 std 계산 전 양쪽 분위수 클립 비율.
         0이면 생략. 기본 0.0
-    sample_n : int
-        std 경로에서 상관/score 계산 시 샘플 수 (속도).
-        target_corr 경로에선 unit-level 집계라 전체를 사용.
-    seed : int
 
     Returns
     -------
     keep_cols : list
     removed_cols : list
     """
-    # 상관 행렬 계산은 비싸므로 sample_n행만 사용 (다중공선성 판정엔 샘플로 충분)
-    sample = xs[feat_cols].sample(n=min(sample_n, len(xs)), random_state=seed)
+    # 풀스캔: 샘플링 없이 전체 train 행으로 상관/std 계산 (다중공선성 판정 정확도 우선)
+    sample = xs[feat_cols]
 
     # 피처 간 상관 행렬의 절대값 — argwhere로 빠르게 고상관 쌍을 뽑기 위해 numpy 배열로
     corr_matrix = sample.corr().abs()
@@ -259,12 +201,16 @@ def remove_high_corr_features(
 
 def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
     """
-    공간 보간 → lot 중앙값 → 전체 중앙값 순서로 결측치를 채우는 함수
+    공간 보간 → lot+xy 중앙값 → train xy 중앙값 순서로 결측치를 채우는 함수
 
     전략:
     1단계: 같은 lot/wafer 내 xy 좌표 기준 거리 가중 평균 (max_dist 이내 이웃)
-    2단계: 같은 lot 내 중앙값
-    3단계: train split의 컬럼 전체 중앙값
+    2단계: 같은 lot의 같은 xy 좌표 중앙값 (groupby lot, die_x, die_y; train 행 기준)
+    3단계: train의 같은 xy 좌표 중앙값 (groupby die_x, die_y; lot 무관)
+
+    주의: 3단계까지 해도 train에 없는 (die_x, die_y) 조합이나 해당 좌표가 전부 결측인
+    컬럼은 잔여 NaN으로 남을 수 있다 (전역 중앙값 fallback은 의도적으로 두지 않음).
+    잔여 결측 수는 report['remaining']에 기록된다.
 
     Parameters
     ----------
@@ -275,9 +221,9 @@ def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
     max_dist : float
         공간 보간 시 이웃으로 간주할 최대 거리 (기본 2.0, 인접 die까지)
     train_mask : Series[bool], optional
-        xs.index와 정렬된 boolean 마스크. True인 행만 1단계 이웃 후보·2단계 lot 중앙값
+        xs.index와 정렬된 boolean 마스크. True인 행만 1단계 이웃 후보·2단계 lot+xy 중앙값
         계산에 사용되어 data leakage를 차단한다. None이면 1·2단계는 전체 데이터를 사용.
-        단 3단계(전체 중앙값 fallback)는 train_mask와 무관하게 항상 split=='train' 행만 쓰므로
+        단 3단계(train xy 중앙값)는 train_mask와 무관하게 항상 split=='train' 행만 쓰므로
         standalone 호출 시에도 SPLIT_COL 컬럼이 필요하다.
 
     Returns
@@ -385,15 +331,20 @@ def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
     print(f"  1단계 (공간 보간, dist<={max_dist}): {filled_spatial:,}개 채움"
           f" → 잔여: {na_after_spatial:,}")
 
-    # --- 2단계: 1단계로 못 채운 칸은 "같은 lot의 중앙값"으로 (중앙값은 train 행에서만 계산) ---
+    # --- 2단계: 1단계로 못 채운 칸은 "같은 lot의 같은 xy 좌표 중앙값"으로 (train 행에서만 계산) ---
+    lotxy_keys = ['_lot', '_die_x', '_die_y']
     if na_after_spatial > 0:
         if train_mask is not None:
-            train_lot_medians = xs.loc[train_mask].groupby('_lot')[feat_cols].median()
+            train_lotxy_medians = xs.loc[train_mask].groupby(lotxy_keys)[feat_cols].median()
         else:
-            train_lot_medians = xs.groupby('_lot')[feat_cols].median()
+            train_lotxy_medians = xs.groupby(lotxy_keys)[feat_cols].median()
 
-        # 각 행의 _lot 값에 해당하는 lot 중앙값을 가져옴 (train에 없는 lot은 NaN → 3단계로 넘어감)
-        fill_df = train_lot_medians.reindex(xs['_lot'].values)
+        # 각 행의 (lot, die_x, die_y) 조합에 해당하는 중앙값을 가져옴
+        # (train에 없는 조합은 NaN → 3단계로 넘어감)
+        row_keys = pd.MultiIndex.from_arrays(
+            [xs['_lot'].values, xs['_die_x'].values, xs['_die_y'].values]
+        )
+        fill_df = train_lotxy_medians.reindex(row_keys)
         fill_df.index = xs.index
 
         filled_before = xs[feat_cols].isnull().sum().sum()
@@ -401,20 +352,29 @@ def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
         filled_lot = filled_before - xs[feat_cols].isnull().sum().sum()
         na_after_lot = xs[feat_cols].isnull().sum().sum()
         lot_label = "train 기준" if train_mask is not None else "전체 기준"
-        print(f"  2단계 (lot 중앙값, {lot_label}): {filled_lot:,}개 채움"
+        print(f"  2단계 (lot+xy 중앙값, {lot_label}): {filled_lot:,}개 채움"
               f" → 잔여: {na_after_lot:,}")
     else:
         filled_lot = 0
         na_after_lot = 0
 
-    # --- 3단계: 그래도 남은 칸은 "train 전체의 컬럼 중앙값"으로 ---
+    # --- 3단계: 그래도 남은 칸은 "train의 같은 xy 좌표 중앙값"으로 (lot 무관, train 전체) ---
     if na_after_lot > 0:
-        train_medians = xs.loc[xs[SPLIT_COL] == 'train', feat_cols].median()
+        xy_keys = ['_die_x', '_die_y']
+        train_xy_medians = (
+            xs.loc[xs[SPLIT_COL] == 'train'].groupby(xy_keys)[feat_cols].median()
+        )
+        row_keys = pd.MultiIndex.from_arrays(
+            [xs['_die_x'].values, xs['_die_y'].values]
+        )
+        fill_df = train_xy_medians.reindex(row_keys)
+        fill_df.index = xs.index
+
         filled_before = xs[feat_cols].isnull().sum().sum()
-        xs[feat_cols] = xs[feat_cols].fillna(train_medians)
+        xs[feat_cols] = xs[feat_cols].fillna(fill_df)
         filled_global = filled_before - xs[feat_cols].isnull().sum().sum()
         na_after_global = xs[feat_cols].isnull().sum().sum()
-        print(f"  3단계 (train 전체 중앙값): {filled_global:,}개 채움"
+        print(f"  3단계 (train xy 중앙값): {filled_global:,}개 채움"
               f" → 잔여: {na_after_global:,}")
     else:
         filled_global = 0
@@ -431,8 +391,8 @@ def impute_spatial(xs, feat_cols, max_dist=2.0, train_mask=None):
     }
 
     print(f"\n  [요약] {total_na_before:,} → "
-          f"공간({filled_spatial:,}) → lot({filled_lot:,}) → "
-          f"전체({filled_global:,}) → 잔여({report['remaining']:,})")
+          f"공간({filled_spatial:,}) → lot+xy({filled_lot:,}) → "
+          f"train_xy({filled_global:,}) → 잔여({report['remaining']:,})")
 
     return xs, report
 
@@ -557,6 +517,7 @@ def run_cleaning(xs, feat_cols, xs_dict,
     const_threshold : float
     missing_threshold : float
     remove_duplicates : bool
+        (no-op — 완전 중복 컬럼 제거 로직은 삭제됨. 하위 호환을 위해 인자만 유지하며 무시됨)
     corr_threshold : float or None
         |r| > 이 값인 피처 쌍에서 한쪽 제거. None이면 스킵
     corr_keep_by : {"std", "target_corr"}
@@ -577,22 +538,20 @@ def run_cleaning(xs, feat_cols, xs_dict,
     imputation_method : {"median", "knn", "spatial"}
         - "median" (기본): train median으로 채움
         - "knn": KNNImputer
-        - "spatial": 같은 lot/wafer 내 xy 거리 기반 공간 보간 → lot 평균
-                     → train 전체 평균 3단계. xs_train/val/test를 합쳐서
+        - "spatial": 같은 lot/wafer 내 xy 거리 기반 공간 보간 → lot+xy 중앙값
+                     → train xy 중앙값 3단계. xs_train/val/test를 합쳐서
                      같은 lot 내 이웃을 참조한 뒤 split별로 다시 분리한다.
     knn_neighbors : int
         imputation_method="knn"일 때 이웃 수
     spatial_max_dist : float
         imputation_method="spatial"일 때 공간 보간의 이웃 최대 거리. 기본 2.0
     post_impute_corr_threshold : float or None
-        imputation 이후 한 번 더 고상관 제거를 수행할 때의 임계값.
-        None이면 스킵. 권장: 0.99 (보수적). imputation으로 인해 인위적으로
-        상관이 높아진 컬럼만 추가 제거하는 목적.
-        대상은 일반 feature(current_cols)만이며 indicator 컬럼은 제외.
+        (no-op — imputation 후 2차 고상관 제거 로직은 삭제됨. 하위 호환을 위해
+        인자만 유지하며 무시됨. 1차 고상관 제거만 수행된다)
     post_impute_corr_keep_by : {"std", "target_corr"}
-        2차 고상관 제거에서 남길 기준. 기본 "std"
+        (no-op — 2차 고상관 제거 로직 삭제됨. 인자만 유지)
     protected_cols : list of str, optional
-        클리닝 전 과정(상수/결측/중복/고상관/imputation/post-impute corr)을
+        클리닝 전 과정(상수/결측/고상관/imputation)을
         우회시킬 컬럼 목록. 사전 산출된 encoding 컬럼처럼 cleaning이 건드리면
         안 되는 컬럼을 보호. 우회된 컬럼은 끝에 그대로 재부착되어 결과 feat_cols에
         포함된다. None이면 기존 동작 (모든 feat_cols가 cleaning 대상).
@@ -688,16 +647,7 @@ def run_cleaning(xs, feat_cols, xs_dict,
     print(f"    컬럼: {before} → {len(current_cols)} ({before - len(current_cols)}개 제거)")
     print(f"    DataFrame: {xs_train.shape}\n")
 
-    # 3) 완전 중복 컬럼 제거 (옵션)
-    if remove_duplicates:
-        before = len(current_cols)
-        current_cols, removed = remove_duplicate_features(xs_train, current_cols)
-        _drop_from_all(removed)
-        report["duplicate"] = removed
-        print(f"    컬럼: {before} → {len(current_cols)} ({before - len(current_cols)}개 제거)")
-        print(f"    DataFrame: {xs_train.shape}\n")
-
-    # 4) 고상관 제거 (다중공선성 감소) — corr_threshold=None이면 생략
+    # 3) 고상관 제거 (다중공선성 감소, 전체 행 풀스캔) — corr_threshold=None이면 생략
     if corr_threshold is not None:
         before = len(current_cols)
         current_cols, removed = remove_high_corr_features(
@@ -712,7 +662,7 @@ def run_cleaning(xs, feat_cols, xs_dict,
         print(f"    컬럼: {before} → {len(current_cols)} ({before - len(current_cols)}개 제거)")
         print(f"    DataFrame: {xs_train.shape}\n")
 
-    # 5) 결측 imputation (+ indicator). 방식에 따라 분기
+    # 4) 결측 imputation (+ indicator). 방식에 따라 분기
     if imputation_method in ("median", "knn"):
         xs_train, xs_val, xs_test, imputer_info, indicator_cols = impute_missing(
             xs_train, xs_val, xs_test, current_cols,
@@ -756,26 +706,8 @@ def run_cleaning(xs, feat_cols, xs_dict,
             f"Use 'median', 'knn', or 'spatial'"
         )
 
-    # 6) (선택) imputation 이후 2차 고상관 제거
-    #    median/평균으로 결측을 채우다 보면 원래 NaN이던 자리가 다 같은 값이 되어 상관이 인위적으로 올라간다.
-    #    그런 컬럼만 잡도록 보수적인 임계값(권장 0.99)을 쓰고, indicator 컬럼은 대상에서 제외(current_cols만).
-    if post_impute_corr_threshold is not None:
-        before = len(current_cols)
-        print()
-        current_cols, removed = remove_high_corr_features(
-            xs_train, current_cols,
-            threshold=post_impute_corr_threshold,
-            keep_by=post_impute_corr_keep_by,
-            ys_train=ys_train,
-            winsorize_pct=corr_winsorize_pct,
-        )
-        _drop_from_all(removed)
-        report["high_corr_post_impute"] = removed
-        print(f"    [고상관 제거 2차 / imputation 후] threshold="
-              f"{post_impute_corr_threshold}")
-        print(f"    컬럼: {before} → {len(current_cols)} "
-              f"({before - len(current_cols)}개 제거)")
-        print(f"    DataFrame: {xs_train.shape}")
+    # (imputation 후 2차 고상관 제거 로직은 제거됨 — 1차 고상관 제거(step 3)만 수행.
+    #  post_impute_corr_* 인자는 하위 호환을 위해 시그니처에만 남아 있고 무시된다.)
 
     # 최종 feature 목록 = 살아남은 일반 feature + (있으면) indicator 컬럼
     all_feat_cols = current_cols + indicator_cols
