@@ -1,0 +1,210 @@
+.mp-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 22px;
+}
+
+/* ── KPI 행 ── */
+.mp-kpi-row {
+  display: grid;
+  gap: 10px;
+}
+.mp-kpi-row--2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+.mp-kpi-row--5 {
+  grid-template-columns: repeat(5, 1fr);
+}
+
+/* ── KPI 박스 — 파란 테두리 흰 배경 통일 ── */
+.mp-kpi {
+  background: #fff;
+  border: 1.5px solid #3B82F6;
+  border-radius: 10px;
+  padding: 12px 14px;
+  text-align: center;
+  transition: box-shadow 0.18s;
+}
+.mp-kpi:hover { box-shadow: 0 2px 12px rgba(59,130,246,0.15); }
+
+.mp-kpi-val {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  color: #1E40AF;
+  line-height: 1.2;
+  letter-spacing: -0.5px;
+  word-break: break-all;
+}
+
+.mp-kpi-label {
+  font-size: 12px;
+  color: #374151;
+  margin-top: 4px;
+  font-weight: 600;
+}
+
+.mp-kpi-sub {
+  font-size: 11px;
+  color: #94A3B8;
+  font-family: 'JetBrains Mono', monospace;
+  margin-top: 3px;
+}
+
+/* ── 2×2 차트 그리드 ── */
+.mp-grid-2x2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto;
+  gap: 14px;
+}
+
+.mp-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+/* ── 차트 카드 ── */
+.mp-chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: box-shadow 0.18s;
+  display: flex;
+  flex-direction: column;
+}
+.mp-chart-card:hover { box-shadow: 0 2px 14px rgba(59,130,246,0.07); }
+
+.mp-cc-header{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  flex-shrink: 0;
+}
+
+.mp-cc-title{
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  flex: 1;
+}
+
+.mp-cc-tag {
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--accent-pale);
+  color: var(--accent);
+  border: 1px solid var(--accent-mid);
+  white-space: nowrap;
+}
+
+.mp-cc-body {
+  padding: 10px 14px;
+}
+
+/* ── 스크롤 가능한 차트 영역 ── */
+/* 7개 항목 높이(~245px)만 보이고, 안에서 스크롤 */
+.mp-cc-scroll {
+  padding: 10px 14px;
+  height: 345px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #CBD5E1 transparent;
+}
+.mp-cc-scroll::-webkit-scrollbar { width: 4px; }
+.mp-cc-scroll::-webkit-scrollbar-track { background: transparent; }
+.mp-cc-scroll::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 2px; }
+
+/* ── 빈 상태 ── */
+.mp-empty {
+  font-size: 10px;
+  color: var(--text3);
+  padding: 24px;
+  text-align: center;
+}
+
+/* ── 전체 너비 그리드 (beeswarm용) ── */
+.mp-grid-1x1 {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+/* ── 차트 헤더 컨트롤 영역 ── */
+.mp-cc-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ── 정렬 버튼 그룹 ── */
+.mp-sort-btngroup {
+  display: flex;
+  border: 1px solid #E2E8F0;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.mp-sort-btn {
+  font-size: 11px;
+  padding: 3px 9px;
+  background: #F8FAFC;
+  color: #64748B;
+  border: none;
+  border-right: 1px solid #E2E8F0;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.13s, color 0.13s;
+  font-family: inherit;
+}
+.mp-sort-btn:last-child { border-right: none; }
+.mp-sort-btn:hover { background: #EFF6FF; color: #1D4ED8; }
+.mp-sort-btn.active {
+  background: #3B82F6;
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ── FI + SHAP 합친 카드 내부 레이아웃 ── */
+.mp-fi-shap-row {
+  display: flex;
+  gap: 0;
+  width: 100%;
+}
+
+.mp-fi-shap-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.mp-fi-shap-divider {
+  width: 1px;
+  background: var(--border);
+  margin: 0 12px;
+  flex-shrink: 0;
+}
+
+.mp-fi-shap-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #94A3B8;
+  padding: 0 4px 6px;
+  letter-spacing: 0.01em;
+}
+
+/* ── 하단 2칸 그리드 ── */
+.mp-grid-2x2-bottom {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}

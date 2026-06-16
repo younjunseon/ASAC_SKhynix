@@ -1,226 +1,63 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
-html, body, #root {
-  height: 100%;
-  margin: 0;
+:root {
+  --accent:        #6366F1;
+  --accent-light:  #818CF8;
+  --accent-pale:   #EEF2FF;
+  --accent-mid:    #C7D2FE;
+
+  --bg:            #F4F6F9;
+  --surface:       #FFFFFF;
+  --surface2:      #F8FAFC;
+  --border:        #E8ECF0;
+  --border2:       #D1D9E0;
+
+  --text:          #111827;
+  --text2:         #4B5563;
+  --text3:         #9CA3AF;
+
+  --good:          #10B981;
+  --good-bg:       #ECFDF5;
+  --good-border:   #A7F3D0;
+  --bad:           #EF4444;
+  --bad-bg:        #FEF2F2;
+  --bad-border:    #FECACA;
+  --warn:          #F59E0B;
+  --warn-bg:       #FFFBEB;
+  --warn-border:   #FDE68A;
+
+  --sidebar-w:     52px;
+  --topbar-h:      58px;
+  --chatbot-w:     360px;
+
+  /* 반응형 레이아웃 변수 */
+  --dd-left-w:     clamp(220px, 22vw, 380px);
+  --dd-right-w:    clamp(380px, 38vw, 680px);
+  --dd-font-sm:    clamp(9px,  0.75vw, 12px);
+  --dd-font-md:    clamp(11px, 0.9vw,  14px);
+  --dd-font-lg:    clamp(13px, 1.1vw,  17px);
+
+  --shadow-sm:     0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  --shadow-md:     0 4px 12px rgba(0,0,0,.08), 0 2px 4px rgba(0,0,0,.04);
+  --shadow-lg:     0 10px 24px rgba(0,0,0,.10), 0 4px 8px rgba(0,0,0,.06);
+  --radius:        10px;
 }
 
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
 body {
-  font-family: "Inter", "Segoe UI", "Malgun Gothic", sans-serif;
-  background: #fafafa;
-  color: #0f172a;
-  font-size: 13px;
+  font-family: 'Inter', 'Noto Sans KR', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+  font-size: 12px;
   -webkit-font-smoothing: antialiased;
 }
 
-/* ─── 카드 ────────────────────────────────────── */
-.panel {
-  background: #ffffff;
-  border-radius: 12px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-  border: 1px solid #eef2f7;
-  overflow: hidden;
-}
-.panel-title {
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 600;
-  padding: 14px 18px 4px 18px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.panel-body {
-  padding: 12px 18px 18px 18px;
-  background: #ffffff;
-}
+#root { height: 100vh; display: flex; flex-direction: column; }
 
-/* 강조 카드 — 거의 사용 X (호환용으로 평범한 카드와 동일하게 처리) */
-.panel-accent {
-  background: #ffffff;
-  color: #0f172a;
-  border-radius: 12px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-  border: 1px solid #eef2f7;
-}
-.panel-accent .panel-title { color: #0f172a; }
-.panel-accent .panel-body { background: #ffffff; }
-
-/* ─── 표 ──────────────────────────────────────── */
-table.spotfire {
-  font-size: 12px;
-  border-collapse: collapse;
-  width: 100%;
-}
-table.spotfire th {
-  background: #f8fafc;
-  border-bottom: 1px solid #eef2f7;
-  padding: 10px 14px;
-  font-weight: 600;
-  text-align: left;
-  font-size: 11px;
-  color: #64748b;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-/* th에 Tailwind utility(text-right/text-center)를 쓸 수 있도록 specificity 보강 */
-table.spotfire th.text-right { text-align: right; }
-table.spotfire th.text-center { text-align: center; }
-table.spotfire td {
-  border-bottom: 1px solid #f1f5f9;
-  padding: 10px 14px;
-  font-size: 12px;
-  color: #0f172a;
-}
-table.spotfire tr:hover td { background: #f8fafc; }
-table.spotfire tr.active td { background: #3b82f6; color: #ffffff; }
-
-/* ─── 버튼 ───────────────────────────────────── */
-.btn {
-  border: 1px solid #e2e8f0;
-  background: #ffffff;
-  color: #0f172a;
-  font-size: 12px;
-  padding: 6px 14px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-weight: 500;
-  transition: all 0.15s;
-}
-.btn:hover { background: #f8fafc; border-color: #cbd5e1; }
-.btn.btn-primary {
-  background: #3b82f6;
-  color: #ffffff;
-  border-color: #3b82f6;
-}
-.btn.btn-primary:hover { background: #2563eb; border-color: #2563eb; }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* ─── 스크롤바 ───────────────────────────────── */
-::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-
-.tabular { font-variant-numeric: tabular-nums; }
-
-/* ─── 사이드바 (흰색 + 좌측 컬러 dot) ─────────── */
-.sidebar-link {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 11px 20px;
-  font-size: 13px;
-  color: #475569;
-  border-left: 3px solid transparent;
-  cursor: pointer;
-  transition: all 0.12s;
-  font-weight: 500;
-  position: relative;
-}
-.sidebar-link:hover {
-  color: #0f172a;
-  background: #f8fafc;
-}
-.sidebar-link.active {
-  color: #0f172a;
-  background: #eff6ff;
-  border-left-color: #3b82f6;
-  font-weight: 600;
-}
-.sidebar-link svg { width: 18px; height: 18px; flex-shrink: 0; }
-
-/* 사이드바 메뉴별 dot 색 — 메뉴 hover/active 시 좌측 dot 강조 */
-.sidebar-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-/* ─── chip 유틸 ───────────────────────────────── */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.4;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.chip-danger  { background: #fef2f2; color: #b91c1c; }
-.chip-warn    { background: #fffbeb; color: #b45309; }
-.chip-success { background: #ecfdf5; color: #047857; }
-.chip-info    { background: #eff6ff; color: #1d4ed8; }
-.chip-muted   { background: #f1f5f9; color: #475569; }
-.chip-tbd {
-  background: repeating-linear-gradient(
-    45deg, #fef3c7, #fef3c7 4px, #fde68a 4px, #fde68a 8px
-  );
-  color: #92400e;
-  border: 1px dashed #f59e0b;
-}
-.chip-sm { padding: 1px 6px; font-size: 10px; }
-
-/* TBD placeholder — "여기 실측값이 들어가야 함" 시각화 */
-.tbd-value {
-  display: inline-block;
-  min-width: 3em;
-  border-bottom: 2px dashed #f59e0b;
-  color: #b45309;
-  font-style: italic;
-  letter-spacing: 0.04em;
-}
-.tbd-block {
-  border: 1px dashed #f59e0b;
-  background: #fffbeb;
-  color: #92400e;
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-/* status 전용 chip */
-.chip-today    { background: #fef3c7; color: #b45309; }  /* amber — 오늘 강조 */
-.chip-pending  { background: #eff6ff; color: #1d4ed8; }  /* blue — 대기 */
-.chip-completed{ background: #f1f5f9; color: #475569; }  /* gray — 완료 */
-
-/* ───────── 인쇄 ───────── */
-@media print {
-  @page { size: A4; margin: 10mm; }
-
-  /* 모달이 떠 있을 때: 페이지 전체를 숨기고 모달만 출력 */
-  body:has(.print-root) > #root > *:not(:has(.print-root)),
-  body:has(.print-root) > #root > * { visibility: hidden; }
-  body:has(.print-root) .print-root,
-  body:has(.print-root) .print-root * { visibility: visible; }
-
-  /* 오버레이 → 일반 흐름으로 변환, 한 페이지에 맞게 */
-  .print-root {
-    position: static !important;
-    background: transparent !important;
-    display: block !important;
-  }
-  .print-area {
-    box-shadow: none !important;
-    border: none !important;
-    width: 100% !important;
-    max-width: 100% !important;
-    max-height: none !important;
-    overflow: visible !important;
-    border-radius: 0 !important;
-  }
-  .print-body {
-    overflow: visible !important;
-    page-break-inside: avoid;
-  }
-  .print-body > div { page-break-inside: avoid; }
-
-  .no-print { display: none !important; }
-}
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent-mid); }
