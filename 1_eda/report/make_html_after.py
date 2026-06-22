@@ -1,7 +1,10 @@
-import json, sys, re
+import json, sys, re, os
 sys.stdout.reconfigure(encoding='utf-8')
 
-with open('eda_clean.ipynb', 'r', encoding='utf-8') as f:
+# 입력: 전처리 후 EDA 노트북 (report/ 기준 상대경로 → 어디서 실행해도 동작)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_NOTEBOOK = os.path.join(_HERE, '..', '02_processed_eda', 'eda_after.ipynb')
+with open(_NOTEBOOK, 'r', encoding='utf-8') as f:
     nb = json.load(f)
 cells = nb['cells']
 
@@ -552,9 +555,9 @@ document.addEventListener('DOMContentLoaded', () => {{
 </body>
 </html>'''
 
-with open('eda_clean_report.html', 'w', encoding='utf-8') as f:
+_OUTPUT = os.path.join(_HERE, 'eda_clean_report.html')
+with open(_OUTPUT, 'w', encoding='utf-8') as f:
     f.write(HTML)
 
-import os
-size = os.path.getsize('eda_clean_report.html')
-print(f'완료: eda_clean_report.html ({size/1024/1024:.1f} MB)')
+size = os.path.getsize(_OUTPUT)
+print(f'완료: {_OUTPUT} ({size/1024/1024:.1f} MB)')

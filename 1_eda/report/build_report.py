@@ -5,7 +5,7 @@ eda.ipynb에서 markdown 인사이트 + 텍스트 출력 + 차트 이미지를 �
 """
 import json, base64, os, re, html
 
-NOTEBOOK = os.path.join(os.path.dirname(__file__), '..', 'eda.ipynb')
+NOTEBOOK = os.path.join(os.path.dirname(__file__), '..', '01_raw_eda', 'eda.ipynb')
 IMG_DIR = os.path.join(os.path.dirname(__file__), 'images')
 OUTPUT = os.path.join(os.path.dirname(__file__), 'eda_report.html')
 OUTPUT_STANDALONE = os.path.join(os.path.dirname(__file__), 'eda_report_standalone.html')
