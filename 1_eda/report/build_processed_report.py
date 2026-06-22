@@ -3,6 +3,8 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 # 입력: 전처리 후 EDA 노트북 (report/ 기준 상대경로 → 어디서 실행해도 동작)
 _HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+import report_theme as rt
 _NOTEBOOK = os.path.join(_HERE, '..', '02_processed_eda', 'eda_after.ipynb')
 with open(_NOTEBOOK, 'r', encoding='utf-8') as f:
     nb = json.load(f)
@@ -343,219 +345,51 @@ def render_section(item, phase_id):
 
     conc_html = render_conc(item['conc'])
     insight_text = render_conc_insight(item['conc'])
-    insight_div = f'<div class="section-insight">💡 {insight_text}</div>' if insight_text else ''
 
     body_parts = []
     for spec in item['content']:
         ci, use_text, img_indices, graph_desc = spec
         body_parts.append(render_content_item(ci, use_text, img_indices, graph_desc))
     body_html = '\n'.join(body_parts)
+    if conc_html:
+        body_html += f'<div class="conclusion-box">{conc_html}</div>'
 
-    conc_div = f'<div class="conclusion-box">{conc_html}</div>' if conc_html else ''
+    return rt.section(sec_id, num, title, body_html, insight_text)
 
-    return f'''
-<div class="section" id="{sec_id}">
-  <div class="section-header" onclick="toggleSection(this.parentElement)">
-    <span class="section-num">{num}</span>
-    <h3>{title}</h3>
-    <span class="toggle">▼</span>
-  </div>
-  {insight_div}
-  <div class="section-body">
-    {body_html}
-    {conc_div}
-  </div>
-  <div class="section-footer" onclick="toggleSection(this.parentElement, true)">접기 ▲</div>
-</div>'''
-
-# TOC
+# ── TOC / 핵심발견 / Phase 섹션 (공용 테마 report_theme 사용) ──
 toc_items = []
 for ph in SECTIONS:
-    items_li = ''.join(
-        f'<li><a href="#section-{ph["id"]}-{it["num"].replace("/","_")}">{it["num"]}. {it["title"]}</a></li>'
-        for it in ph['items']
-    )
-    toc_items.append(f'''
-<div class="toc-phase">
-  <h3><span class="phase-icon">{ph["phase_icon"]}</span>{ph["phase_title"]}</h3>
-  <ul>{items_li}</ul>
-</div>''')
+    items = [(f'section-{ph["id"]}-{it["num"].replace("/", "_")}',
+              f'{it["num"]}. {it["title"]}') for it in ph['items']]
+    toc_items.append(rt.toc_phase(ph["phase_icon"], ph["phase_title"], items))
+toc_html = ''.join(toc_items)
 
-kf_cards = ''.join(
-    f'<div class="finding-card {"star" if t.startswith("⭐") else ""}"><h4>{t}</h4><p>{d}</p></div>'
-    for t, d in KEY_FINDINGS
-)
+findings_html = ''.join(rt.finding_card(t, d) for t, d in KEY_FINDINGS)
 
 phase_sections = []
 for ph in SECTIONS:
     secs = ''.join(render_section(it, ph['id']) for it in ph['items'])
-    phase_sections.append(f'''
-<div class="phase-section">
-  <div class="phase-header">
-    <span class="icon">{ph["phase_icon"]}</span>
-    <h2>{ph["phase_title"]}</h2>
-    <span class="phase-num">{ph["phase"]}</span>
-  </div>
-  {secs}
-</div>''')
+    phase_sections.append(rt.phase(ph["phase_icon"], ph["phase_title"], ph["phase"], secs))
+body_html = ''.join(phase_sections)
 
-# ── CSS + HTML ────────────────────────────────────────────
-HTML = f'''<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EDA Report (전처리 후) — SK Hynix RCC 예측</title>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-:root {{
-  --bg:#f8f9fc; --surface:#fff; --surface2:#f1f3f8; --border:#e2e5f0;
-  --text:#1a1d2e; --text-muted:#5c6078;
-  --accent:#4f46e5; --accent-light:#4338ca; --accent-bg:rgba(79,70,229,.06);
-  --green:#16a34a; --green-bg:rgba(22,163,74,.05); --green-border:rgba(22,163,74,.2);
-  --star:#b45309; --star-bg:rgba(180,83,9,.08);
-}}
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:'Noto Sans KR',-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;font-size:15px}}
-.container{{max-width:1200px;margin:0 auto;padding:0 32px}}
-/* Header */
-header{{background:linear-gradient(135deg,#eef2ff 0%,#e0e7ff 50%,#eef2ff 100%);padding:64px 0 48px;border-bottom:1px solid var(--border);position:relative;overflow:hidden}}
-header::before{{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(ellipse at 30% 50%,rgba(79,70,229,.08),transparent 70%)}}
-header .container{{position:relative;z-index:1}}
-header h1{{font-size:2.2rem;font-weight:700;letter-spacing:-.02em;margin-bottom:8px}}
-header .subtitle{{color:var(--accent-light);font-size:1.05rem;margin-bottom:24px}}
-header .meta{{display:flex;gap:24px;color:var(--text-muted);font-size:.85rem;flex-wrap:wrap}}
-/* TOC */
-.toc{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px;margin:40px 0;box-shadow:0 1px 3px rgba(0,0,0,.04)}}
-.toc h2{{font-size:1.1rem;font-weight:600;margin-bottom:20px;color:var(--accent-light);text-transform:uppercase;letter-spacing:.05em}}
-.toc-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}}
-.toc-phase{{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px 20px;transition:border-color .2s}}
-.toc-phase:hover{{border-color:var(--accent)}}
-.toc-phase h3{{font-size:.95rem;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}}
-.phase-icon{{font-size:1.1rem}}
-.toc-phase ul{{list-style:none;padding-left:28px}}
-.toc-phase li{{font-size:.85rem;padding:2px 0}}
-.toc-phase a{{color:var(--text-muted);text-decoration:none;transition:color .2s}}
-.toc-phase a:hover{{color:var(--accent-light)}}
-/* Key Findings */
-.key-findings{{margin:40px 0}}
-.key-findings h2{{font-size:1.3rem;font-weight:600;margin-bottom:20px}}
-.findings-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}}
-.finding-card{{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:16px 20px;box-shadow:0 1px 3px rgba(0,0,0,.04)}}
-.finding-card.star{{border-left-color:var(--star);background:var(--star-bg)}}
-.finding-card h4{{font-size:.85rem;font-weight:600;color:var(--accent-light);margin-bottom:6px}}
-.finding-card.star h4{{color:var(--star)}}
-.finding-card p{{font-size:.82rem;color:var(--text-muted);line-height:1.5}}
-/* Phase */
-.phase-section{{margin:56px 0}}
-.phase-header{{display:flex;align-items:center;gap:12px;margin-bottom:32px;padding-bottom:12px;border-bottom:2px solid var(--accent)}}
-.phase-header .icon{{font-size:1.5rem}}
-.phase-header h2{{font-size:1.4rem;font-weight:700}}
-.phase-header .phase-num{{background:var(--accent);color:#fff;font-size:.75rem;font-weight:600;padding:2px 10px;border-radius:20px;margin-left:auto}}
-/* Section */
-.section{{background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:24px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04)}}
-.section-header{{padding:20px 24px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;gap:12px;transition:background .2s}}
-.section-header:hover{{background:var(--surface2)}}
-.section-header h3{{font-size:1.05rem;font-weight:600;flex:1}}
-.section-num{{background:var(--accent-bg);color:var(--accent-light);font-size:.75rem;font-weight:600;padding:2px 8px;border-radius:4px;min-width:28px;text-align:center}}
-.toggle{{color:var(--text-muted);transition:transform .3s;font-size:1.1rem}}
-.section.open .toggle{{transform:rotate(180deg)}}
-.section-insight{{padding:12px 24px;background:var(--accent-bg);border-bottom:1px solid var(--border);font-size:.88rem;color:var(--accent-light);line-height:1.6}}
-.section-body{{padding:24px;display:none}}
-.section.open .section-body{{display:block}}
-.section-footer{{text-align:center;padding:10px;margin-top:16px;border-top:1px solid var(--border);color:var(--text-muted);font-size:.8rem;cursor:pointer;transition:color .2s,background .2s;border-radius:0 0 12px 12px;user-select:none;display:none}}
-.section.open .section-footer{{display:block}}
-.section-footer:hover{{color:var(--accent-light);background:var(--accent-bg)}}
-/* Content */
-.graph-desc{{font-size:.83rem;color:var(--text-muted);margin:16px 0 6px;padding-left:12px;border-left:2px solid var(--accent);line-height:1.5}}
-.chart{{margin:4px 0 20px;text-align:center}}
-.chart img{{max-width:100%;border-radius:8px;border:1px solid var(--border);background:#fff}}
-pre.output{{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:.76rem;line-height:1.6;overflow-x:auto;color:var(--text-muted);margin:12px 0;white-space:pre-wrap;word-break:break-all}}
-/* Conclusion */
-.conclusion-box{{background:var(--green-bg);border:1px solid var(--green-border);border-radius:8px;padding:16px 20px;margin-top:20px}}
-.conclusion-box p{{font-size:.88rem;color:#166534;margin:4px 0;line-height:1.6}}
-.key-insight{{background:var(--star-bg);border-left:3px solid var(--star);border-radius:0 6px 6px 0;padding:10px 14px;margin:10px 0;font-size:.88rem;color:var(--star);line-height:1.6;font-weight:500}}
-strong{{color:var(--text);font-weight:600}}
-code{{background:var(--surface2);padding:1px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:.82rem}}
-footer{{text-align:center;padding:48px 0;color:var(--text-muted);font-size:.8rem;border-top:1px solid var(--border);margin-top:64px}}
-@media(max-width:768px){{.container{{padding:0 16px}}.toc-grid{{grid-template-columns:1fr}}.findings-grid{{grid-template-columns:1fr}}}}
-::-webkit-scrollbar{{width:8px;height:8px}}
-::-webkit-scrollbar-track{{background:var(--bg)}}
-::-webkit-scrollbar-thumb{{background:var(--border);border-radius:4px}}
-</style>
-</head>
-<body>
+meta_html = ('<span>📅 2026-04-10</span>'
+             '<span>📊 7 Phase · 전처리 적용 버전</span>'
+             '<span>📐 174,980 dies · 43,745 units · 977 features (전처리 후)</span>')
 
-<header>
-<div class="container">
-  <h1>EDA Report — 전처리 후</h1>
-  <div class="subtitle">SK Hynix — Wafer Test 기반 Field Health Data(RCC) 예측</div>
-  <div class="meta">
-    <span>📅 2026-04-10</span>
-    <span>📊 7 Phase · 전처리 적용 버전</span>
-    <span>📐 174,980 dies · 43,745 units · 977 features (전처리 후)</span>
-  </div>
-</div>
-</header>
+HTML = rt.page(
+    'light',
+    title='EDA Report (전처리 후) — SK Hynix RCC 예측',
+    h1='EDA Report — 전처리 후',
+    subtitle='SK Hynix — Wafer Test 기반 Field Health Data(RCC) 예측',
+    meta_html=meta_html,
+    findings_title='핵심 발견 — 전처리 후 EDA',
+    findings_html=findings_html,
+    toc_html=toc_html,
+    body_html=body_html,
+    footer_text='SK Hynix RCC 예측 프로젝트 — 전처리 후 EDA Report · 2026-04-10',
+)
 
-<div class="container">
-
-<div class="key-findings">
-  <h2>핵심 발견 — 전처리 후 EDA</h2>
-  <div class="findings-grid">{kf_cards}</div>
-</div>
-
-<div class="toc">
-  <h2>목차</h2>
-  <div class="toc-grid">{''.join(toc_items)}</div>
-</div>
-
-{''.join(phase_sections)}
-
-</div>
-
-<footer>SK Hynix RCC 예측 프로젝트 — 전처리 후 EDA Report · 2026-04-10</footer>
-
-<script>
-function toggleSection(section, fromFooter) {{
-  var isOpen = section.classList.contains('open');
-  if (isOpen) {{
-    // 접을 때: 스크롤 점프 방지 — 헤더 위치로 유지
-    var header = section.querySelector('.section-header');
-    var headerTop = header.getBoundingClientRect().top + window.scrollY;
-    section.classList.remove('open');
-    // 헤더가 뷰포트 밖으로 나갔으면 헤더 위치로 스크롤
-    var newHeaderTop = header.getBoundingClientRect().top;
-    if (newHeaderTop < 0) {{
-      window.scrollTo({{ top: headerTop - 16, behavior: 'instant' }});
-    }}
-  }} else {{
-    section.classList.add('open');
-  }}
-}}
-
-document.addEventListener('DOMContentLoaded', () => {{
-  // 기본으로 첫 섹션만 열기
-  const first = document.querySelector('.section');
-  if (first) first.classList.add('open');
-
-  // TOC 앵커 클릭 시 스크롤 점프 방지 (smooth scroll)
-  document.querySelectorAll('.toc-phase a').forEach(a => {{
-    a.addEventListener('click', function(e) {{
-      e.preventDefault();
-      var target = document.querySelector(this.getAttribute('href'));
-      if (target) {{
-        target.classList.add('open');
-        target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
-      }}
-    }});
-  }});
-}});
-</script>
-</body>
-</html>'''
-
-_OUTPUT = os.path.join(_HERE, 'eda_clean_report.html')
+_OUTPUT = os.path.join(_HERE, 'eda_processed_report.html')
 with open(_OUTPUT, 'w', encoding='utf-8') as f:
     f.write(HTML)
 
