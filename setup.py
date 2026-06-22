@@ -1,22 +1,20 @@
 """
 Colab / Local 공통 부트스트랩.
 
-노트북 첫 셀에서 `%run ../setup.py` (Colab은 절대경로) 한 줄이면 끝나도록, 이 파일을 import(=실행)하면:
+노트북 첫 셀의 thin stub이 이 파일을 `runpy.run_path(...)`로 실행하면:
   1) requirements.txt를 보고 빠진 패키지를 pip로 설치
   2) 프로젝트 루트를 정해 sys.path에 등록 (+ 2_preprocessing도 경로에 추가)
-  3) matplotlib 한글 폰트 설정 (Colab=NanumGothic, Local=Malgun Gothic)
-  4) 1_eda/eda_style.mplstyle 가 있으면 시각화 스타일 적용
-  5) 폰트 관련 잡 경고 로거를 죽임
+  3) (Colab) 0_data에 CSV가 없으면 dataset.zip을 Drive에서 받아 압축 해제
+  4) matplotlib 한글 폰트 설정 (Colab=NanumGothic, Local=Malgun Gothic)
+  5) 1_eda/eda_style.mplstyle 가 있으면 시각화 스타일 적용
+  6) 폰트 관련 잡 경고 로거를 죽임
 까지 한 번에 처리한다.
 
-사용 예:
-    [로컬]
-    %run ../setup.py
-
-    [Colab]
-    !git clone https://github.com/<REPO>.git /content/project   # 또는 zip 다운로드 방식
-    import sys; sys.path.insert(0, "/content/project")
-    %run /content/project/setup.py
+호출 방식 (노트북 첫 셀 stub이 담당 — §10.1):
+    - 공통: cwd에서 위로 setup.py(+utils/)를 자동탐색 → `runpy.run_path(setup.py)`.
+      노트북 깊이·드라이브 위치(D드라이브 복사 등)가 달라도 동작. (`%run ../setup.py`
+      식의 상대경로 하드코딩은 폐기.)
+    - Colab: stub이 먼저 code.zip 1개를 gdown→unzip→/content/project 로 풀고 chdir.
 """
 import sys
 import os
@@ -90,6 +88,21 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 from utils.config import ENV   # config가 import 시점에 환경 감지를 끝내 ENV에 담아 둠
+
+# --- Colab: 데이터가 없으면 Drive에서 받아 푼다 (노트북 부트스트랩에서 이리로 이관) ---
+# 코드 번들(code.zip)은 노트북 첫 셀이 이미 받아 풀었고, 데이터(1.2GB)는 여기서 1회 fetch.
+# 로컬은 ENV!='colab'이라 통째로 건너뜀.
+if ENV == "colab":
+    _DATASET_ID = "1yOUo0_wPLcuZBSJIK592b00YkSIlk4zO"   # dataset.zip = compet_*.csv 4개
+    _data_dir = os.path.join(_this, "0_data")
+    if not os.path.exists(os.path.join(_data_dir, "compet_xs_data.csv")):
+        os.makedirs(_data_dir, exist_ok=True)
+        os.system("pip -q install gdown")
+        os.system(f"gdown {_DATASET_ID} -O /content/dataset.zip")
+        os.system(f"unzip -qo /content/dataset.zip -d {_data_dir}")
+        if os.path.exists("/content/dataset.zip"):
+            os.remove("/content/dataset.zip")
+        print("[setup] Colab: dataset 다운로드·압축해제 완료")
 
 if ENV == "colab":
     # Colab 기본 이미지에는 한글 폰트가 없으므로 나눔고딕을 설치해서 등록
