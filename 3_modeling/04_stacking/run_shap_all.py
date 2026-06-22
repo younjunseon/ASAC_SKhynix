@@ -9,8 +9,7 @@
 
 제외 항목:
     - enet (선형 모델, pred_contrib 미지원)
-    - ts_reg (Y>0 서브셋만 학습 → OOF SHAP sparse)
-    - 02_reg_single/lgbm/_old (구 실험)
+    - ts_reg (03_two_stage/default/reg — Y>0 서브셋만 학습 → OOF SHAP sparse)
 """
 
 import argparse
@@ -37,48 +36,25 @@ LOG_DIR.mkdir(exist_ok=True)
 # ---------------------------------------------------------------------------
 TASKS = []
 
-# ── 02_reg_single ──────────────────────────────────────────────────────────
+# ── 02_reg_single (enet 제외: 선형, pred_contrib 미지원) ─────────────────────
 REG_MODELS = ["lgbm", "xgb", "catboost", "et"]
-REG_PP = {
-    "lgbm":     ["hp/001", "hp/002", "pphp/001", "raw/001"],
-    "xgb":      ["hp/001", "hp/002", "pphp/001", "raw/001"],
-    "catboost": ["hp/001", "hp/002", "pphp/001", "raw/001"],
-    "et":       ["hp/001", "hp/002", "pphp/001"],          # raw/001 없음
-}
 for model in REG_MODELS:
-    for pp in REG_PP[model]:
-        TASKS.append((f"02_reg_single/{model}/{pp}", None, None))
+    TASKS.append((f"02_reg_single/{model}", None, None))
 
-# ── 01_zit/zit_et ─────────────────────────────────────────────────────────
-for sub in ["pi", "mu"]:
-    TASKS.append(("01_zit/zit_et/hp/002", sub, None))
-
-# ── 01_zit/zit_only ────────────────────────────────────────────────────────
-for pp in ["hp/001", "hp/002", "pphp/001", "raw/001"]:
+# ── 01_zit 4조합 (ZIT 내부 lgb_pi_ / lgb_mu_ 둘 다 SHAP 추출) ────────────────
+ZIT_COMBOS = ["zit_only_pearson", "zit_only_eql", "bag_zit_pearson", "bag_zit_eql"]
+for combo in ZIT_COMBOS:
     for sub in ["pi", "mu"]:
-        TASKS.append((f"01_zit/zit_only/{pp}", sub, None))
-
-# ── 01_zit/bag_zit ─────────────────────────────────────────────────────────
-for pp in ["hp/001", "pphp/001", "raw/001"]:   # hp/002 없음
-    for sub in ["pi", "mu"]:
-        TASKS.append((f"01_zit/bag_zit/{pp}", sub, None))
+        TASKS.append((f"01_zit/{combo}", sub, None))
 
 # ── 03_two_stage/default/clf ───────────────────────────────────────────────
 CLF_MODELS = ["lgbm", "xgb", "catboost", "et"]
-CLF_PP = {
-    "lgbm":     ["hp/001", "hp/002", "pphp/001", "raw/001"],
-    "xgb":      ["hp/001", "hp/002", "pphp/001", "raw/001"],
-    "catboost": ["hp/001", "hp/002", "pphp/001", "raw/001"],
-    "et":       ["hp/001", "hp/002", "pphp/001"],          # raw/001 없음
-}
 for model in CLF_MODELS:
-    for pp in CLF_PP[model]:
-        TASKS.append((f"03_two_stage/default/clf/{model}/{pp}", None, None))
+    TASKS.append((f"03_two_stage/default/clf/{model}", None, None))
 
-# ── 03_two_stage/reverse ───────────────────────────────────────────────────
-for pp in ["hp/001", "hp/002", "pphp/001"]:
-    for sub in ["reg", "clf"]:
-        TASKS.append((f"03_two_stage/reverse/{pp}", None, sub))
+# ── 03_two_stage/reverse (reg/clf 두 컴포넌트) ──────────────────────────────
+for sub in ["reg", "clf"]:
+    TASKS.append(("03_two_stage/reverse", None, sub))
 
 # ---------------------------------------------------------------------------
 # 헬퍼

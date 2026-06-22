@@ -1,5 +1,5 @@
 """
-Precompute the BagZIT preprocessing into a single mmap-shareable numeric .npy.
+Precompute the ZIT preprocessing into a single mmap-shareable numeric .npy.
 
 WHY
   Each parallel HPO worker currently re-runs the full preprocessing in its own
@@ -17,23 +17,21 @@ WHAT IS SAVED  (0_data/precomputed/<name>/)
   manifest.json shapes / column layout / pp params / fingerprint
 
 REPRODUCIBILITY
-  Runs the EXACT preprocessing of 02_bag_zit_parallel_hpo.py by importing its
-  load_preprocessed_data (single source of truth: same PP_FIXED, same in-process
-  median-imputation patch, same CLIP_Y_EXTREME). uid is relabelled str->int code,
-  but die->unit groupby and KFold-by-position are invariant to the relabel, and the
-  UNIT order is preserved via units.npy, so CV folds and OOF RMSE match the
-  self-preprocessing path byte-for-byte. Precomputed workers are a clean continuation
-  / A-B of the same study.
+  Runs the EXACT preprocessing of zit_pp.load_preprocessed_data (single source of
+  truth for all 4 ZIT combos: same PP_FIXED, cleaning.py canonical spatial impute,
+  same CLIP_Y_EXTREME). uid is relabelled str->int code, but die->unit groupby and
+  KFold-by-position are invariant to the relabel, and the UNIT order is preserved via
+  units.npy, so CV folds and OOF RMSE match the self-preprocessing path byte-for-byte.
+  Precomputed workers are a clean continuation / A-B of the same study.
 
 RUN
   python 3_modeling/01_zit/00_precompute_pp.py
-  python 3_modeling/01_zit/00_precompute_pp.py --name bag_zit_pp --no-clip-y-extreme
+  python 3_modeling/01_zit/00_precompute_pp.py --name zit_pp --no-clip-y-extreme
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -57,32 +55,27 @@ for _sub in ["2_preprocessing", "3_modeling"]:
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+# zit_pp.py(공용 PP 로더)를 normal import 하기 위해 이 스크립트 폴더(01_zit)도 path에 추가
+_SELF_DIR = Path(__file__).resolve().parent
+if str(_SELF_DIR) not in sys.path:
+    sys.path.insert(0, str(_SELF_DIR))
+
 from utils.config import DATA_DIR, KEY_COL, TARGET_COL  # noqa: E402
-
-WORKER_PATH = PROJECT_ROOT / "3_modeling" / "01_zit" / "02_bag_zit_parallel_hpo.py"
-
-
-def _load_worker_module():
-    """Import the parallel-HPO worker by file path (its name starts with a digit)."""
-    spec = importlib.util.spec_from_file_location("bagworker", WORKER_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+import zit_pp  # noqa: E402  (01_zit/zit_pp.py — 4조합 공통 전처리, cleaning.py 정본)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Precompute BagZIT preprocessing -> single mmap .npy.")
-    ap.add_argument("--name", default="bag_zit_pp",
+    ap = argparse.ArgumentParser(description="Precompute ZIT preprocessing -> single mmap .npy.")
+    ap.add_argument("--name", default="zit_pp",
                     help="output subfolder under 0_data/precomputed/")
     ap.add_argument("--no-clip-y-extreme", action="store_true",
                     help="match the worker's --no-clip-y-extreme (default: clip on, same as worker default)")
     a = ap.parse_args()
 
-    m = _load_worker_module()
-
-    # Reuse the worker's exact preprocessing (PP_FIXED + median patch + clip).
-    wargs = argparse.Namespace(no_clip_y_extreme=a.no_clip_y_extreme)
-    x_train, uid_die_str, y_unit_s, y_die, feat = m.load_preprocessed_data(wargs)
+    # Reuse the shared ZIT preprocessing (PP_FIXED + clip, cleaning.py canonical impute).
+    x_train, uid_die_str, y_unit_s, y_die, feat = zit_pp.load_preprocessed_data(
+        clip_y_extreme=not a.no_clip_y_extreme
+    )
 
     x_train = np.ascontiguousarray(x_train, dtype=np.float64)
     n_dies, F = x_train.shape
@@ -125,11 +118,11 @@ def main() -> None:
         "units_layout": {"uid_code_col": 0, "y_unit_col": 1},
         "dtype": "float64",
         "clip_y_extreme": not a.no_clip_y_extreme,
-        "pp_fixed": m.PP_FIXED,
+        "pp_fixed": zit_pp.PP_FIXED,
         "key_col": KEY_COL,
         "target_col": TARGET_COL,
         "fingerprint_nansum_stride101": fingerprint,
-        "source_worker": WORKER_PATH.name,
+        "source": "01_zit/zit_pp.py::load_preprocessed_data (cleaning.py canonical)",
         "reconstruct": ("x=pp[:,:F]; uid_die=pp[:,F].astype(int64); y_die=pp[:,F+1]; "
                         "y_unit_s=pd.Series(units[:,1], index=units[:,0].astype(int64))"),
     }

@@ -8,7 +8,7 @@ HPO (Optuna) + Best Trial Refit + 산출물 저장.
 - refit_best: best HP로 n_folds(기본 5)-fold 재학습 → die-level OOF / val / test 예측 (val·test는 fold 평균) 생성. ZITboost면 π·μ도 함께.
 - save_artifacts: refit 결과를 디스크에 저장 (fold_models.pkl + best_params.json + die/unit CSV 6개), postprocess 튜닝도 옵션.
 - run_clf_hpo / refit_clf_best / save_clf_artifacts: Two-Stage Stage 1(분류) 버전. objective = unit RMSE(unit평균확률 × E[Y|Y>0]).
-- narrow_around / sample_from_space / enqueue_anchor: anchor(1차 best HP) 주변으로 좁힌 탐색 공간 만들기 + 첫 trial 강제 헬퍼.
+- sample_from_space: 탐색공간 dict({type,low,high,log/choices})를 trial.suggest_*로 일괄 샘플링 (ts_reverse 등 dict 기반 공간용).
 
 부가 기능 키워드:
 - extra_feature_* : reg 입력 X 뒤에 die-level 컬럼 1개를 더 붙임 (예: "1-π" 컬럼).
@@ -38,7 +38,12 @@ from sklearn.model_selection import KFold
 from utils.config import SEED, KEY_COL, TARGET_COL
 
 from . import models as _models
-from . import scaler as _scaler
+
+# enet만 스케일링 필요(트리 계열은 RobustScaler가 결과를 안 바꿈 → pass-through).
+# 변환 자체(median/IQR)는 아래 objective/refit에 fold-local 인라인으로 구현돼 있고,
+# 여기선 "어떤 모델이 스케일링을 켜는가"라는 모델링 게이트만 둔다.
+# (구 modules/scaler.py 흡수 — 스케일링 변환 정본은 2_preprocessing/scaling.py)
+_SCALING_REQUIRED = frozenset({"enet"})
 
 
 # ------------------------------------------------------------
@@ -290,7 +295,7 @@ def run_hpo(
             X_vl       = X_full[vl_mask]
 
             # enet이면 이 fold의 train 기준으로 RobustScaler 통계량(median/IQR)을 잡아 → 이 fold holdout + 외부 val + 외부 test 전부에 동일 적용
-            if _scaler.needs_scaling(model_name):
+            if model_name in _SCALING_REQUIRED:
                 med = np.median(X_tr, axis=0)
                 q75 = np.quantile(X_tr, 0.75, axis=0)
                 q25 = np.quantile(X_tr, 0.25, axis=0)
@@ -361,7 +366,7 @@ def run_hpo(
     elif enqueue_trials:
         print(f"[enqueue skip] 기존 trial {len(study.trials)}개 — resume 모드")
 
-    if _scaler.needs_scaling(model_name):
+    if model_name in _SCALING_REQUIRED:
         print(f"[scaler] {model_name} → fold-local RobustScaler 적용 "
               f"(매 fold train 기준 fit, holdout/val/test 동일 변환)")
 
@@ -533,7 +538,7 @@ def refit_best(
     fold_models = []
     fold_scalers = []   # enet 등: fold별 RobustScaler 통계량 보관 (pkl로 저장해 추론 시 재현)
 
-    if _scaler.needs_scaling(model_name):
+    if model_name in _SCALING_REQUIRED:
         print(f"[scaler] {model_name} → fold-local RobustScaler 적용 "
               f"(매 fold train 기준 fit, holdout/val/test 동일 변환)")
 
@@ -550,7 +555,7 @@ def refit_best(
         X_vl       = X_train_full[vl_mask]
 
         # enet: 이 fold의 train 기준 RobustScaler → val-fold/val/test 모두 같은 통계로 변환
-        if _scaler.needs_scaling(model_name):
+        if model_name in _SCALING_REQUIRED:
             med = np.median(X_tr, axis=0)
             q75 = np.quantile(X_tr, 0.75, axis=0)
             q25 = np.quantile(X_tr, 0.25, axis=0)
@@ -1227,78 +1232,11 @@ def save_clf_artifacts(
 
 
 # ------------------------------------------------------------
-# 탐색 범위 / anchor enqueue 헬퍼
+# 탐색공간 샘플링 헬퍼 (sample_from_space)
 # ------------------------------------------------------------
 
-def narrow_around(anchor, log_keys=None, int_keys=None, cat_keys=None,
-                  ratio=0.30, int_step_ratio=0.30):
-    """anchor(1차 best HP) dict → 그 주변으로 좁힌(±ratio) 탐색 범위 dict 자동 생성.
-
-    Parameters
-    ----------
-    anchor : dict[str, value] — 기준 HP. 값 타입(float/int/str)에 따라 처리 분기.
-    log_keys : set[str] or None — log-uniform으로 다룰 float 키. log 공간에서 ±ratio.
-    int_keys : set[str] or None — 정수형 키. 명시 안 하면 anchor 값이 int인 키를 자동 감지.
-    cat_keys : set[str] or None — categorical 키. 범위가 아니라 anchor 값 하나만 choices로.
-    ratio : float (default 0.30) — 연속형 ±폭 (0.30 → ±30%).
-    int_step_ratio : float (default 0.30) — 정수형 ±폭 비율 (최소 ±1).
-
-    Returns
-    -------
-    dict[str, dict] — 키별로
-        {'type':'float','low':..,'high':..,'log':bool} / {'type':'int','low':..,'high':..} / {'type':'cat','choices':[..]}
-    이 dict는 sample_from_space()에 넘겨 trial.suggest_*로 푼다.
-    """
-    log_keys = set(log_keys or [])
-    int_keys_explicit = set(int_keys or [])
-    cat_keys = set(cat_keys or [])
-    space = {}
-    for k, v in anchor.items():
-        if k in cat_keys:
-            space[k] = {"type": "cat", "choices": [v]}   # 고정값 1개
-            continue
-        # 정수 키 자동 감지 (명시된 int_keys 우선, bool은 제외, log_keys면 정수 취급 안 함)
-        is_int = (k in int_keys_explicit) or (
-            isinstance(v, (int, np.integer)) and not isinstance(v, bool)
-            and k not in log_keys
-        )
-        if is_int:
-            v_int = int(v)
-            step = max(1, int(round(abs(v_int) * int_step_ratio)))
-            space[k] = {
-                "type": "int",
-                "low":  max(1, v_int - step) if v_int > 0 else v_int - step,   # 양수면 1 미만으로 안 내려감
-                "high": v_int + step,
-            }
-            continue
-        # float 키
-        v_f = float(v)
-        if k in log_keys:
-            if v_f <= 0:
-                raise ValueError(f"log_keys '{k}'는 양수만 가능 (anchor={v_f})")
-            # log 공간에서 ±log(1+ratio) → 곱셈적 ±ratio
-            log_v = np.log(v_f)
-            log_low = log_v - np.log(1.0 + ratio)
-            log_high = log_v + np.log(1.0 + ratio)
-            space[k] = {
-                "type": "float",
-                "low":  float(np.exp(log_low)),
-                "high": float(np.exp(log_high)),
-                "log":  True,
-            }
-        else:
-            spread = abs(v_f) * ratio
-            space[k] = {
-                "type": "float",
-                "low":  v_f - spread,
-                "high": v_f + spread,
-                "log":  False,
-            }
-    return space
-
-
 def sample_from_space(trial, space):
-    """narrow_around() 결과 dict → trial.suggest_*(...)를 일괄 호출해 sampled HP dict 반환."""
+    """탐색공간 dict({type,low,high,log/choices}) → trial.suggest_*(...) 일괄 호출 → sampled HP dict 반환."""
     out = {}
     for k, spec in space.items():
         t = spec["type"]
@@ -1312,16 +1250,3 @@ def sample_from_space(trial, space):
         else:
             raise ValueError(f"Unknown spec type {t!r} for key {k}")
     return out
-
-
-def enqueue_anchor(study, anchor):
-    """anchor를 study의 첫 trial로 강제 (1차 best HP를 trial 0에 박제) — study.enqueue_trial의 얇은 래퍼.
-
-    study.optimize() 호출 전에 부른다. RESUME 모드(이미 trial이 있는 study)면 다시 enqueue하지 않는다 (중복 방지).
-    anchor의 categorical 값은 search space의 choices 안에 있어야 한다.
-    """
-    if len(study.trials) == 0:
-        study.enqueue_trial(dict(anchor))
-        print(f"[enqueue] anchor 첫 trial로 강제 ({len(anchor)} HP)")
-    else:
-        print(f"[enqueue skip] 기존 trial {len(study.trials)}개 — resume 모드")

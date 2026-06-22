@@ -321,7 +321,7 @@ def _cfg_to_reg_fixed(cfg: dict) -> dict:
     return out
 
 
-TWEEDIE_LOSSES = {"tweedie"}   # 02_reg_single/strategy.md §4 룰: tweedie 시 target_transform 자동 OFF
+TWEEDIE_LOSSES = {"tweedie"}   # 룰: tweedie loss 시 target_transform 자동 OFF (분포 가정 충돌 회피)
 
 
 def _effective_target_transform(cfg: dict) -> str:

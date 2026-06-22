@@ -1,212 +1,81 @@
-# 04 — Stacking
+# 04 — Stacking (die-level)
 
-> 1차 `05_stacking_11base.ipynb` + `05b_stacking_full_with_nn.ipynb`를 **노트북 1개로 통합** (`stacking.ipynb`). POOL_PATHS만 재매핑하면 11base/full 둘 다 자동 탐지로 커버.
+> base 모델들의 **die-level 예측(`*_die.csv`)** 을 메타 학습해 unit RMSE를 최소화한다.
+> 노트북 `stacking.ipynb` + 패키지 `stacking_lib/`. (구 unit-level `stacking.ipynb` + squeeze v2/v3 계열은
+> die-level로 단일화하며 폐기 — 버전 표기 제거.)
 
-## 1. 노트북
+## 1. 구성
 
-| 노트북 | 1차 원본 | 비고 |
-|---|---|---|
-| `stacking.ipynb` | `05_stacking_11base.ipynb` + `05b_stacking_full_with_nn.ipynb` 통합 | POOL_PATHS 자동 탐지 + 옵션 토글 (A·D) + Optuna 통합 모드 (A_OPT) |
+| 파일 | 역할 |
+|------|------|
+| `stacking.ipynb` | 파이프라인 실행 노트북 (config → discover → bundle → search → refit → save) |
+| `stacking_lib/` | 패키지: `config / discovery / shap / meta / weights / search / aggregate / io / records` |
+| `build_shap_features.py` | base 1개의 die-level SHAP(`die_shap.npz`)를 생성 (`--base-rel`, `--zit-sub-model`, `--ts-sub-model`) |
+| `run_shap_all.py` | 전 base × 컴포넌트 배치로 `build_shap_features.py` 호출 (TASKS 목록) |
 
-## 2. 메타러너 (1차 그대로)
+## 2. 입력 계약 (producer ↔ stacking)
 
-`Pipeline(StandardScaler → ElasticNetCV)`
-- `alpha`: `np.logspace(-6, 0, 30)` 그리드
-- `l1_ratio`: `[0.1, 0.3, 0.5, 0.7, 0.9, 1.0]` 그리드
-- `KFold(n_splits=5, shuffle=True, random_state=SEED)` CV
-- `positive=False` (음수 weight 허용 — 일부 base가 corrector 역할)
-- `max_iter=20000`
-- 예측 후 `np.clip(0, None)` (health ≥ 0)
+`discovery.discover_models(cfg)`가 `4_output`을 **`rglob("oof_die.csv")`** 로 재귀 스캔해, die CSV 3종
+(`oof_die.csv` / `val_die.csv` / `test_die.csv`)을 **모두 가진 폴더만** base 후보로 채택한다.
+경로를 조립하지 않고 *스캔*하므로, fit 노트북이 §5.1 경로에 번들만 떨구면 자동으로 잡힌다.
 
-비교 baseline: SLSQP blending (`Σw=1, w≥0`)
+- **모델 태그** = 폴더 상대경로의 `"__".join` (예: `02_reg_single__lgbm`, `03_two_stage__default__clf__lgbm`).
+- **매칭 키** = `(ufs_serial, run_wf_xy)` — die 단위 unique. 한 행이라도 누락이면 `build_die_matrix`가 RuntimeError.
+- **clf die CSV는 `prob`(0~1)** → `discovery`가 `prob × y_pos_const`(=E[Y|Y>0], `best_params.json`에 박제)로
+  health 스케일 변환. `y_pos_const` 없는 clf 폴더는 자동 제외.
+- **category 자동 분류**: `clf` / `zit`(01_zit) / `reg_single`(02_reg_single) / `reverse` / `combined` / `ts_reg`(reg).
+  `cfg.include_combined` / `cfg.include_ts_reg` / `cfg.no_clf`로 포함 여부 토글.
 
-## 3. 옵션
+## 3. 메타 학습 (die-level)
 
-### 3.1 옵션 A — 핵심 피처 추가 (단순 토글, `USE_EXTRA`)
+- **GroupKFold by `ufs_serial`** — 같은 unit의 4 die가 train/val에 섞이면 leakage라 절대 금지.
+- 메타 학습기 5종: `ridge` / `nnls` / `mean` / `ENet`(ElasticNetCV) / `Combo`(Bag+ENet+NNLS) + `iso` 후처리(옵션).
+- 메타 raw 예측 → `np.clip(0, None)` → **die→unit 집계**(`aggregate` = `postprocess.tune_and_apply`):
+  `mean/median/max/min/trimmed_mean/weighted/Q25/Q75` 중 train OOF로 1등 선택, weighted는 position 가중 최적화.
+- 선택 기준 `cfg.select_by` ∈ {`oof`, `val`, `meta_cv_oof`}. `meta_cv_oof`는 GroupKFold OOF로 과적합을 덜 본다.
 
-| 변수 | 기본 | 설명 |
-|---|---|---|
-| `USE_EXTRA` | `False` | True 켜면 importance 상위 K 피처를 메타 입력에 합침 |
-| `EXTRA_K` | `20` | 상위 K 피처 |
-| `EXTRA_AGG` | `['mean', 'std']` | die→unit 집계 함수 list |
-| `IMPORTANCE_SOURCE` | `4_output/02_reg_single/lgbm` | `fold_models.pkl` 가진 안정적인 트리 base (1개) |
+## 4. SHAP X-stacking (옵션)
 
-**메커니즘**: 1개 source → fold importance 평균 → top K → die→unit 집계 → P_oof/val/test에 join.
+base 예측 행렬에 **die-level SHAP 컬럼**을 덧붙여 메타 입력을 확장한다.
 
-**한계**: 단일 모델 의존, gain importance 함정. 본격 실험은 §3.2 옵션 A_OPT 참조.
+1. `run_shap_all.py` 실행 → 각 base의 `shap_cache/<tag>/die_shap.npz` 생성
+   (npz에 `oof/val/test_run_wf_xy` 동봉 → `stacking_lib.shap`이 `(ufs_serial, run_wf_xy)` 키로 정렬 일치).
+2. `cfg.shap_caches`에 캐시 폴더 리스트 지정. `shap_top_k`(캐시당 상위 K feature), `shap_mode`
+   (`always_include` 항상 입력 / `searchable` subset 후보 등록), `shap_prefix_with_tag`(컬럼명 충돌 방지).
+3. 캐시가 없는 깨끗한 repo에선 `shap_caches=()`(비활성) — 노트북 셀 11에 새 §5.1 태그 예시를 주석으로 둠.
 
-### 3.2 옵션 A_OPT — Optuna 통합 importance (본격 실험)
+> SHAP 추출 제외: `enet`(선형, pred_contrib 미지원), `03_two_stage/default/reg`(Y>0 서브셋만 → OOF sparse).
+> ZIT는 내부 `lgb_pi_`/`lgb_mu_` 둘 다 `--zit-sub-model {pi,mu}`로 별도 추출.
 
-A안의 한계(단일 base 편향, K/agg 임의 고정)를 Optuna로 동시 탐색해 통합 importance 운영.
+## 5. config 주요 파라미터 (`StackingConfig`)
 
-#### 탐색 축
+| 파라미터 | 기본 | 의미 |
+|----------|------|------|
+| `oof_rmse_cutoff` | `0.006` | 후보 base의 oof_rmse 상한(안전 필터). plateau(~0.0057) 위로 완화 — run 후 실측 보고 조정 |
+| `min/max_subset_size` | `2 / 18` | 메타에 들어가는 base 개수 범위 |
+| `random_trials / local_seeds·steps / top_refit / combo_refit / optuna_trials` | — | 탐색 단계별 예산 |
+| `select_by` | `oof` | 탐색·선정 기준 metric |
+| `agg_methods / baseline_agg / position_method` | — | die→unit 집계 후보·fallback·position 최적화 |
+| `use_iso` | `True` | 메타 출력 IsotonicRegression 후처리 |
+| `shap_caches / shap_top_k / shap_mode / shap_prefix_with_tag` | — | SHAP X-stacking |
+| `known_strong_subset` | `()` | 강제 후보 base 태그(있을 때만). 앵커 해제로 비움 |
+| `output_subdir` | `04_stacking` | 결과 위치 `4_output/04_stacking/run_{ts}/` (버전 표기 없음) |
 
-| 축 | 후보 | 설명 |
-|---|---|---|
-| `w_shap` | `float [0, 1]` | gain vs SHAP 가중치 (`w_gain = 1 - w_shap`) |
-| `shap_lgbm`, `shap_xgb`, `shap_cb` | `float [0, 1]` 각각 | 3 base SHAP 혼합 비율 (정규화) |
-| `K` | `int [10, 100] step 10` | top-K 피처 수 |
-| `agg_{name}` | `bool` 7개 (`mean / std / max / min / range / Q25 / Q75`) | die→unit 집계 binary 다중선택 |
+## 6. 실행 순서
 
-#### 사전 신호 (gain × 3 + SHAP × 3)
+1. `01_zit` / `02_reg_single` / `03_two_stage`(clf·reg·combine·reverse) fit 노트북으로 **base die CSV 번들** 생성.
+2. (옵션) `python 3_modeling/04_stacking/run_shap_all.py` → `shap_cache/<tag>/die_shap.npz`.
+3. `stacking.ipynb` 실행: config(셀 5) → `discover_models`(셀 7) → (옵션 SHAP 셀 11) →
+   `build_array_bundle`(셀 13) → `run_search_stages`(셀 18) → `run_refit_stage`(셀 20) → `io.save_outputs`(셀 22).
+4. 결과: `4_output/04_stacking/run_{ts}/` (`summary.csv`, `best_weights.json`, 메타 산출물).
 
-- **gain importance** (3 base): `02_reg_single/{lgbm, xgb, catboost}`의 `fold_models.pkl`에서 fold별 평균 → 컬럼 정규화 (`/sum`) → 3개 평균 = `gain_score`
-- **SHAP importance** (3 base): TreeExplainer로 fold별 `|shap|` 평균 → 정규화 → csv 캐시. **사전 1회 계산 필수** (§3.4 참조)
+## 7. 산출물 (`run_{ts}/`)
 
-#### Trial별 통합
+- `summary.csv` — 전 record(fast/refit)의 die/unit/val/test RMSE + 집계 방식 + tag.
+- `best_weights.json` — 최종 선정 메타의 base/extra 구성 + 학습기 가중치 박제.
+- `summary.json` — config + SHAP 메타 + 선정 결과.
 
-```
-shap_score = (s_lgbm·shap_lgbm + s_xgb·shap_xgb + s_cb·shap_cb) / Σs
-final_imp  = w_gain·gain_score + w_shap·shap_score
-top_feats  = final_imp.nlargest(K).index
-extra_unit = die→unit aggregate(top_feats, aggs)
-```
+## 8. 대용량 바이너리 (git 제외)
 
-→ `P_oof_full = P_oof_base.join(extra_unit)` → ElasticNetCV → val RMSE 반환.
-
-#### Sampler/Pruner
-
-- `TPESampler(seed=None, multivariate=True, group=True)` — strategy_common §4
-- `MedianPruner(n_warmup_steps=10)` — strategy_common §4
-- `n_trials=100~200`, `timeout=None`
-
-### 3.3 옵션 D — Zero clip 후처리 (`USE_ZERO_CLIP`)
-
-| 변수 | 기본 | 설명 |
-|---|---|---|
-| `USE_ZERO_CLIP` | `False` | True 켜면 zero clip 탐색 + val 검증 |
-| `ZERO_CLIP_GRID` | `np.arange(0.001, 0.016, 0.001)` | 후보 th 1e-3 ~ 1.5e-2 step 1e-3 |
-
-**메커니즘** (strategy_common §12 원칙 따름):
-1. train OOF에서 best th 탐색 (RMSE 최소)
-2. val 적용 후 비교
-3. **val 개선되면 채택** (`stack_oof / stack_val / stack_test` 덮어씀)
-4. **개선 없거나 악화 시 미적용** (원본 stack 유지)
-
-채택 결과는 meta.json `options.zero_clip_applied`, `zero_clip_best_th`, `rmse_pre_zero_clip`에 기록.
-
-### 3.4 SHAP 캐시 사전 준비 (옵션 A_OPT 전용)
-
-옵션 A_OPT 사용 전 **SHAP 캐시를 stacking 노트북 안에서 1회 생성**한다. 04_stacking 책임 범위로 묶어 base 노트북(02_reg_single)은 SHAP을 모르도록 분리.
-
-#### 위치
-
-```
-4_output/04_stacking/_cache/
-  shap_lgbm.csv      # columns: feature, shap_score
-  shap_xgb.csv
-  shap_catboost.csv
-```
-
-#### 생성 로직 (cell-shap-cache, cell-extra 직전 신규 셀)
-
-```python
-SHAP_SOURCES = {
-    'lgbm':     '02_reg_single/lgbm',
-    'xgb':      '02_reg_single/xgb',
-    'catboost': '02_reg_single/catboost',
-}
-SHAP_CACHE_DIR = '4_output/04_stacking/_cache/'
-os.makedirs(SHAP_CACHE_DIR, exist_ok=True)
-
-for name, src in SHAP_SOURCES.items():
-    cache_path = os.path.join(SHAP_CACHE_DIR, f'shap_{name}.csv')
-    if os.path.exists(cache_path):
-        continue   # 캐시 있으면 skip
-    # fold_models.pkl 로드 → TreeExplainer → fold별 |shap| 평균 → 정규화 → csv
-    ...
-```
-
-#### 비용
-
-- 첫 실행: **30~60분** (lgbm + xgb + catboost 각 fold 5개 × 26K row)
-- 두 번째 이후: **0초** (csv 로드)
-- 1차 백업으로 검증 시: `IMPORTANCE_SOURCE`만 `모델링_이전자료/4_output_이전자료/final/reg_only/{model}` 임시 변경
-
-#### base 추가/변경 시
-
-- 02_reg_single 모델 재학습 → 해당 csv 수동 삭제 → stacking 다음 실행 시 자동 재계산
-- 또는 base 모델 변경 없이 stacking만 재실험 → 캐시 그대로 재사용 (비용 0)
-
-### 3.5 Segment 분해 진단 (cell-segment, cell-summary 직전 신규 셀)
-
-전체 val RMSE는 zero-inflated 환경에서 noise를 가림. **Y=0 / Y>0 분해 출력 필수** (사용자 메모리 정책 — `평가 기준 정책`).
-
-```python
-seg_y0   = (y_val == 0)
-seg_ypos = (y_val > 0)
-print(f'Y=0 RMSE: {_rmse(stack_val[seg_y0],   y_val[seg_y0]):.6f}  (n={seg_y0.sum()})')
-print(f'Y>0 RMSE: {_rmse(stack_val[seg_ypos], y_val[seg_ypos]):.6f}  (n={seg_ypos.sum()})')
-```
-
-전체 val=0.005701 plateau여도 **Y>0에서 0.001 개선**이면 진짜 효과. 반대면 trade-off → 가중치/source 재조정 신호.
-
-meta.json `stacking.segment_rmse`에 `{y0, ypos}` 별 RMSE 기록.
-
-### 3.6 OUT_DIR 옵션 태그
-
-옵션 조합으로 디렉토리 자동 분리 → 같은 노트북 여러 번 돌려 비교 가능:
-
-| `USE_EXTRA` | `USE_OPTUNA_EXTRA` | `USE_ZERO_CLIP` | `EXP_TAG` |
-|---|---|---|---|
-| F | F | F | `base` |
-| T | F | F | `extra_K20_mean_std` |
-| F | T | F | `optuna_extra` |
-| F | F | T | `zclip` |
-| T | F | T | `extra_K20_mean_std_zclip` |
-| F | T | T | `optuna_extra_zclip` |
-
-`USE_OPTUNA_EXTRA=True` 시 `USE_EXTRA`는 자동 OFF (Optuna가 K/agg/SHAP 모두 탐색).
-
-## 4. 신규 환경 호환
-
-### 4.1 환경 셋업 셀
-- `try/except google.colab` 분기 + `GDRIVE_CODE_ID` / `GDRIVE_DATASET_ID` (이미 신규 패턴)
-- 로컬: `%run ../setup.py`
-
-### 4.2 POOL_PATHS
-
-미러링 정책(strategy_common §17) 따라 신규 경로로 매핑. 자동 탐지 로직은 그대로 — POOL_PATHS에 등록된 base 중 산출물 있는 것만 사용, 누락 모델 자동 제외.
-
-| 풀 | 경로 |
-|---|---|
-| `zit_only` | `01_zit/zit_only/` |
-| `bag_zit` | `01_zit/bag_zit/` |
-| `reg__{model}` | `02_reg_single/{model}/` (lgbm/xgb/catboost/et/enet) |
-| `grid__{clf}_x_{reg}` | `03_two_stage/default/combined/{clf}_x_{reg}/` |
-
-### 4.3 출력 경로 — strategy_common §17 따름
-
-신규 정책: 모델링 폴더와 동일한 깊이로 미러링, `final` 한 단계 제거.
-
-→ 본 노트북 OUT_DIR: `4_output/04_stacking/{exp_tag}/`
-
-## 5. 실행 순서
-
-### 5.1 첫 실행 (베이스라인)
-1. 01_zit, 02_reg_single, 03_two_stage 모든 base 산출물 완료
-2. **POOL_PATHS** 신규 경로로 재매핑 (cell-pool)
-3. **base 1회 (옵션 모두 OFF, USE_EXTRA=False, USE_OPTUNA_EXTRA=False, USE_ZERO_CLIP=False)** → 기준선 확보
-
-### 5.2 옵션 A_OPT 본격 실험 (Optuna 통합)
-1. `USE_OPTUNA_EXTRA = True`, `OPTUNA_N_TRIALS = 100` 또는 `200`
-2. 첫 실행 시 SHAP 캐시 자동 생성 (30~60분, §3.4)
-3. Optuna trial (50분 ~ 2h, §3.2)
-4. Best trial 재학습 → segment 분해 진단 (§3.5)
-5. `4_output/04_stacking/optuna_extra/` 결과 + base 비교
-
-### 5.3 D안 + 조합
-- A_OPT의 best 결과에 `USE_ZERO_CLIP=True` 얹어 zero clip 효과 검증
-- 결과 폴더 자동 분리 (`optuna_extra_zclip/`)
-
-## 6. 산출물 (옵션별 디렉토리)
-
-각 `4_output/04_stacking/{exp_tag}/` 안에:
-- `oof_unit_stack.csv` / `val_unit_stack.csv` / `test_unit_stack.csv` (ElasticNetCV)
-- `oof_unit_blend.csv` / `val_unit_blend.csv` / `test_unit_blend.csv` (SLSQP baseline)
-- `single_base_rmse.csv` / `residual_corr_oof.csv` / `residual_corr_test.csv` / `comparison.csv`
-- `meta.json` (`options`, `meta_learner`, `blending_slsqp`, `stacking`, `delta_vs_11base`, `segment_rmse`)
-- A_OPT 모드 추가: `optuna_*.db`, `weight_K_agg_grid.csv`, `extra_importance.csv`, `best_extra_config.json`
-
-영구 캐시 (옵션별 공유):
-- `4_output/04_stacking/_cache/shap_{lgbm,xgb,catboost}.csv` (한 번 만들면 재사용)
+- `shap_cache/*/die_shap.npz` (SHAP 입력) · `_prev/*.log` (run 로그) → `.gitignore` 등록(추적 제외).
+  코드는 그대로 동작하되 repo엔 올리지 않는다.

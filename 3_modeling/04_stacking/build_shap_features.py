@@ -6,13 +6,13 @@ LGBM (또는 호환 트리 모델)의 fold_models.pkl을 그대로 활용해
 fold-aware OOF + fold-평균 val/test SHAP(pred_contrib)을 추출하고,
 die→unit 단위로 signed mean 집계해서 parquet으로 캐시한다.
 
-squeeze_extreme_v2.py가 base preds 위에 이 SHAP cols를 메타 입력으로 얹는다.
+stacking_lib.shap이 base preds 위에 이 SHAP cols를 메타 입력으로 얹는다.
 
 사용 예시
 --------
     python build_shap_features.py
-    python build_shap_features.py --base-rel 02_reg_single/lgbm/hp/002 --top-k 50
-    python build_shap_features.py --base-rel 02_reg_single/lgbm/hp/002 --top-k 0   # top-K 선택 안 함 (전체 저장)
+    python build_shap_features.py --base-rel 02_reg_single/lgbm --top-k 50
+    python build_shap_features.py --base-rel 02_reg_single/lgbm --top-k 0   # top-K 선택 안 함 (전체 저장)
 
 검증
 ----
@@ -80,8 +80,8 @@ PP_FIXED_TREE = {
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--base-rel", default="02_reg_single/lgbm/hp/002",
-                   help="OUTPUT_DIR 기준 base 모델 폴더. 기본: lgbm/hp/002")
+    p.add_argument("--base-rel", default="02_reg_single/lgbm",
+                   help="OUTPUT_DIR 기준 base 모델 폴더. 기본: 02_reg_single/lgbm")
     p.add_argument("--out-dir", default=None,
                    help="캐시 저장 폴더. 기본: 3_modeling/04_stacking/shap_cache/<base-tag>")
     p.add_argument("--top-k", type=int, default=50,
@@ -271,6 +271,10 @@ def main():
     seed_kfold          = int(bp.get("study_meta", {}).get("seed_kfold", args.seed_kfold))
     n_folds             = int(bp.get("n_folds", args.n_folds))
     eff_pp              = bp["effective_pp_params"]
+    if eff_pp is None:
+        # 리팩토링 후 PP가 zit_pp.PP_FIXED로 통일되며 fit이 effective_pp_params=None을 기록한다.
+        # 학습 때 실제로 쓰인 고정 PP(= PP_FIXED_TREE, zit_pp.PP_FIXED와 동일)로 재현한다.
+        eff_pp = dict(PP_FIXED_TREE)
     objective           = bp["best_params_resolved"].get("objective", "regression")
     print(f"[base meta] objective={objective}  n_folds={n_folds}  seed_kfold={seed_kfold}  "
           f"n_features={len(expected_feat_names)}  n_units_train={expected_n_units}")
@@ -334,7 +338,7 @@ def main():
     if feat_cols_clean != expected_feat_names:
         missing = [f for f in expected_feat_names if f not in set(feat_cols_clean)]
         if missing:
-            # raw/001 스타일: preprocessing이 걸러낸 피처를 원본 xs에서 복원
+            # preprocessing이 걸러낸 피처를 원본 xs에서 복원
             # preprocess.run()은 xs를 수정하지 않으므로 xs.loc[xs_train.index] 정렬 가능
             recoverable   = [f for f in missing if f in xs.columns]
             unrecoverable = [f for f in missing if f not in xs.columns]

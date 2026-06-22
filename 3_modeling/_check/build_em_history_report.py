@@ -18,11 +18,11 @@ OUT_DIR = ROOT / "3_modeling" / "_check"
 CSV_OUT = OUT_DIR / "zit_em_history_report.csv"
 MD_OUT = OUT_DIR / "zit_em_history_report.md"
 
+# §5.1 의미 폴더명: 4_output/01_zit/<combo>/best/fold_models.pkl (실험번호/run_타임스탬프 없음).
+# 아직 fit을 안 돌렸으면 파일이 없어 graceful skip 된다(main의 not pkl_path.exists()).
 REPRESENTATIVE_PKLS = [
-    ROOT / "4_output" / "01_zit" / "zit_only" / "seed_sweep_hp003_iso_v2" / "run_0529_144121" / "best" / "fold_models.pkl",
-    ROOT / "4_output" / "01_zit" / "zit_only" / "seed_sweep_hp003_eql_iso_v2" / "run_0607_145704" / "best" / "fold_models.pkl",
-    ROOT / "4_output" / "01_zit" / "bag_zit" / "seed" / "run_0605_193735" / "best" / "fold_models.pkl",
-    ROOT / "4_output" / "01_zit" / "bag_zit" / "seed_sweep_p4_005t26_tau088" / "run_0605_194155" / "best" / "fold_models.pkl",
+    ROOT / "4_output" / "01_zit" / combo / "best" / "fold_models.pkl"
+    for combo in ("zit_only_pearson", "zit_only_eql", "bag_zit_pearson", "bag_zit_eql")
 ]
 
 
@@ -71,16 +71,9 @@ def _load_histories(pkl_path: Path):
 
 
 def _label_for(path: Path) -> str:
+    # 4_output/01_zit/<combo>/best/fold_models.pkl → combo 폴더명을 라벨로(§5.1 의미 이름).
     parts = path.relative_to(ROOT).parts
-    if "bag_zit" in parts:
-        if "seed_sweep_p4_005t26_tau088" in parts:
-            return "BagZIT-EQL final param4"
-        return "BagZIT seed best"
-    if "zit_only" in parts:
-        if "seed_sweep_hp003_eql_iso_v2" in parts:
-            return "ZIT-only EQL"
-        return "ZIT-only"
-    return path.parent.parent.name
+    return parts[2] if len(parts) > 2 else path.parent.parent.name
 
 
 def _values(history, key):
