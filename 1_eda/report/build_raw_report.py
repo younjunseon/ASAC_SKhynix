@@ -205,7 +205,7 @@ KEY_FINDINGS = [
     ("단일 Feature 무력", "max |r| = 0.037. 어떤 단일 feature도 target을 예측할 수 없음"),
     ("CV 집계가 핵심", "Die→Unit 변동계수(CV) max|r|=0.147로 mean(0.037)의 4배. 핵심 집계 통계"),
     ("비선형 관계 존재", "Spearman(0.087)이 Pearson(0.037)의 2.3배. MI가 별도 feature 발굴"),
-    ("Feature Interaction 유효", "전체 조합 MI 분석: 단일 max 0.0314 → interaction max 0.036. 430,970개(29.3%)가 단일보다 높음"),
+    ("Feature Interaction 유효", "전체 조합 MI 분석: 단일 max 0.019 → interaction max 0.026. 493,253개(33.6%)가 단일보다 높음"),
     ("Lot 효과 강력", "lot별 불량률 10~45% 차이. 정규화는 역효과 → lot 통계를 feature로 활용"),
     ("공간 패턴 제한적", "radial distance, zone, NNR 잔차 모두 무효. die_x/y의 집계 통계만 활용"),
     ("Y=0 내부 이질성", "K=2 클러스터링 → 72%가 Y>0과 유사 프로파일. 잠재 불량 후보"),
