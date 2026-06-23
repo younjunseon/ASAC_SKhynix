@@ -22,8 +22,8 @@ ZIT 전처리 결과를 mmap으로 공유 가능한 단일 numeric .npy로 미�
   units.npy로 보존되므로, CV fold와 OOF RMSE가 자체 전처리 경로와 byte 단위로 일치한다.
 
 실행
-  python 3_modeling/01_zit/00_precompute_pp.py
-  python 3_modeling/01_zit/00_precompute_pp.py --name zit_pp --no-clip-y-extreme
+  python 3_modeling/01_zit/precompute_pp.py
+  python 3_modeling/01_zit/precompute_pp.py --name zit_pp --no-clip-y-extreme
 """
 
 from __future__ import annotations

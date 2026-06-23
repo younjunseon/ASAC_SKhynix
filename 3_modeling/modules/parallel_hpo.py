@@ -12,7 +12,7 @@ modules/parallel_hpo.py — 전 트랙(zit / reg / ts) 공용 병렬 HPO 하네�
   그대로 둔다 — callback 과추상화 없이 트랙 고유 로직(tau_pi / proba·y_pos_const / Y>0
   마스크)이 그 파일에 보이게 한다.
 - N개 독립 프로세스가 하나의 Optuna SQLite study(RDBStorage)를 공유하고, pp.npy를
-  mmap(read-only)으로 RAM 공유한다. (00_precompute_pp.py가 1회 생성)
+  mmap(read-only)으로 RAM 공유한다. (precompute_pp.py가 1회 생성)
 - 워커는 Optuna DB 기록만. refit·후처리·산출물 저장은 fit.ipynb에서 별도(modules.hpo).
 - 모든 워커가 넓은 탐색 공간을 **처음부터** 탐색한다.
 
@@ -70,7 +70,7 @@ from optuna.storages import RDBStorage, RetryFailedTrialCallback  # noqa: E402
 
 from utils.config import OUTPUT_DIR  # noqa: E402
 
-# 전 트랙이 공유하는 단일 precompute 디렉토리 (00_precompute_pp.py --name zit_pp).
+# 전 트랙이 공유하는 단일 precompute 디렉토리 (precompute_pp.py --name zit_pp).
 DEFAULT_PRECOMPUTED_DIR = PROJECT_ROOT / "0_data" / "precomputed" / "zit_pp"
 
 
@@ -106,7 +106,7 @@ def add_common_args(
     parser.add_argument(
         "--precomputed-dir",
         default=str(DEFAULT_PRECOMPUTED_DIR),
-        help="Directory with precomputed pp.npy/units.npy (00_precompute_pp.py output).",
+        help="Directory with precomputed pp.npy/units.npy (precompute_pp.py output).",
     )
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--n-jobs", type=int, default=default_n_jobs)
@@ -175,7 +175,7 @@ def make_study(args, db_path, study_meta: dict | None = None) -> optuna.Study:
 
 
 # ------------------------------------------------------------
-# 3) 공용 pp.npy mmap 로더 (00_precompute_pp.py 산출물)
+# 3) 공용 pp.npy mmap 로더 (precompute_pp.py 산출물)
 # ------------------------------------------------------------
 def load_pp_mmap(precomputed_dir):
     """precompute한 단일 numeric 행렬을 mmap-load.
@@ -193,7 +193,7 @@ def load_pp_mmap(precomputed_dir):
         raise FileNotFoundError(
             f"Precomputed matrix not found: {pp_path}\n"
             f"  Run the precompute step first:\n"
-            f"    python 3_modeling/01_zit/00_precompute_pp.py"
+            f"    python 3_modeling/01_zit/precompute_pp.py"
         )
     manifest = {}
     mpath = d / "manifest.json"

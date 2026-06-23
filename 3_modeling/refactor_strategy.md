@@ -30,7 +30,7 @@
 │                                #  └ parallel_hpo.py 신설(전 트랙 공용 HPO 하네스 §1.1). scaler.py·pp_hpo.py·modules.zip 삭제(scaler→scaling.py 흡수)
 ├── 0_baseline/                  # (작동 보장 대상) 10모델 비교 + §4e EMT 흡수(§4d zit_gu 제거)
 ├── 01_zit/
-│   ├── 00_precompute_pp.py      # (유지) CSV→pp.npy 사전계산 — 전 트랙 공용 (zit_pp 사용)
+│   ├── precompute_pp.py      # (유지) CSV→pp.npy 사전계산 — 전 트랙 공용 (zit_pp 사용)
 │   ├── zit_pp.py                # 신설: 공용 PP 로더 (cleaning.py 정본, median 패치 폐기) §2.1
 │   ├── zit_fit_lib.py           # 신설: fit 4조합 공유 calibration/serialization 1차함수 (isotonic/tail grid 등) §2.6
 │   ├── trial_to_json.py         # (유지) study trial → param json — 공용
@@ -76,12 +76,12 @@
 | 단계 | 동작 |
 |------|------|
 | **원천 입력** | **CSV** (`compet_xs_data.csv` 등) — 진실의 원천 |
-| **사전계산** | `00_precompute_pp.py`(→`zit_pp.load_preprocessed_data`)가 CSV를 전처리해 `pp.npy`(float64 `(n_dies, F+2)`)로 1회 저장. 4트랙이 동일 PP → **pp.npy 1벌을 전 트랙이 mmap 공유**. npy = 빌드 캐시, git 추적 제외 |
+| **사전계산** | `precompute_pp.py`(→`zit_pp.load_preprocessed_data`)가 CSV를 전처리해 `pp.npy`(float64 `(n_dies, F+2)`)로 1회 저장. 4트랙이 동일 PP → **pp.npy 1벌을 전 트랙이 mmap 공유**. npy = 빌드 캐시, git 추적 제외 |
 | **워커** | N개 독립 프로세스가 `np.load(mmap_mode='r')`로 **행렬 1벌만 RAM 공유** + **1개 Optuna SQLite study 공유**(`--worker-id w1..wN`) |
 | **스레드** | 프로세스당 BLAS/numpy 스레드 1로 캡 (오버서브스크립션 방지) |
 | **역할 분리** | 워커는 Optuna DB 기록만. refit·후처리·산출물 저장은 `fit.ipynb`에서 별도 |
 
-- **입력 정책**: "**입력의 진실은 CSV, `pp.npy`는 빌드 캐시**". 재현은 `python 00_precompute_pp.py` 한 줄. 레포에는 CSV/코드만, 이진 캐시는 비추적.
+- **입력 정책**: "**입력의 진실은 CSV, `pp.npy`는 빌드 캐시**". 재현은 `python precompute_pp.py` 한 줄. 레포에는 CSV/코드만, 이진 캐시는 비추적.
 - **PP 통일**: clf의 `y_die_bin`·`y_pos_const`, ts의 Y>0 subset은 모두 같은 pp.npy(+units.npy)에서 파생 → 트랙별 별도 전처리 불필요.
 - **권장 워커 수 = 3** (`3 × n_jobs ≤ 물리 스레드`). 구 mmap 헤더의 7워커는 과다 구독 → **3으로 표준화**.
 - **enqueue-anchor 제거**: `--enqueue-anchor`(옛 best 주입) + `*_ANCHOR` dict 모두 앵커 해제 원칙(§0-2)에 따라 삭제.
@@ -111,7 +111,7 @@
 
 → **작업 완료**:
 - `01_zit/zit_pp.py` 신설 — `PP_FIXED`(4조합 byte 동일) + `load_preprocessed_data(clip_y_extreme=True)`, cleaning.py 정본(패치 없음).
-- `00_precompute_pp.py`가 구 워커 동적 import(`spec_from_file`)를 폐기하고 `zit_pp`를 import. `pp.npy` 레이아웃(`[features|uid_code|y_die]`) 불변 → mmap 워커 `load_precomputed_data` 호환.
+- `precompute_pp.py`가 구 워커 동적 import(`spec_from_file`)를 폐기하고 `zit_pp`를 import. `pp.npy` 레이아웃(`[features|uid_code|y_die]`) 불변 → mmap 워커 `load_precomputed_data` 호환.
 - reg/ts 워커도 동일 PP라 `zit_pp`(또는 `parallel_hpo`)를 공용으로 쓴다.
 - 비-mmap 워커 2개는 fit 노트북 이관(§2 fit) 후 삭제. fit 노트북의 `_impute_spatial_median` 동적 로드도 `zit_pp` import로 교체.
 
@@ -366,7 +366,7 @@ v4의 base 입력 경로가 **옛 네이밍**(`01_zit/zit_only/`, `bag_zit/`)을
 ## 8. 작업 순서 (체크리스트)
 
 1. [x] **백업/.gitignore** — 구 `4_output`은 `리펙토링대상_모델링_아웃풋/`로 이동(사용자), 백업 폴더 + `preprocessing.zip` 추적 제외 (.gitignore 이미 `*.zip`/`*.db`/shap_cache 커버)
-2. [x] **zit_pp 공용 PP** — `01_zit/zit_pp.py` 신설(cleaning.py 정본, median 패치 폐기), `00_precompute_pp.py` 재배선 (§2.1)
+2. [x] **zit_pp 공용 PP** — `01_zit/zit_pp.py` 신설(cleaning.py 정본, median 패치 폐기), `precompute_pp.py` 재배선 (§2.1)
 3. [x] **scaler 정리** — `modules/scaler.py`·`pp_hpo.py` 제거(백업 이동), `hpo.py`의 게이트를 `_SCALING_REQUIRED` 인라인 상수로, `__init__.py` 도크스트링 갱신 (§6.3). e2e_hpo·enet은 `maybe_scale` 미사용(이미 `2_preprocessing/scaling.py` 사용) 확인
 4. [x] **공용 하네스** — `modules/parallel_hpo.py` 신설 (전 트랙 공용 HPO 보일러플레이트, §1.1)
 5. [x] **zit 4조합** — thin `hpo.py` 4 + fit 4(셀0/4만 차이, 나머지 byte-동일) 정리, `zit_objective.py` 공용 objective, eql 튜너 신설, 앵커 해제(wide), bag_zit_eql 단일 best화, `최종/` 승격. 비-mmap 워커 2개·`trial_to_json`·옛 노트북·copy 좀비·zit_et 정리 (§2)
@@ -383,7 +383,7 @@ v4의 base 입력 경로가 **옛 네이밍**(`01_zit/zit_only/`, `bag_zit/`)을
 16. [x] (추가, 2026-06-19) **부트스트랩 통일** — 17 노트북 첫 셀 단일 stub(code.zip 1개 + cwd 자동탐색 + runpy), dataset fetch를 setup.py로 이관 (§10.1)
 17. [x] (추가, 2026-06-19) **코드 번들 3→1** — `code.zip` 단일화(지원 .py 54개), Drive 동일 ID 새 버전 업로드. preprocessing.zip/modeling.zip 폐기 (§10.2)
 18. [x] (추가, 2026-06-19) **ROOT 버그 수정** — 4 zit fit `str(ROOT/…)`→`str(PROJECT_ROOT/…)` (runpy 전환 부작용) (§10.3)
-19. [x] (추가, 2026-06-19) **precompute 경로 통일** — `00_precompute_pp.py` 기본 `--name` `bag_zit_pp`→`zit_pp` + 디스크 폴더 rename, parallel_hpo와 일치 (§10.4)
+19. [x] (추가, 2026-06-19) **precompute 경로 통일** — `precompute_pp.py` 기본 `--name` `bag_zit_pp`→`zit_pp` + 디스크 폴더 rename, parallel_hpo와 일치 (§10.4)
 
 ---
 
@@ -426,6 +426,6 @@ v4의 base 입력 경로가 **옛 네이밍**(`01_zit/zit_only/`, `bag_zit/`)을
 
 ### 10.4 precompute 경로 통일 (`bag_zit_pp`→`zit_pp`)
 
-- 만드는 쪽 `00_precompute_pp.py`의 `--name` 기본값이 `bag_zit_pp`(bag 전용이던 시절 잔재)인데, 읽는 쪽 `parallel_hpo.DEFAULT_PRECOMPUTED_DIR`는 `zit_pp` → **경로 불일치**로 HPO가 mmap을 못 찾는 블로커. (코드 전체 표준은 로더 모듈명 `zit_pp.py`·parallel_hpo 모두 `zit_pp`)
-- **수정(A안)**: `00_precompute_pp.py` 기본 `--name` `bag_zit_pp`→`zit_pp`(+docstring 예시·헤더 문구), 디스크 폴더 `0_data/precomputed/bag_zit_pp/`→`zit_pp/` rename(pp.npy 461.9MB 재계산 0). 읽는 쪽(5 hpo.py가 의존하는 parallel_hpo)은 무수정.
-- 결과: 만드는/읽는 쪽 모두 `zit_pp`. **로컬**은 기존 npy 그대로 재사용(00pp 재실행 불필요), **Colab**은 `python 00_precompute_pp.py` 1회(기본값 zit_pp)로 생성 후 병렬 HPO.
+- 만드는 쪽 `precompute_pp.py`의 `--name` 기본값이 `bag_zit_pp`(bag 전용이던 시절 잔재)인데, 읽는 쪽 `parallel_hpo.DEFAULT_PRECOMPUTED_DIR`는 `zit_pp` → **경로 불일치**로 HPO가 mmap을 못 찾는 블로커. (코드 전체 표준은 로더 모듈명 `zit_pp.py`·parallel_hpo 모두 `zit_pp`)
+- **수정(A안)**: `precompute_pp.py` 기본 `--name` `bag_zit_pp`→`zit_pp`(+docstring 예시·헤더 문구), 디스크 폴더 `0_data/precomputed/bag_zit_pp/`→`zit_pp/` rename(pp.npy 461.9MB 재계산 0). 읽는 쪽(5 hpo.py가 의존하는 parallel_hpo)은 무수정.
+- 결과: 만드는/읽는 쪽 모두 `zit_pp`. **로컬**은 기존 npy 그대로 재사용(precompute_pp 재실행 불필요), **Colab**은 `python precompute_pp.py` 1회(기본값 zit_pp)로 생성 후 병렬 HPO.

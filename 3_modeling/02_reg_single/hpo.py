@@ -7,7 +7,7 @@ enet은 fold-local RobustScaler)는 이 파일에 명시적으로 둔다 (refact
 탐색 공간은 models.SEARCH_SPACES의 넓은 범위를 그대로 쓴다.
 
 실행 (PowerShell). 워커 3개 권장(3 × n_jobs ≤ 물리 스레드):
-  python 3_modeling/01_zit/00_precompute_pp.py                              # 1회: pp.npy(전 트랙 공용)
+  python 3_modeling/01_zit/precompute_pp.py                              # 1회: pp.npy(전 트랙 공용)
   python 3_modeling/02_reg_single/hpo.py --model lgbm --worker-id w1 --n-jobs 4 --end-at 2026-06-20T05:00 > w1.log 2>&1
   python 3_modeling/02_reg_single/hpo.py --model lgbm --worker-id w2 --n-jobs 4 --end-at 2026-06-20T05:00 > w2.log 2>&1
   python 3_modeling/02_reg_single/hpo.py --model lgbm --worker-id w3 --n-jobs 4 --end-at 2026-06-20T05:00 > w3.log 2>&1

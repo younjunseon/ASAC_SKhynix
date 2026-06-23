@@ -6,7 +6,7 @@ zit_only 와 차이: die 예측을 unit 단위로 **sum** 집계, fit에 `unit_i
 HP는 넓은 범위에서 탐색한다.
 
 실행 (워커 3개 권장):
-  python 3_modeling/01_zit/00_precompute_pp.py                                 # 1회: pp.npy
+  python 3_modeling/01_zit/precompute_pp.py                                 # 1회: pp.npy
   python 3_modeling/01_zit/bag_zit_pearson/hpo.py --worker-id w1 --n-jobs 4 --end-at 2026-06-20T05:00 > w1.log 2>&1
   ... w2, w3
 """

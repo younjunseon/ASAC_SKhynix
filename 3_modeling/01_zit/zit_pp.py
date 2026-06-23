@@ -12,7 +12,7 @@ monkeypatch했다.
 PP_FIXED · clip_y_extreme · add_meta_features(position_mode="raw", use_die_xy=True)는
 기존 워커와 100% 동일.
 
-소비처: 00_precompute_pp.py(mmap pp.npy 사전계산) + 각 조합의 hpo.py·fit.ipynb.
+소비처: precompute_pp.py(mmap pp.npy 사전계산) + 각 조합의 hpo.py·fit.ipynb.
 """
 from __future__ import annotations
 

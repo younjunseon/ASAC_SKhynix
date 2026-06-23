@@ -7,7 +7,7 @@ modules.parallel_hpo 하네스 + modules.models 분류 팩토리(get_clf_search_
 탐색 공간은 models.CLF_SEARCH_SPACES의 넓은 범위를 그대로 쓴다.
 
 실행 (워커 3개 권장):
-  python 3_modeling/01_zit/00_precompute_pp.py                                       # 1회: pp.npy
+  python 3_modeling/01_zit/precompute_pp.py                                       # 1회: pp.npy
   python 3_modeling/03_two_stage/default/clf/hpo.py --model lgbm --worker-id w1 --n-jobs 4 --end-at 2026-06-20T05:00 > w1.log 2>&1
   # --model {lgbm,xgb,catboost,et} — 모델마다 별도 study(ts_clf_{model}).
 """

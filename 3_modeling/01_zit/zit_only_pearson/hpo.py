@@ -6,7 +6,7 @@ objective(ZIT 고유: (1-π)μ → tau_pi 게이트 → die→unit mean)는 zit_
 HP는 넓은 범위에서 탐색한다.
 
 실행 (PowerShell). 워커 3개 권장(3 × n_jobs ≤ 물리 스레드):
-  python 3_modeling/01_zit/00_precompute_pp.py                                   # 1회: pp.npy 생성(전 트랙 공용)
+  python 3_modeling/01_zit/precompute_pp.py                                   # 1회: pp.npy 생성(전 트랙 공용)
   python 3_modeling/01_zit/zit_only_pearson/hpo.py --worker-id w1 --n-jobs 4 --end-at 2026-06-20T05:00 > w1.log 2>&1
   python 3_modeling/01_zit/zit_only_pearson/hpo.py --worker-id w2 --n-jobs 4 --end-at 2026-06-20T05:00 > w2.log 2>&1
   python 3_modeling/01_zit/zit_only_pearson/hpo.py --worker-id w3 --n-jobs 4 --end-at 2026-06-20T05:00 > w3.log 2>&1

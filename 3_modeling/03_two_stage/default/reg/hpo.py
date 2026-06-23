@@ -8,7 +8,7 @@ E[Y|Y>0,x] 예측"). 폴더 격리 우선 원칙(refactor_strategy.md §4)에 �
 탐색 공간은 models.SEARCH_SPACES의 넓은 범위를 그대로 쓴다.
 
 실행 (워커 3개 권장):
-  python 3_modeling/01_zit/00_precompute_pp.py                                       # 1회: pp.npy
+  python 3_modeling/01_zit/precompute_pp.py                                       # 1회: pp.npy
   python 3_modeling/03_two_stage/default/reg/hpo.py --model lgbm --worker-id w1 --n-jobs 4 --end-at 2026-06-20T05:00 > w1.log 2>&1
   # --model {lgbm,xgb,catboost,et,enet} — 모델마다 별도 study(ts_reg_{model}).
 """

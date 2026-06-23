@@ -8,7 +8,7 @@ HP는 넓은 범위에서 탐색한다.
 fit은 **단일 best** 하나만 쓴다.
 
 실행 (워커 3개 권장):
-  python 3_modeling/01_zit/00_precompute_pp.py                              # 1회: pp.npy
+  python 3_modeling/01_zit/precompute_pp.py                              # 1회: pp.npy
   python 3_modeling/01_zit/bag_zit_eql/hpo.py --worker-id w1 --n-jobs 3 --end-at 2026-06-20T05:00 > w1.log 2>&1
   ... w2, w3
 """
