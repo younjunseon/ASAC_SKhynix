@@ -62,7 +62,7 @@ def lgbm_space(trial, prefix=""):
             verbose=-1,
             device=DEVICE,
         )
-        # ★ 2차 신규: objective 탐색 (논문 2-2/2-5/2-6/2-7 근거)
+        # objective 탐색 (논문 2-2/2-5/2-6/2-7 근거)
         # zero-inflated + 비음수 타깃엔 Tweedie/Poisson이 MSE보다 우위일 수 있음.
         obj_choice = trial.suggest_categorical(
             f"{p}objective",
@@ -113,7 +113,7 @@ def rf_space(trial, prefix=""):
 
 
 # ═════════════════════════════════════════════════════════════
-# 2차 funnel 신규: ExtraTrees / LogReg-enet / ElasticNet space
+# ExtraTrees / LogReg-enet / ElasticNet space
 # ═════════════════════════════════════════════════════════════
 
 def et_space(trial, prefix=""):
@@ -234,9 +234,9 @@ def zitboost_space(trial, prefix=""):
 SEARCH_SPACES = {
     "lgbm":        lgbm_space,
     "rf":          rf_space,
-    "et":          et_space,             # ★ 2차: rf_space → et_space 교체 (bootstrap 축 추가)
-    "logreg_enet": logreg_enet_space,    # ★ 2차 신규
-    "enet":        enet_space,           # ★ 2차 신규
+    "et":          et_space,             # rf_space → et_space 교체 (bootstrap 축 추가)
+    "logreg_enet": logreg_enet_space,
+    "enet":        enet_space,
     "zitboost":    zitboost_space,       # ★ ZITboost (ZI-Tweedie + EM)
 }
 
@@ -299,7 +299,7 @@ PP_AGG_PRESET_IDX_CANDIDATES = list(range(len(AGG_PRESETS)))
 
 
 # ═════════════════════════════════════════════════════════════
-# 2차 funnel 신규 PP 후보 (IsoForest / LDS)
+# PP 후보 (IsoForest / LDS)
 #
 # Scaling(HybridScaler)과 Binarize는 옵튜나 탐색 X — 고정값(PP_SCALE_CONFIG /
 # PP_BINARIZE_CONFIG)으로만 사용. test.ipynb 4종 비교 결과 skew_threshold=5.0
@@ -399,9 +399,9 @@ def preprocessing_space(trial):
             ...
             # outlier (OUTLIER_KEYS, key에 'outlier__' prefix)
             "outlier__method": ..., "outlier__lower_pct": ..., ...
-            # ★ 2차 신규: IsoForest anomaly score ('iso__' prefix)
+            # IsoForest anomaly score ('iso__' prefix)
             "iso__iso_enabled": ..., "iso__iso_contamination": ..., ...
-            # ★ 2차 신규: LDS weight ('lds__' prefix)
+            # LDS weight ('lds__' prefix)
             "lds__lds_enabled": ..., "lds__lds_sigma": ..., ...
             # 집계
             "agg_preset_idx": int,
@@ -534,7 +534,7 @@ def split_pp_params(pp_params):
     """
     preprocessing_space 반환 dict를 전처리 함수들의 인자로 분배.
 
-    ★ 2차부터 6-tuple 반환 — binarize_args, iso_args, lds_args 추가.
+    6-tuple 반환 — binarize_args, iso_args, lds_args 추가.
     HybridScaler는 여전히 탐색 대상 아님 (PP_SCALE_CONFIG 고정).
 
     Returns

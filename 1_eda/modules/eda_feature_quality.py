@@ -1,5 +1,5 @@
 """
-EDA 모듈 2: Feature 품질 점검
+EDA 모듈: Feature 품질 점검
 노트북에서 import eda_feature_quality as fq 로 사용
 """
 import pandas as pd

@@ -5,8 +5,8 @@
 - lgbm: LightGBM (clf/reg)
 - rf: RandomForest (clf/reg)
 - et: ExtraTrees (clf/reg)
-- logreg_enet: LogisticRegression(penalty='elasticnet')  ★ 2차 신규 (clf 전용)
-- enet: ElasticNet                                       ★ 2차 신규 (reg 전용)
+- logreg_enet: LogisticRegression(penalty='elasticnet')  (clf 전용)
+- enet: ElasticNet                                       (reg 전용)
 
 사용법:
     from modules.model_zoo import create_model, fit_model, get_default_params

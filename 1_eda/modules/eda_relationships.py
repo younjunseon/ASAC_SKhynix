@@ -1,5 +1,5 @@
 """
-EDA 모듈 3: Feature-Target & Feature 간 관계 분석
+EDA 모듈: Feature-Target & Feature 간 관계 분석
 노트북에서 import eda_relationships as rel 로 사용
 """
 import pandas as pd

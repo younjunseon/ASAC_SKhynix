@@ -53,8 +53,8 @@ from .search_space import (
     split_pp_params,
     extract_pp_params_from_best,
     AGG_PRESETS,
-    PP_SCALE_CONFIG,        # ★ 2차: hybrid_scale 고정 설정
-    PP_BINARIZE_CONFIG,     # ★ 2차: binarize_degenerate 고정 설정
+    PP_SCALE_CONFIG,        # hybrid_scale 고정 설정
+    PP_BINARIZE_CONFIG,     # binarize_degenerate 고정 설정
 )
 from .aggregate import aggregate_die_to_unit
 from .feature_select import select_top_k, remove_zero_variance
@@ -286,7 +286,7 @@ def _run_clf_oof(pos_data, feat_cols, clf_params, model_name,
 
 
 # ═════════════════════════════════════════════════════════════
-# Isotonic calibration (★ 2차 신규)
+# Isotonic calibration
 # ═════════════════════════════════════════════════════════════
 def _apply_isotonic_calibration(clf_result_single, pos_data, label_col):
     """
@@ -326,7 +326,7 @@ def _apply_isotonic_calibration(clf_result_single, pos_data, label_col):
 
 
 # ═════════════════════════════════════════════════════════════
-# Multi-model 분류 OOF + Calibration + Soft voting (★ 2차 신규)
+# Multi-model 분류 OOF + Calibration + Soft voting
 # ═════════════════════════════════════════════════════════════
 def _run_clf_oof_multi(pos_data, feat_cols, clf_params_by_model, clf_models,
                        n_folds, early_stop, label_col, imbalance_method,
@@ -638,7 +638,7 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
     target_inverse_fn : callable, optional
         모델 예측 직후에 적용할 역변환 함수. target_transform_fn을 쓸 때 반드시 같이 지정.
         target_transformer_factory가 not None이면 무시된다.
-    sample_weight : array-like or None (★ 2차 신규)
+    sample_weight : array-like or None
         X_train과 같은 길이의 sample weight (LDS 가중치 등).
         fold tr_idx + (pos_tr / tr_keep) + inner_tr 인덱싱을 거쳐 fit에 전달.
         None이면 균등 가중치.
@@ -802,7 +802,7 @@ def _run_reg_oof(unit_data, feat_cols, reg_params, model_name,
 
 
 # ═════════════════════════════════════════════════════════════
-# Multi-model 회귀 OOF (★ 2차 신규) — LDS sample_weight + A4 주입 + 단순 평균 앙상블
+# Multi-model 회귀 OOF — LDS sample_weight + A4 주입 + 단순 평균 앙상블
 # ═════════════════════════════════════════════════════════════
 def _run_reg_oof_multi(unit_data, feat_cols, reg_params_by_model, reg_models,
                        n_folds, early_stop,
@@ -980,7 +980,7 @@ def _prepare_unit_data(pos_data, feat_cols, clf_result, cfg, agg_funcs):
         # NOTE: 이 모드에서 예측은 die 레벨. 최종 RMSE/CSV 출력 시
         #       unit별 평균 집계가 필요함 (rerun에서 처리)
         #
-        # ★ 2차: Ordinal(POSITION_COL) + OHE(p_1~p_4) 병행.
+        # Ordinal(POSITION_COL) + OHE(p_1~p_4) 병행.
         #   - 트리 모델(LGBM/ET): POSITION_COL 분할이 주력
         #   - 선형 모델(ElasticNet/LogReg-enet): p_1~p_4 독립 coef 활용
         #   두 인코딩 모두 feature로 제공하여 모델 타입 불문 대응.
@@ -1112,7 +1112,7 @@ def _sync_inmemory_to_sqlite(in_mem_storage, db_path, exp_id, verbose=True):
         except KeyError:
             pass  # study 없음 — 정상
         except Exception as _e:
-            print(f"⚠ optuna.delete_study 실패: {_e}")
+            print(f"optuna.delete_study 실패: {_e}")
         optuna.copy_study(
             from_study_name=exp_id,
             from_storage=in_mem_storage,
@@ -1410,7 +1410,7 @@ def run_e2e_optimization(
                 )
             _record_val_diagnostics(trial, y_val, reg_result["val_pred"])
         except Exception as _e:
-            print(f"⚠ val 진단 기록 실패 (objective): {_e}")
+            print(f"val 진단 기록 실패 (objective): {_e}")
 
         return oof_rmse_score
 
@@ -1641,7 +1641,7 @@ def rerun_best_trial(
         val_rmse_score = rmse(y_val, reg_result["val_pred"])
         print(f"Rerun Val RMSE: {val_rmse_score:.6f}  (참고용)")
     except Exception as _e:
-        print(f"⚠ rerun val RMSE 출력 실패: {_e}")
+        print(f"rerun val RMSE 출력 실패: {_e}")
 
     result = {
         "unit_data": unit_data,
@@ -1815,7 +1815,7 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
                        use_sampling, sample_frac,
                        protected_cols=None, ge_args=None):
     """
-    2차 funnel 전처리 파이프라인 — 1회 실행.
+    전처리 파이프라인 — 1회 실행.
 
     실행 순서 (strategy_2nd_preprocessing.md §7.1):
       1) cleaning
@@ -1905,7 +1905,7 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
         **cleaning_args,
     )
 
-    # --- 1.5) binarize_degenerate (★ 2차 신규, trial args) ---
+    # --- 1.5) binarize_degenerate (trial args) ---
     if _apply:
         xs_train, xs_val, xs_test, _ = binarize_degenerate(
             xs_train, xs_val, xs_test, clean_cols,
@@ -1919,7 +1919,7 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
         **outlier_args,
     )
 
-    # --- 3) IsoForest anomaly score (★ 2차 신규, 옵션) ---
+    # --- 3) IsoForest anomaly score (옵션) ---
     if iso_args.get("iso_enabled", False):
         xs_train, xs_val, xs_test, clean_cols, _ = multivariate_anomaly_score(
             xs_train, xs_val, xs_test, clean_cols,
@@ -1928,7 +1928,7 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
             random_state=SEED,
         )
 
-    # --- 4) hybrid_scale (★ 2차 신규, 고정: skew_threshold=5.0) ---
+    # --- 4) hybrid_scale (고정: skew_threshold=5.0) ---
     xs_train, xs_val, xs_test, scaler = hybrid_scale(
         xs_train, xs_val, xs_test, clean_cols,
         skew_threshold=PP_SCALE_CONFIG["skew_threshold"],
@@ -1945,7 +1945,7 @@ def _run_preprocessing(xs, xs_dict, ys, feat_cols,
         silent=True,
     )
 
-    # --- 7) LDS sample_weight (★ 2차 신규, die-level 확장) ---
+    # --- 7) LDS sample_weight (die-level 확장) ---
     if lds_args.get("lds_enabled", False):
         y_unit_train = ys_train[TARGET_COL].values
         sample_weight, _ = compute_lds_weights(
@@ -1997,8 +1997,8 @@ def _get_or_run_pp(cache, cache_key, xs, xs_dict, ys, feat_cols,
         "pos_data": pos_data,
         "feat_cols": feat_cols_clean,
         "n_feat": len(feat_cols_clean),
-        "sample_weight": sample_weight,   # ★ 2차: die-level train 가중치 or None
-        "scaler": scaler,                 # ★ 2차: HybridScaler (fitted)
+        "sample_weight": sample_weight,   # die-level train 가중치 or None
+        "scaler": scaler,                 # HybridScaler (fitted)
     }
     _lru_put(cache, cache_key, value, max_size)
     return value
@@ -2046,7 +2046,6 @@ def run_e2e_optimization_with_pp(
     trial_callbacks=None,
     warm_start_top_k=0,
     warm_start_enabled=False,
-    # ★ 2차 신규
     clf_models=None,               # list/tuple. None이면 (clf_model,)로 폴백
     reg_models=None,               # list/tuple. None이면 (reg_model,)로 폴백
     calibration=None,              # dict {'method':'isotonic','models':[...]}
@@ -2108,7 +2107,7 @@ def run_e2e_optimization_with_pp(
     clf_prefix = "clf_"
     reg_prefix = "reg_"
 
-    # ★ 2차: multi-model 지원 — list/tuple로 정규화
+    # multi-model 지원 — list/tuple로 정규화
     clf_models_eff = tuple(clf_models) if clf_models else (clf_model,)
     reg_models_eff = tuple(reg_models) if reg_models else (reg_model,)
 
@@ -2143,13 +2142,13 @@ def run_e2e_optimization_with_pp(
         )
         pos_data = pp_value["pos_data"]
         feat_cols_clean = pp_value["feat_cols"]
-        sample_weight = pp_value["sample_weight"]    # ★ 2차: die-level or None
-        scaler = pp_value["scaler"]                   # ★ 2차: HybridScaler (fitted)
+        sample_weight = pp_value["sample_weight"]    # die-level or None
+        scaler = pp_value["scaler"]                   # HybridScaler (fitted)
 
         if len(feat_cols_clean) < 10:
             return float("inf")
 
-        # ── ① CLF OOF (★ 2차: multi-model + Isotonic + soft voting) ──
+        # ── ① CLF OOF (multi-model + Isotonic + soft voting) ──
         if cfg["run_clf"]:
             # 모델별 HP를 prefix 분리로 샘플링
             clf_params_by_model = {}
@@ -2195,7 +2194,7 @@ def run_e2e_optimization_with_pp(
         else:
             selected_cols = unit_feat_cols
 
-        # ── ④ REG OOF (★ 2차: multi-model + sample_weight + A4) ──
+        # ── ④ REG OOF (multi-model + sample_weight + A4) ──
         reg_params_by_model = {}
         for m in reg_models_eff:
             if cfg["reg_optuna"]:
@@ -2258,10 +2257,10 @@ def run_e2e_optimization_with_pp(
         trial.set_user_attr("cleaning_args", cleaning_args)
         trial.set_user_attr("outlier_args", outlier_args)
         trial.set_user_attr("selected_cols", list(selected_cols))
-        # ★ 2차: IsoForest / LDS on/off 기록 (marginal 효과 분석용)
+        # IsoForest / LDS on/off 기록 (marginal 효과 분석용)
         trial.set_user_attr("iso_enabled", bool(iso_args.get("iso_enabled", False)))
         trial.set_user_attr("lds_enabled", bool(lds_args.get("lds_enabled", False)))
-        # ★ 2차: 모델별 단독 OOF RMSE (앙상블 대비 단독 성능 비교용)
+        # 모델별 단독 OOF RMSE (앙상블 대비 단독 성능 비교용)
         trial.set_user_attr(
             "per_model_oof_rmse",
             {m: float(per_model_reg[m]["train_rmse"]) for m in reg_models_eff},
@@ -2280,7 +2279,7 @@ def run_e2e_optimization_with_pp(
                 y_val = unit_data["val"][TARGET_COL].values
             _record_val_diagnostics(trial, y_val, reg_result["val_pred"])
         except Exception as _e:
-            print(f"⚠ val 진단 기록 실패 (objective): {_e}")
+            print(f"val 진단 기록 실패 (objective): {_e}")
 
         # CLF 성능 지표 (참고용)
         if clf_result is not None:
@@ -2288,7 +2287,7 @@ def run_e2e_optimization_with_pp(
                 for k, v in _compute_clf_metrics(clf_result, pos_data, label_col).items():
                     trial.set_user_attr(k, v)
             except Exception as _e:
-                print(f"⚠ CLF 성능 지표 기록 실패: {_e}")
+                print(f"CLF 성능 지표 기록 실패: {_e}")
 
         return oof_rmse_score
 
@@ -2320,7 +2319,7 @@ def run_e2e_optimization_with_pp(
                     )
                     print(f"[Colab] 기존 DB에서 trial 로드 완료: {db_path}")
                 except (KeyError, Exception) as _e:
-                    print(f"⚠ Colab DB 로드 실패 — 새로 시작: {_e}")
+                    print(f"Colab DB 로드 실패 — 새로 시작: {_e}")
         else:
             storage = f"sqlite:///{db_path}"
     else:
@@ -2451,7 +2450,6 @@ def rerun_best_trial_with_pp(
     sample_frac=1.0,
     exclude_cols=None,
     protected_cols=None,
-    # ★ 2차 신규
     clf_models=None,                # list/tuple. None이면 (clf_model,)로 폴백
     reg_models=None,                # list/tuple. None이면 (reg_model,)로 폴백
     calibration=None,               # dict {'method':'isotonic','models':[...]}
@@ -2486,7 +2484,7 @@ def rerun_best_trial_with_pp(
             "rerun_best_trial_with_pp는 input_level='die'만 지원."
         )
 
-    # ★ 2차: multi-model 정규화
+    # multi-model 정규화
     clf_models_eff = tuple(clf_models) if clf_models else (clf_model,)
     reg_models_eff = tuple(reg_models) if reg_models else (reg_model,)
     # multi-model은 kfold 모드에서만 지원 (single은 1개만 허용)
@@ -2530,7 +2528,7 @@ def rerun_best_trial_with_pp(
     print(f"Rerun preprocessing 완료: feat_cols={len(feat_cols_clean)}, "
           f"sample_weight={'die-level len=' + str(len(sample_weight)) if sample_weight is not None else 'None'}")
 
-    # ── ① CLF (★ 2차: kfold에선 multi-model + Isotonic) ──
+    # ── ① CLF (kfold에선 multi-model + Isotonic) ──
     per_model_clf = None    # kfold + multi에서만 채워짐
     if cfg["run_clf"]:
         if mode == "single":
@@ -2598,7 +2596,7 @@ def rerun_best_trial_with_pp(
         selected_cols = unit_feat_cols
         sel_importances = None
 
-    # ── ④ REG (★ 2차: kfold에선 multi-model + sample_weight + A4) ──
+    # ── ④ REG (kfold에선 multi-model + sample_weight + A4) ──
     per_model_reg = None
     # clf_filter_threshold 복원: best_params에 있으면 우선, 없으면 fixed
     clf_filter_threshold = best_params.get(
@@ -2683,7 +2681,7 @@ def rerun_best_trial_with_pp(
     # feature matrix (val/test) 를 slim copy 로 보관. agg 이후 unit_data는
     # [KEY_COL, TARGET_COL] 만 남아 feature 컬럼이 사라지므로 미리 떠 둔다.
     die_data = None
-    # ★ 2차: per-model unit-level val/test RMSE 계산 (die→unit 집계 전에 per_model도 집계)
+    # per-model unit-level val/test RMSE 계산 (die→unit 집계 전에 per_model도 집계)
     per_model_val_rmse = {}
     per_model_test_rmse = {}
     # OOF 저장용으로 unit_data 집계 전 die-level 형태를 보관
@@ -2762,9 +2760,9 @@ def rerun_best_trial_with_pp(
         val_rmse_score = rmse(y_val, reg_result["val_pred"])
         print(f"Rerun Val RMSE: {val_rmse_score:.6f}  (참고용)")
     except Exception as _e:
-        print(f"⚠ rerun val RMSE 출력 실패: {_e}")
+        print(f"rerun val RMSE 출력 실패: {_e}")
 
-    # ── ★ 2차: OOF CSV 7개 저장 (save_per_model_oof=True + kfold + multi) ──
+    # ── OOF CSV 7개 저장 (save_per_model_oof=True + kfold + multi) ──
     oof_files = []
     if save_per_model_oof and mode == "kfold" and per_model_reg is not None:
         print(f"[save_per_model_oof] → {oof_dir}")
@@ -2799,7 +2797,7 @@ def rerun_best_trial_with_pp(
         "outlier_args": outlier_args,
         "agg_funcs": agg_funcs,
         "reg_models": reg_fold_models_flat,   # 앙상블 flat 리스트 (하위호환)
-        # ★ 2차 신규 필드
+        # 신규 필드
         "per_model_fold_models": per_model_fold_models,
         "per_model_clf_fold_models": None,  # TODO: CLF fold_models 보관 원하면 _run_clf_oof 확장 필요
         "per_model_val_rmse": per_model_val_rmse,
@@ -2820,7 +2818,7 @@ def rerun_best_trial_with_pp(
 
 
 # ═════════════════════════════════════════════════════════════
-# OOF CSV 저장 (★ 2차 신규) — 7개 파일 (meta 1 + clf 3 + reg 3)
+# OOF CSV 저장 — 7개 파일 (meta 1 + clf 3 + reg 3)
 # ═════════════════════════════════════════════════════════════
 def _save_per_model_oof(per_model_clf, per_model_reg, clf_result_soft,
                         sample_weight, pos_data, unit_data,
@@ -2937,7 +2935,7 @@ def _save_per_model_oof(per_model_clf, per_model_reg, clf_result_soft,
 
 
 # ═════════════════════════════════════════════════════════════
-# Rerun → Study append (★ 2차 신규) — DB 정공
+# Rerun → Study append — DB 정공
 # ═════════════════════════════════════════════════════════════
 def add_rerun_to_study(study, best_params, rerun_value, user_attrs=None):
     """

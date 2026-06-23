@@ -1,5 +1,5 @@
 """
-EDA 모듈 5: Wafer Map 불량 시각화
+EDA 모듈: Wafer Map 불량 시각화
 노트북에서 import eda_wafer_map as wm 로 사용
 
 run_wf_xy 포맷: "작업번호_웨이퍼번호_X_Y"

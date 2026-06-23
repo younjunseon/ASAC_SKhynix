@@ -1,5 +1,5 @@
 """
-EDA 모듈 4: 이상치 & 스케일 분석 + EDA 요약
+EDA 모듈: 이상치 & 스케일 분석 + EDA 요약
 노트북에서 import eda_outlier_scale as out 로 사용
 """
 import pandas as pd
