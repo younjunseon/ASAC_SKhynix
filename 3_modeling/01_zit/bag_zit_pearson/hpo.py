@@ -3,7 +3,7 @@
 
 zit_only 와 차이: die 예측을 unit 단위로 **sum** 집계, fit에 `unit_id=` 전달(같은 unit의
 4 die에 unit health를 배분하는 bagging). 모델 = BagZITboostRegressor(pearson φ).
-앵커 해제 — wide search space (broad 범위, 앵커 enqueue 없음).
+HP는 넓은 범위에서 탐색한다.
 
 실행 (워커 3개 권장):
   python 3_modeling/01_zit/00_precompute_pp.py                                 # 1회: pp.npy
@@ -37,7 +37,7 @@ from modules.zit import BagZITboostRegressor  # noqa: E402
 OUT_SUBDIR = "01_zit/bag_zit_pearson"
 DEFAULT_EXP_ID = "bag_zit_pearson"
 
-# wide search space (앵커 해제). bag 모델군 broad 범위.
+# bag 모델군 HP를 넓은 범위로 탐색.
 SEARCH = {
     "zeta": {"type": "float", "low": 1.01, "high": 1.30, "log": False},
     "n_em_iters": {"type": "int", "low": 12, "high": 30},

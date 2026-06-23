@@ -3,7 +3,7 @@
 
 병렬 실행: modules.parallel_hpo 하네스(워커 N개가 1 Optuna study + pp.npy mmap 공유).
 objective(ZIT 고유: (1-π)μ → tau_pi 게이트 → die→unit mean)는 zit_objective.make_zit_objective.
-앵커 해제 — wide search space (앵커 enqueue 없음).
+HP는 넓은 범위에서 탐색한다.
 
 실행 (PowerShell). 워커 3개 권장(3 × n_jobs ≤ 물리 스레드):
   python 3_modeling/01_zit/00_precompute_pp.py                                   # 1회: pp.npy 생성(전 트랙 공용)
@@ -38,7 +38,7 @@ from modules.zit import ZITboostRegressor  # noqa: E402
 OUT_SUBDIR = "01_zit/zit_only_pearson"
 DEFAULT_EXP_ID = "zit_only_pearson"
 
-# wide search space (앵커 해제). zit_only 모델군 HP 영역.
+# zit_only 모델군 HP를 넓은 범위로 탐색.
 SEARCH = {
     "zeta": {"type": "float", "low": 1.02, "high": 1.20, "log": False},
     "n_em_iters": {"type": "int", "low": 15, "high": 28},

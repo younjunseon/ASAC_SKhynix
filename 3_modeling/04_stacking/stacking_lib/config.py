@@ -25,7 +25,7 @@ def _default_project_root() -> Path:
 
 
 # 강제 후보로 끼워 넣을 "확실히 강한" base 모델 태그 (있을 때만 make_seed_subsets가 활용).
-# 앵커 해제 + 실험번호 제거로 1차 best 태그가 의미를 잃어 비움 — 필요하면 새 run 결과를 보고
+# 기본은 비워 둔다 — 필요하면 새 run 결과를 보고
 # 의미 폴더명(예: '02_reg_single__et', '03_two_stage__default__clf__lgbm')으로 채운다.
 KNOWN_STRONG_SUBSET: tuple[str, ...] = ()
 
@@ -35,7 +35,7 @@ class StackingConfig:
     # ─── 모델 풀 필터링 ─────────────────────────────────────────────
     oof_rmse_cutoff: float = 0.006
     """후보 모델의 oof_rmse 상한. 이걸 넘는 모델은 base에서 제외.
-    앵커 해제로 4_output을 새로 채우므로(RMSE 미지), 정상 모델을 실수로 거르지 않게 plateau(~0.0057)
+    4_output을 새로 채우는 상황이라 실측 RMSE를 모르므로, 정상 모델을 실수로 거르지 않게 plateau(~0.0057)
     위로 넉넉히 완화한 안전 필터. 깨진 base만 배제하는 용도 — 더 좁히려면 run 후 실측 보고 조정."""
 
     no_clf: bool = False

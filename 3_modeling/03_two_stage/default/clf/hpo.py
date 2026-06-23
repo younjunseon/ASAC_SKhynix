@@ -4,7 +4,7 @@
 modules.parallel_hpo 하네스 + modules.models 분류 팩토리(get_clf_search_space / create_classifier
 / resolve_clf_imbalance). objective는 die-level binary(y>0) 확률을 unit으로 mean 집계 후
 `proba × y_pos_const(E[Y|Y>0])`로 health 스케일 변환 → unit RMSE. (combine 단계에서 reg와 결합)
-앵커 해제 — wide search space는 models.CLF_SEARCH_SPACES(앵커 enqueue 없음).
+탐색 공간은 models.CLF_SEARCH_SPACES의 넓은 범위를 그대로 쓴다.
 
 실행 (워커 3개 권장):
   python 3_modeling/01_zit/00_precompute_pp.py                                       # 1회: pp.npy

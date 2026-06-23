@@ -3,9 +3,9 @@
 
 bag_zit_pearson 의 쌍둥이 — 모델 클래스만 BagZITEQLRegressor(EQL φ M-step: Tweedie unit
 deviance target)로 교체. 구조(병렬 하네스·objective·sum 집계·unit_id fit)는 동일.
-앵커 해제 — wide search space (broad 범위 단일화, 앵커 없음).
+HP는 넓은 범위에서 탐색한다.
 
-fit은 **단일 best**로 단순화한다 (구 param1~4.json 4-세트 앙상블은 앵커 해제와 모순 → 폐기).
+fit은 **단일 best** 하나만 쓴다.
 
 실행 (워커 3개 권장):
   python 3_modeling/01_zit/00_precompute_pp.py                              # 1회: pp.npy
@@ -39,7 +39,7 @@ from modules.zit import BagZITEQLRegressor  # noqa: E402
 OUT_SUBDIR = "01_zit/bag_zit_eql"
 DEFAULT_EXP_ID = "bag_zit_eql"
 
-# wide search space (앵커 해제). bag 모델군 broad 범위.
+# bag 모델군 HP를 넓은 범위로 탐색.
 SEARCH = {
     "zeta": {"type": "float", "low": 1.01, "high": 1.30, "log": False},
     "n_em_iters": {"type": "int", "low": 12, "high": 30},

@@ -159,7 +159,7 @@ EMT(EMTboost)는 4조합에 넣지 않고 **`0_baseline`에만 남긴다** (베�
 - **§4d `zit_gu` 제거**: `ZITGuInline` 인라인 클래스(`zit_Gu.py` 의존)는 사용자가 모듈을 수동 제거 → 셀(markdown+class+fit) 삭제. EMT 섹션이 그 자리(셀 id `emt4e_md`/`emt4e_fit`)를 대체.
 - **결과**: `results.csv` = 회귀 5 + 투스테이지 25 + ZIT 17(4 base + 백엔드 믹스 12 + **EMTboost 1**) = **47행**. §4a(트리 15 refit)·§4b(ZIT 4종)·§4c(믹스 12종) 기능 **그대로 유지**.
 
-### 2.6 zit fit 공유 머신러리 모듈화 — `zit_fit_lib.py` (완료, 사용자 요청 2026-06-18)
+### 2.6 zit fit 공유 처리 로직 모듈화 — `zit_fit_lib.py` (완료, 사용자 요청 2026-06-18)
 
 4개 fit.ipynb가 **byte-identical로 복제**하던 calibration/serialization 1차 함수(isotonic+tail grid 등, cell8 344줄 + cell9 helper)를 `01_zit/zit_fit_lib.py` 한 곳으로 추출.
 

@@ -14,7 +14,7 @@ modules/parallel_hpo.py — 전 트랙(zit / reg / ts) 공용 병렬 HPO 하네�
 - N개 독립 프로세스가 하나의 Optuna SQLite study(RDBStorage)를 공유하고, pp.npy를
   mmap(read-only)으로 RAM 공유한다. (00_precompute_pp.py가 1회 생성)
 - 워커는 Optuna DB 기록만. refit·후처리·산출물 저장은 fit.ipynb에서 별도(modules.hpo).
-- **앵커 enqueue 없음** (앵커 해제 원칙, §0-2). `--enqueue-anchor`/`*_ANCHOR`는 폐기.
+- 모든 워커가 넓은 탐색 공간을 **처음부터** 탐색한다.
 
 사용 패턴 (각 트랙 hpo.py)
 -------------------------
@@ -89,7 +89,6 @@ def add_common_args(
     """모든 트랙 hpo.py가 공유하는 16개 워커 인자를 parser에 추가.
 
     트랙 고유 인자(--model, --variant 등)는 호출 측에서 별도로 add_argument 한다.
-    구 워커의 --enqueue-anchor 는 앵커 해제 원칙에 따라 제외했다.
     """
     parser.add_argument("--exp-id", default=default_exp_id)
     parser.add_argument("--user", default=default_user)
@@ -123,13 +122,13 @@ def add_common_args(
 
 
 # ------------------------------------------------------------
-# 2) 공용 Optuna study (RDBStorage 공유, 앵커 없음)
+# 2) 공용 Optuna study (RDBStorage 공유)
 # ------------------------------------------------------------
 def make_study(args, db_path, study_meta: dict | None = None) -> optuna.Study:
     """N개 워커가 공유하는 SQLite Optuna study 생성/로드.
 
     TPE(multivariate, group) + MedianPruner. `--no-resume` 아니면 load_if_exists.
-    앵커 enqueue는 하지 않는다(앵커 해제). study_meta는 user_attrs로 저장(재현 메타).
+    study_meta는 user_attrs로 저장(재현 메타).
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)

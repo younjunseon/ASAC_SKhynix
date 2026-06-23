@@ -1,7 +1,7 @@
-"""Build a compact EM-history verification report from saved ZIT fold pickles.
+"""저장된 ZIT fold 피클에서 EM 이력 검증 리포트를 간단히 만든다.
 
-This script does not rerun training. It reads existing fold_models.pkl files,
-extracts em_history_per_fold, and writes a small sanity-check report.
+이 스크립트는 학습을 다시 돌리지 않는다. 기존 fold_models.pkl을 읽어
+em_history_per_fold를 추출하고, 작은 sanity-check 리포트를 쓴다.
 """
 
 from __future__ import annotations

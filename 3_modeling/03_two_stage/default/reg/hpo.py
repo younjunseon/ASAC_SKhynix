@@ -5,7 +5,7 @@
 E[Y|Y>0,x] 예측"). 폴더 격리 우선 원칙(refactor_strategy.md §4)에 따라 objective는 이 파일에
 명시적으로 둔다(02_reg와 중복 허용). fit_mask만 `tr_mask & (y_die>0)`로 좁히고, 예측·집계·RMSE는
 전체 unit 기준(02_reg와 동일) — combine 단계에서 clf와 곱해 최종 Two-Stage 예측을 만든다.
-앵커 해제 — wide search space는 models.SEARCH_SPACES.
+탐색 공간은 models.SEARCH_SPACES의 넓은 범위를 그대로 쓴다.
 
 실행 (워커 3개 권장):
   python 3_modeling/01_zit/00_precompute_pp.py                                       # 1회: pp.npy

@@ -4,7 +4,7 @@
 modules.parallel_hpo 하네스(워커 N개가 1 study + pp.npy mmap 공유) + modules.models 팩토리
 (get_search_space / create_regressor). objective(fit/predict → die→unit mean → unit RMSE,
 enet은 fold-local RobustScaler)는 이 파일에 명시적으로 둔다 (refactor_strategy.md §1.1).
-앵커 해제 — wide search space는 models.SEARCH_SPACES(앵커 enqueue 없음).
+탐색 공간은 models.SEARCH_SPACES의 넓은 범위를 그대로 쓴다.
 
 실행 (PowerShell). 워커 3개 권장(3 × n_jobs ≤ 물리 스레드):
   python 3_modeling/01_zit/00_precompute_pp.py                              # 1회: pp.npy(전 트랙 공용)

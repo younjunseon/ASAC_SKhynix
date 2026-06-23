@@ -1,4 +1,4 @@
-"""zit_fit_lib — zit fit 4조합(zit_only/bag × pearson/eql) 공유 calibration 머신러리.
+"""zit_fit_lib — zit fit 4조합(zit_only/bag × pearson/eql) 공유 calibration 처리 로직.
 
 4개 fit.ipynb가 byte-identical로 복제하던 후처리/보정/직렬화 1차 함수들을 한 곳으로 모은다.
 실험 드라이버(fit_one_seed / save_result_artifacts / make_folds / params_for_seed)는 데이터·메타와

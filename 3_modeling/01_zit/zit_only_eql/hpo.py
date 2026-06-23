@@ -3,8 +3,7 @@
 
 zit_only_pearson/hpo.py 의 쌍둥이 — 모델 클래스만 ZITboostEQLRegressor(EQL φ M-step:
 Tweedie unit deviance target)로 교체. 구조(병렬 하네스·objective·집계 mean)는 동일.
-**eql 전용 튜너 신설**: 과거엔 pearson study best_params를 그대로 받아 seed-sweep만 했으나,
-앵커 해제 후 독립 study로 eql 고유 best HP를 탐색한다.
+**eql 전용 튜너**: 독립 study로 eql 고유 best HP를 넓은 범위에서 탐색한다.
 
 실행 (워커 3개 권장):
   python 3_modeling/01_zit/00_precompute_pp.py                                # 1회: pp.npy
@@ -38,7 +37,7 @@ from modules.zit import ZITboostEQLRegressor  # noqa: E402
 OUT_SUBDIR = "01_zit/zit_only_eql"
 DEFAULT_EXP_ID = "zit_only_eql"
 
-# wide search space (앵커 해제). zit_only 모델군 HP 영역(pearson과 동일 기준 — eql 독립 탐색).
+# zit_only 모델군 HP를 넓은 범위로 탐색 (pearson과 동일 기준, eql 독립 탐색).
 SEARCH = {
     "zeta": {"type": "float", "low": 1.02, "high": 1.20, "log": False},
     "n_em_iters": {"type": "int", "low": 15, "high": 28},
