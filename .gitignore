@@ -60,6 +60,11 @@ code.zip
 1_eda/01_raw_eda/*
 !1_eda/01_raw_eda/eda.ipynb
 
+# 전처리 후 EDA — 본 노트북만
+!1_eda/02_processed_eda/
+1_eda/02_processed_eda/*
+!1_eda/02_processed_eda/eda_after.ipynb
+
 # 웨이퍼맵 시각화 툴킷 — 소스 .py + median_auto_robust 갤러리
 !1_eda/wafer_map/
 1_eda/wafer_map/*
