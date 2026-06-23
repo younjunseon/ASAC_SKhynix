@@ -4,7 +4,7 @@
 
 예측값 CSV, 학습된 모델(`fold_models.pkl`), 하이퍼파라미터(`best_params.json`),
 Optuna DB 같은 실제 파일은 용량이 커서 저장소에는 올리지 않는다(`.gitignore` 처리).
-이 문서에는 폴더 구성과 대략적인 성능만 적어 둔다. 파일 자체가 필요하면
+이 문서에는 폴더 구성만 적어 둔다. 파일 자체가 필요하면
 `4_output.zip`(Google Drive ID `1ts73qEMmjX8cKIb-QeDQ-TMeyudFGWzs`)을 받아서 풀면 된다.
 
 ## 폴더 구성
@@ -21,21 +21,6 @@ Optuna DB 같은 실제 파일은 용량이 커서 저장소에는 올리지 않
 
 각 트랙 폴더에는 보통 `best_params.json`, `fold_models.pkl`, 예측 CSV(die/unit),
 요약 JSON이 들어간다. `0_baseline/summary/`에는 요약 차트 PNG(tornado 등)가 있다.
-
-## 성능 요약 (unit RMSE)
-
-각 트랙 `best/`에 남아 있는 요약값이다. 전체 trial·fold 기록은 위 zip 안에 있다.
-
-| 트랙 | 모델 | val | test |
-|------|------|------|------|
-| 01_zit | zit_only_pearson | 0.005986 | 0.005346 |
-| 01_zit | bag_zit_pearson | 0.006093 | 0.005293 |
-| 01_zit | zit_only_eql | 0.006138 | 0.005334 |
-| 01_zit | bag_zit_eql | 0.006168 | 0.005475 |
-| 04_stacking | best blend | 0.006906 (oof) | - |
-
-val 기준으로는 `zit_only_pearson`, test 기준으로는 `bag_zit_pearson`이 가장 낮다.
-`02_reg_single`·`03_two_stage`는 JSON에 RMSE가 따로 안 남아 있어 여기엔 적지 않았다(zip 안 예측 CSV로 확인).
 
 ## 다시 돌리기
 
