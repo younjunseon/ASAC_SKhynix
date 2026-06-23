@@ -1,3 +1,4 @@
+# LEGACY: 0_baseline 전용 frozen 모듈 (구 modules 복사본). 신규 모델링 코드는 3_modeling/modules/ 사용.
 """
 모델 팩토리 + 공통 fit 래퍼
 
@@ -9,7 +10,7 @@
 - enet: ElasticNet                                       (reg 전용)
 
 사용법:
-    from modules.model_zoo import create_model, fit_model, get_default_params
+    from _modules.model_zoo import create_model, fit_model, get_default_params
 
     model = create_model("lgbm", "clf", params)
     fit_model(model, X_tr, y_tr, X_val, y_val, early_stop=50, sample_weight=w)

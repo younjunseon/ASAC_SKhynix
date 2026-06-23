@@ -1,3 +1,4 @@
+# LEGACY: 0_baseline 전용 frozen 모듈 (구 modules 복사본). 신규 모델링 코드는 3_modeling/modules/ 사용.
 """
 End-to-End HPO — 가변적 파이프라인 + 단일 Optuna objective
 

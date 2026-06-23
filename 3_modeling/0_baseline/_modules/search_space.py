@@ -1,3 +1,4 @@
+# LEGACY: 0_baseline 전용 frozen 모듈 (구 modules 복사본). 신규 모델링 코드는 3_modeling/modules/ 사용.
 """
 Optuna Search Space 정의 — 모델별 하이퍼파라미터 + 전처리 탐색 공간
 

@@ -1,3 +1,4 @@
+# LEGACY: 0_baseline 전용 frozen 모듈 (구 modules 복사본). 신규 모델링 코드는 3_modeling/modules/ 사용.
 """
 경량 Feature Selection — E2E HPO trial 내부용
 
