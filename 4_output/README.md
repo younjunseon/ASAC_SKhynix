@@ -1,68 +1,43 @@
-# 4_output/ — 모델링 산출물
+# 4_output
 
-모델링 트랙(`3_modeling/`)이 생성하는 예측·모델·실험 기록 저장소.
+모델링 트랙(`3_modeling/`)을 돌리면 결과가 여기 저장된다.
 
-> ⚠️ **대용량 실물은 git에 올리지 않는다.** 예측 CSV·`fold_models.pkl`·`optuna_*.db`·
-> `best_params.json` 등은 `.gitignore`로 제외되며, **이 README만 추적**한다.
-> 실물 결과는 아카이브에서 참고한다 → `4_output.zip` (Google Drive ID `1ts73qEMmjX8cKIb-QeDQ-TMeyudFGWzs`, ~2.5GB, RESUME/재현용).
+예측값 CSV, 학습된 모델(`fold_models.pkl`), 하이퍼파라미터(`best_params.json`),
+Optuna DB 같은 실제 파일은 용량이 커서 저장소에는 올리지 않는다(`.gitignore` 처리).
+이 문서에는 폴더 구성과 대략적인 성능만 적어 둔다. 파일 자체가 필요하면
+`4_output.zip`(Google Drive ID `1ts73qEMmjX8cKIb-QeDQ-TMeyudFGWzs`)을 받아서 풀면 된다.
 
-## 폴더 구조
+## 폴더 구성
 
 ```
 4_output/
-├── 01_zit/                     # ZITboost 4조합 (ZI-Tweedie + LightGBM, EM)
-│   ├── zit_only_pearson/best/  # φ=Pearson 잔차 추정
-│   ├── zit_only_eql/best/      # φ=extended quasi-likelihood (논문충실)
-│   ├── bag_zit_pearson/best/   # + unit bag 제약
-│   └── bag_zit_eql/best/
-│       └── best_params.json · summary_record.json · (die/unit CSV·pkl)
-├── 02_reg_single/              # 단일 회귀 5종
-│   ├── lgbm/ · xgb/ · catboost/ · et/ · enet/
-│   │   └── best_params.json · fold_models.pkl
-├── 03_two_stage/               # Two-Stage (분류 → 회귀)
-│   ├── default/{clf, reg, combined}/
-│   └── reverse/                # 회귀→집계 경로
-│       └── best_params.json · fold_models.pkl
-├── 04_stacking/                # 메타 스태킹 (die-level, GroupKFold)
-│   └── run_0620_185039/
-│       └── summary.json · best_weights.json
-├── 0_baseline/                 # 초기 스크리닝 (LEGACY)
-│   ├── oat/        # one-at-a-time 전처리 비교 (checkpoint.json · meta.json)
-│   ├── group/      # 그룹 스터디 (meta.json)
-│   ├── default_compare/
-│   └── summary/    # tornado.png · group_importance.png · summary_report.png
-└── experiments/experiments.csv # 실험 요약 테이블 (현재 비어 있음)
+├── 01_zit/          ZITboost 4조합 (zit_only / bag × pearson / eql)
+├── 02_reg_single/   단일 회귀 5종 (lgbm, xgb, catboost, et, enet)
+├── 03_two_stage/    Two-Stage (default: clf + reg + combined / reverse)
+├── 04_stacking/     메타 스태킹 (die-level, GroupKFold)
+├── 0_baseline/      초기 스크리닝 (oat, group, default_compare, summary)
+└── experiments/     실험 요약 CSV (지금은 비어 있음)
 ```
 
-## 산출물 종류 (모두 `.gitignore` 제외 — 아카이브 참조)
+각 트랙 폴더에는 보통 `best_params.json`, `fold_models.pkl`, 예측 CSV(die/unit),
+요약 JSON이 들어간다. `0_baseline/summary/`에는 요약 차트 PNG(tornado 등)가 있다.
 
-| 파일 | 내용 |
-|------|------|
-| `*_die.csv` / `*_unit.csv` | die-level / unit-level 예측 (OOF·val·test) |
-| `fold_models.pkl` | fold별 학습 모델 (refit 결과) |
-| `best_params.json` | best 하이퍼파라미터 + val/test RMSE |
-| `summary_record.json` / `summary.json` | 트랙 요약 (지표·설정) |
-| `optuna_*.db` | Optuna trial 상세 (SQLite, RESUME 가능) |
-| `*.png` | 0_baseline 요약 차트 |
+## 성능 요약 (unit RMSE)
 
-## 결과 요약 (unit-level RMSE — 대회 지표)
+각 트랙 `best/`에 남아 있는 요약값이다. 전체 trial·fold 기록은 위 zip 안에 있다.
 
-각 트랙 `best/`의 `summary_record.json` / `summary.json` 스냅샷 기준. 전체 trial·fold 상세는 아카이브 참조.
-
-| 트랙 | 모델 | val RMSE | test RMSE |
-|------|------|---------:|----------:|
-| 01_zit | zit_only_pearson | **0.005986** | 0.005346 |
-| 01_zit | bag_zit_pearson | 0.006093 | **0.005293** |
+| 트랙 | 모델 | val | test |
+|------|------|------|------|
+| 01_zit | zit_only_pearson | 0.005986 | 0.005346 |
+| 01_zit | bag_zit_pearson | 0.006093 | 0.005293 |
 | 01_zit | zit_only_eql | 0.006138 | 0.005334 |
 | 01_zit | bag_zit_eql | 0.006168 | 0.005475 |
-| 04_stacking | best blend | oof 0.006906 | — |
-| 02_reg_single | lgbm/xgb/cat/et/enet | (아카이브 참조) | (아카이브 참조) |
-| 03_two_stage | default · reverse | (아카이브 참조) | (아카이브 참조) |
+| 04_stacking | best blend | 0.006906 (oof) | - |
 
-- 최저 **val** = `zit_only_pearson` (0.005986), 최저 **test** = `bag_zit_pearson` (0.005293)
-- ZITboost(01_zit) 계열이 현재 단일 트랙 최고 성능. 스태킹은 die-level OOF 기준이라 직접 비교 시 집계 단계 차이 유의.
+val 기준으로는 `zit_only_pearson`, test 기준으로는 `bag_zit_pearson`이 가장 낮다.
+`02_reg_single`·`03_two_stage`는 JSON에 RMSE가 따로 안 남아 있어 여기엔 적지 않았다(zip 안 예측 CSV로 확인).
 
-## 재생성 / 재현
+## 다시 돌리기
 
-- 트랙별 `hpo.py` / `fit.ipynb` 실행 (`3_modeling/<track>/`). 첫 셀 `RESUME` 플래그로 기존 `optuna_*.db`에 이어서 가능.
-- 아카이브에서 복원: `4_output.zip` 압축 해제 → `4_output/`. (Colab은 `RESUME=True` 시 자동 다운로드)
+트랙별 `hpo.py`나 `fit.ipynb`를 실행하면 된다. 첫 셀의 `RESUME`를 켜면
+기존 `optuna_*.db`에 이어서 돌고, zip을 미리 풀어 두면 그 상태에서 이어진다.
